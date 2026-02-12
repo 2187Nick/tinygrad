@@ -737,24 +737,27 @@ jobs:
           from tinygrad import Tensor, Device
           import numpy as np
           print('Device:', Device.DEFAULT)
-          # Simple cat test
-          a = Tensor.ones(4,3)
-          b = Tensor.full((4,3), 2.0)
-          c = a.cat(b, dim=0)
-          result = c.numpy()
-          print('cat result shape:', result.shape)
-          print('cat result:')
-          print(result)
-          expected = np.concatenate([np.ones((4,3)), np.full((4,3), 2.0)], axis=0)
-          if np.allclose(result, expected):
-            print('PASS: simple cat works')
-          else:
-            print('FAIL: simple cat broken')
-            print('expected:', expected)
-            print('diff:', result - expected)
+          # Reproduce test_multicat: (45,65) * 3 cat on dim=2
+          np.random.seed(42)
+          a_np = np.random.randn(45,65).astype(np.float32)
+          b_np = np.random.randn(45,65).astype(np.float32)
+          c_np = np.random.randn(45,65).astype(np.float32)
+          a = Tensor(a_np)
+          b = Tensor(b_np)
+          c = Tensor(c_np)
+          result = a.cat(b, c, dim=1).numpy()
+          expected = np.concatenate([a_np, b_np, c_np], axis=1)
+          print('result shape:', result.shape)
+          # Check each row
+          for r in range(min(10, result.shape[0])):
+            match = np.allclose(result[r], expected[r], atol=1e-6, rtol=1e-3)
+            nonzero = np.count_nonzero(result[r])
+            print(f'  row {r}: match={match} nonzero={nonzero}/{result.shape[1]}')
+          total_match = np.sum(np.isclose(result, expected, atol=1e-6, rtol=1e-3))
+          print(f'Total match: {total_match}/{result.size} ({100*total_match/result.size:.1f}%)')
           "
       - name: Run pytest (amd rdna4)
-        run: python -m pytest -x test/backend/test_ops.py -k "test_add or test_mul or test_sub or test_multicat" --tb=short --durations=20
+        run: DEBUG=2 python -m pytest -x test/backend/test_ops.py -k "test_multicat" --tb=long --durations=20 -s 2>&1 | head -200
       - name: Run pytest (amd rdna4 full)
         run: python -m pytest -n=auto test/backend/test_ops.py test/backend/test_dtype.py test/backend/test_dtype_alu.py test/backend/test_linearizer.py test/backend/test_randomness.py test/backend/test_jit.py test/backend/test_graph.py test/backend/test_multitensor.py test/device/test_hcq.py test/testextra/test_cfg_viz.py --durations=20
       - name: Run pytest (amd rdna4 am)
