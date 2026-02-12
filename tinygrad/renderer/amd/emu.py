@@ -612,6 +612,21 @@ def _compile_sop(inst: ir3.SOP1 | ir3.SOP2 | ir3.SOPC | ir3.SOPK | ir4.SOP1 | ir
     simm16_sext = simm16.cast(dtypes.int16).cast(dtypes.int32)
     srcs = {'S0': ctx.rsgpr_dyn(sdst_off), 'SIMM16': simm16_sext, 'D0': ctx.rsgpr_dyn(sdst_off)}
     dst_off, dst_size = sdst_off, 1
+
+    # S_GETREG_B32: read hardware registers (HW_REGISTERS[hwRegId] not supported in pcode parser)
+    op_name = inst.op.name if hasattr(inst.op, 'name') else str(inst.op)
+    if 'S_GETREG_B32' in op_name:
+      # simm16 encoding: [5:0]=hwRegId, [10:6]=offset, [15:11]=size-1
+      hw_reg_id = simm16 & _c(0x3F)
+      bit_offset = (simm16 >> _c(6)) & _c(0x1F)
+      bit_size = ((simm16 >> _c(11)) & _c(0x1F)) + _c(1)
+      # Map HW register IDs: 61=WORKGROUP_ID_X (ttmp9), 62=Y (ttmp10), 63=Z (ttmp11); others return 0
+      val = _c(0).cast(dtypes.uint32)
+      val = (hw_reg_id == _c(61)).where(ctx.rsgpr_dyn(_c(ttmp[9].offset)), val)
+      val = (hw_reg_id == _c(62)).where(ctx.rsgpr_dyn(_c(ttmp[10].offset)), val)
+      val = (hw_reg_id == _c(63)).where(ctx.rsgpr_dyn(_c(ttmp[11].offset)), val)
+      result = (val >> bit_offset) & ((_c(1) << bit_size) - _c(1))
+      return UOp.sink(ctx.wsgpr_dyn(sdst_off, result.cast(dtypes.uint32)))
   elif isinstance(inst, (ir3.SOP1, ir4.SOP1)):
     sdst_off = ctx.inst_field(type(inst).sdst)
     ssrc0_off = ctx.inst_field(type(inst).ssrc0)
@@ -1288,6 +1303,12 @@ def run_asm(lib: int, lib_sz: int, gx: int, gy: int, gz: int, lx: int, ly: int, 
               tid = wave_start + lane
               st._write_vgpr(0, lane, ((tid // (lx * ly)) << 20) | (((tid // lx) % ly) << 10) | (tid % lx))
             st._write_sgpr(SCRATCH_STRIDE_IDX, scratch_size)
+
+            # Debug: dump SGPRs for first wave of workgroup (0,1,0) to diagnose gidy issue
+            if DEBUG >= 2 and gidx == 0 and gidy == 1 and wave_start == 0:
+              print(f"[emu] WG({gidx},{gidy},{gidz}) SGPRs: s0={st._read_sgpr(0):#x} s1={st._read_sgpr(1):#x} "
+                    f"s2={st._read_sgpr(2):#x} s3={st._read_sgpr(3):#x} s4={st._read_sgpr(4):#x} "
+                    f"v0[0]={st._read_vgpr(0,0):#x} v0[1]={st._read_vgpr(0,1):#x}")
 
             # Pass buffer addresses via ctypes (pre-create to avoid allocation in loop)
             c_bufs = [ctypes.c_uint64(st.sgpr_buf._buf.va_addr), ctypes.c_uint64(st.vgpr_buf._buf.va_addr),
