@@ -106,8 +106,8 @@ class PM4Executor(AMDQueue):
     return (self.rptr[0] - prev_rptr) + executed_in_ib
 
   def _exec_acquire_mem(self, n):
-    assert n == 6
-    for _ in range(7): self._next_dword() # TODO: implement
+    assert n in (5, 6), f"unexpected ACQUIRE_MEM size n={n}"
+    for _ in range(n + 1): self._next_dword() # TODO: implement
 
   def _exec_release_mem(self, n):
     assert n == 6
