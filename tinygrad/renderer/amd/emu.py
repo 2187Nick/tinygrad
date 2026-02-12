@@ -595,7 +595,7 @@ def _compile_sop(inst: ir3.SOP1 | ir3.SOP2 | ir3.SOPC | ir3.SOPK | ir4.SOP1 | ir
   bits = inst.canonical_op_bits
   literal = ctx.inst_field(type(inst).literal) if hasattr(type(inst), 'literal') else None  # type: ignore[union-attr]
 
-  if isinstance(inst, (ir3.SOPK, ir4.SOPK)):
+  if isinstance(inst, (ir3.SOPK, ir4.SOPK, ic.SOPK)):
     sdst_off = ctx.inst_field(type(inst).sdst)
     simm16 = ctx.inst_field(type(inst).simm16)
     # Sign-extend simm16
@@ -617,12 +617,12 @@ def _compile_sop(inst: ir3.SOP1 | ir3.SOP2 | ir3.SOPC | ir3.SOPK | ir4.SOP1 | ir
       val = (hw_reg_id == _c(63)).where(ctx.rsgpr_dyn(_c(ttmp[11].offset)), val)
       result = (val >> bit_offset) & ((_c(1) << bit_size) - _c(1))
       return UOp.sink(ctx.wsgpr_dyn(sdst_off, result.cast(dtypes.uint32)))
-  elif isinstance(inst, (ir3.SOP1, ir4.SOP1)):
+  elif isinstance(inst, (ir3.SOP1, ir4.SOP1, ic.SOP1)):
     sdst_off = ctx.inst_field(type(inst).sdst)
     ssrc0_off = ctx.inst_field(type(inst).ssrc0)
     srcs = {'S0': ctx.rsrc_dyn(ssrc0_off, None, bits['s0'], literal)}
     dst_off, dst_size = sdst_off, bits['d'] // 32
-  elif isinstance(inst, (ir3.SOP2, ir4.SOP2)):
+  elif isinstance(inst, (ir3.SOP2, ir4.SOP2, ic.SOP2)):
     sdst_off = ctx.inst_field(type(inst).sdst)
     ssrc0_off = ctx.inst_field(type(inst).ssrc0)
     ssrc1_off = ctx.inst_field(type(inst).ssrc1)
@@ -630,7 +630,7 @@ def _compile_sop(inst: ir3.SOP1 | ir3.SOP2 | ir3.SOPC | ir3.SOPK | ir4.SOP1 | ir
             'S1': ctx.rsrc_dyn(ssrc1_off, None, bits['s1'], literal)}
     if literal is not None: srcs['SIMM32'] = literal
     dst_off, dst_size = sdst_off, bits['d'] // 32
-  elif isinstance(inst, (ir3.SOPC, ir4.SOPC)):
+  elif isinstance(inst, (ir3.SOPC, ir4.SOPC, ic.SOPC)):
     ssrc0_off = ctx.inst_field(type(inst).ssrc0)
     ssrc1_off = ctx.inst_field(type(inst).ssrc1)
     srcs = {'S0': ctx.rsrc_dyn(ssrc0_off, None, bits['s0'], literal),
@@ -650,7 +650,7 @@ def _compile_vop12(inst: ir3.VOP1 | ir3.VOP1_SDST | ir3.VOP2 | ir4.VOP1 | ir4.VO
   write_hi_half = bits['d'] == 16 and (vdst_reg >= _c(128))
   if isinstance(write_hi_half, UOp): vdst_reg = write_hi_half.where(vdst_reg - _c(128), vdst_reg)
   elif write_hi_half: vdst_reg -= 128
-  if isinstance(inst, (ir3.VOP1, ir4.VOP1)):
+  if isinstance(inst, (ir3.VOP1, ir4.VOP1, ic.VOP1)):
     # Handle VOP1 hi-half source operand (src0 >= v[128] for 16-bit ops)
     src0_off = ctx.inst_field(type(inst).src0)
     s0 = ctx.rsrc_dyn(src0_off, lane, bits['s0'], literal)
@@ -675,9 +675,9 @@ def _compile_vop12(inst: ir3.VOP1 | ir3.VOP1_SDST | ir3.VOP2 | ir4.VOP1 | ir4.VO
       src0_reg = src0_hi.where(src0_off - _c(384), _c(0))
       s0 = src0_hi.where(_hi16(ctx.rvgpr_dyn(src0_reg, lane)), s0)
     srcs = {'S0': s0, 'S1': s1, 'D0': d0}
-    if inst.op in (ir3.VOP2Op.V_FMAAK_F32_E32, ir3.VOP2Op.V_FMAMK_F32_E32, ir3.VOP2Op.V_FMAAK_F16_E32,
-                   ir3.VOP2Op.V_FMAMK_F16_E32):
-      assert literal is not None
+    op_name_v = inst.op.name if hasattr(inst.op, 'name') else ''
+    if 'FMAAK' in op_name_v or 'FMAMK' in op_name_v:
+      assert literal is not None, f"V_FMA*K instruction {op_name_v} requires literal"
       srcs['SIMM32'] = literal
   return ctx.compile_vop_pcode(inst.op, srcs, lane, vdst_reg, exec_mask, opsel_dst_hi=write_hi_half)
 
@@ -951,8 +951,8 @@ def _compile_mem_op(inst: ir3.DS | ir3.FLAT | ir3.GLOBAL | ir3.SCRATCH | ir4.DS 
   exec_mask, op_name = ctx.rsgpr_dyn(_c(EXEC_LO.offset)), _op_name(inst)
   pcode = get_pcode(inst.op)
 
-  is_lds = isinstance(inst, (ir3.DS, ir4.DS))
-  is_scratch = isinstance(inst, (ir3.SCRATCH, ir4.VSCRATCH))
+  is_lds = isinstance(inst, (ir3.DS, ir4.DS, ic.DS))
+  is_scratch = isinstance(inst, (ir3.SCRATCH, ir4.VSCRATCH, ic.SCRATCH))
   mem = ctx.lds if is_lds else ctx.scratch if is_scratch else ctx.vmem
   addr_shift = UOp.const(dtypes.uint32 if is_lds else dtypes.uint64, 2)
 
