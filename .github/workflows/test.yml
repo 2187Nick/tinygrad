@@ -727,6 +727,11 @@ jobs:
           key: amd-rdna4-mock
           deps: testing_unit
           amd: 'true'
+      - name: Upgrade comgr for gfx1200 support
+        run: |
+          echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/rocm.gpg] https://repo.radeon.com/rocm/apt/7.2 jammy main" | sudo tee /etc/apt/sources.list.d/rocm.list
+          sudo apt-get -qq update
+          sudo apt-get -y --allow-unauthenticated install comgr
       - name: Check Device.DEFAULT
         run: |
           python3 -c "from tinygrad import Device; assert Device.DEFAULT in ['AMD'], Device.DEFAULT"
