@@ -1304,14 +1304,19 @@ def run_asm(lib: int, lib_sz: int, gx: int, gy: int, gz: int, lx: int, ly: int, 
             c_bufs = [ctypes.c_uint64(st.sgpr_buf._buf.va_addr), ctypes.c_uint64(st.vgpr_buf._buf.va_addr),
                       ctypes.c_uint64(vmem_buf._buf.va_addr), ctypes.c_uint64(lds_buf._buf.va_addr),
                       ctypes.c_uint64(scratch_buf._buf.va_addr if scratch_buf else 0)]
+            _trace_wg = DEBUG >= 2 and gidx == 0 and gidy == 1 and wave_start == 0
             for inst_count in range(1_000_000):
               if (pc := st.pc) == 0xFFFFFFFFFFFFFFFF or pc not in program: break
               name, fxn, globals_list, _ = program[pc]
               assert fxn is not None, f"[emu] No fxn for {name} at PC={pc}"
               assert 4 not in globals_list or scratch_buf, f"SCRATCH instruction {name} but scratch_size=0"
-              if DEBUG >= 6:
+              if DEBUG >= 6 or (_trace_wg and inst_count < 30):
                 inst = decode_inst(bytes((ctypes.c_char * 12).from_address(pc).raw), arch)
                 print(f"[emu] exec PC={pc:X}: {inst!r}")
               fxn(*[c_bufs[g] for g in globals_list])
             else: raise RuntimeError("exceeded 1M instructions, likely infinite loop")
+            if _trace_wg:
+              print(f"[emu] WG(0,1,0) after exec: inst_count={inst_count} "
+                    f"s2={st._read_sgpr(2):#x} s3={st._read_sgpr(3):#x} "
+                    f"v0={st._read_vgpr(0,0):#x} v1={st._read_vgpr(1,0):#x} v2={st._read_vgpr(2,0):#x} v3={st._read_vgpr(3,0):#x}")
   return 0
