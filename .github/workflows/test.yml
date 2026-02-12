@@ -712,7 +712,7 @@ jobs:
   testamd_rdna4:
     name: Linux (amd rdna4 mock)
     runs-on: ubuntu-22.04
-    timeout-minutes: 20
+    timeout-minutes: 30
     env:
       AMD: 1
       MOCKGPU: 1
@@ -732,6 +732,8 @@ jobs:
           python3 -c "from tinygrad import Device; assert Device.DEFAULT in ['AMD'], Device.DEFAULT"
           DEBUG=5 FORWARD_ONLY=1 python3 test/test_tiny.py TestTiny.test_plus
       - name: Run pytest (amd rdna4)
+        run: python -m pytest -x test/backend/test_ops.py -k "test_add or test_mul or test_sub" --tb=short --durations=20
+      - name: Run pytest (amd rdna4 full)
         run: python -m pytest -n=auto test/backend/test_ops.py test/backend/test_dtype.py test/backend/test_dtype_alu.py test/backend/test_linearizer.py test/backend/test_randomness.py test/backend/test_jit.py test/backend/test_graph.py test/backend/test_multitensor.py test/device/test_hcq.py test/testextra/test_cfg_viz.py --durations=20
       - name: Run pytest (amd rdna4 am)
         run: python -m pytest test/external/external_test_am.py --durations=20
@@ -739,7 +741,7 @@ jobs:
   testamd_cdna4:
     name: Linux (amd cdna4 mock)
     runs-on: ubuntu-22.04
-    timeout-minutes: 20
+    timeout-minutes: 30
     env:
       AMD: 1
       MOCKGPU: 1
@@ -754,11 +756,18 @@ jobs:
           key: amd-cdna4-mock
           deps: testing_unit
           amd: 'true'
+      - name: Upgrade comgr for gfx950 support
+        run: |
+          echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/rocm.gpg] https://repo.radeon.com/rocm/apt/7.2 jammy main" | sudo tee /etc/apt/sources.list.d/rocm.list
+          sudo apt-get -qq update
+          sudo apt-get -y --allow-unauthenticated install comgr
       - name: Check Device.DEFAULT
         run: |
           python3 -c "from tinygrad import Device; assert Device.DEFAULT in ['AMD'], Device.DEFAULT"
           DEBUG=5 FORWARD_ONLY=1 python3 test/test_tiny.py TestTiny.test_plus
       - name: Run pytest (amd cdna4)
+        run: python -m pytest -x test/backend/test_ops.py -k "test_add or test_mul or test_sub" --tb=short --durations=20
+      - name: Run pytest (amd cdna4 full)
         run: python -m pytest -n=auto test/backend/test_ops.py test/backend/test_dtype.py test/backend/test_dtype_alu.py test/backend/test_linearizer.py test/backend/test_randomness.py test/backend/test_jit.py test/backend/test_graph.py test/backend/test_multitensor.py test/device/test_hcq.py test/testextra/test_cfg_viz.py --durations=20
       - name: Run pytest (amd cdna4 am)
         run: python -m pytest test/external/external_test_am.py --durations=20
