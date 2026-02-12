@@ -728,37 +728,8 @@ jobs:
           deps: testing_unit
           amd: 'true'
       - name: Check Device.DEFAULT
-        run: |
-          python3 -c "from tinygrad import Device; assert Device.DEFAULT in ['AMD'], Device.DEFAULT"
-          DEBUG=5 FORWARD_ONLY=1 python3 test/test_tiny.py TestTiny.test_plus
-      - name: Debug test_multicat
-        run: |
-          DEBUG=2 python3 -c "
-          from tinygrad import Tensor, Device
-          import numpy as np
-          print('Device:', Device.DEFAULT)
-          # Reproduce test_multicat: (45,65) * 3 cat on dim=2
-          np.random.seed(42)
-          a_np = np.random.randn(45,65).astype(np.float32)
-          b_np = np.random.randn(45,65).astype(np.float32)
-          c_np = np.random.randn(45,65).astype(np.float32)
-          a = Tensor(a_np)
-          b = Tensor(b_np)
-          c = Tensor(c_np)
-          result = a.cat(b, c, dim=1).numpy()
-          expected = np.concatenate([a_np, b_np, c_np], axis=1)
-          print('result shape:', result.shape)
-          # Check each row
-          for r in range(min(10, result.shape[0])):
-            match = np.allclose(result[r], expected[r], atol=1e-6, rtol=1e-3)
-            nonzero = np.count_nonzero(result[r])
-            print(f'  row {r}: match={match} nonzero={nonzero}/{result.shape[1]}')
-          total_match = np.sum(np.isclose(result, expected, atol=1e-6, rtol=1e-3))
-          print(f'Total match: {total_match}/{result.size} ({100*total_match/result.size:.1f}%)')
-          "
+        run: python3 -c "from tinygrad import Device; assert Device.DEFAULT in ['AMD'], Device.DEFAULT"
       - name: Run pytest (amd rdna4)
-        run: DEBUG=2 python -m pytest -x test/backend/test_ops.py -k "test_multicat" --tb=long --durations=20 -s 2>&1 | head -200
-      - name: Run pytest (amd rdna4 full)
         run: python -m pytest -n=auto test/backend/test_ops.py test/backend/test_dtype.py test/backend/test_dtype_alu.py test/backend/test_linearizer.py test/backend/test_randomness.py test/backend/test_jit.py test/backend/test_graph.py test/backend/test_multitensor.py test/device/test_hcq.py test/testextra/test_cfg_viz.py --durations=20
       - name: Run pytest (amd rdna4 am)
         run: python -m pytest test/external/external_test_am.py --durations=20
@@ -790,12 +761,8 @@ jobs:
           dpkg -s comgr 2>/dev/null | grep Version || echo "comgr package not found"
           python3 -c "import ctypes; ctypes.CDLL('/opt/rocm/lib/libamd_comgr.so'); print('comgr loads OK')" || echo "comgr load FAILED"
       - name: Check Device.DEFAULT
-        run: |
-          python3 -c "from tinygrad import Device; assert Device.DEFAULT in ['AMD'], Device.DEFAULT"
-          DEBUG=5 FORWARD_ONLY=1 python3 test/test_tiny.py TestTiny.test_plus
+        run: python3 -c "from tinygrad import Device; assert Device.DEFAULT in ['AMD'], Device.DEFAULT"
       - name: Run pytest (amd cdna4)
-        run: python -m pytest -x test/backend/test_ops.py -k "test_add or test_mul or test_sub" --tb=short --durations=20
-      - name: Run pytest (amd cdna4 full)
         run: python -m pytest -n=auto test/backend/test_ops.py test/backend/test_dtype.py test/backend/test_dtype_alu.py test/backend/test_linearizer.py test/backend/test_randomness.py test/backend/test_jit.py test/backend/test_graph.py test/backend/test_multitensor.py test/device/test_hcq.py test/testextra/test_cfg_viz.py --durations=20
       - name: Run pytest (amd cdna4 am)
         run: python -m pytest test/external/external_test_am.py --durations=20
