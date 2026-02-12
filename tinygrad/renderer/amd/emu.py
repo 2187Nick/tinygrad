@@ -200,6 +200,12 @@ def get_pcode(op) -> str:
         break
     pcode = '\n'.join(lines) + f';\nif isDENORM(S1.{dt}) then\nD0.{dt} = NAN.{dt}\nendif'
     pcode = pcode.replace('VCC = 0x0LL', 'VCC.u64[laneId] = 0').replace('VCC = 0x1LL', 'VCC.u64[laneId] = 1')
+  # CDNA GLOBAL/FLAT/SCRATCH pcode uses CalcGlobalAddr/CalcFlatAddr/CalcScratchAddr which recompute from raw operands.
+  # The emulator pre-computes the full address in ADDR via make_addr(), so strip Calc*Addr and use ADDR directly.
+  if 'CalcGlobalAddr' in pcode or 'CalcFlatAddr' in pcode or 'CalcScratchAddr' in pcode:
+    import re as _re
+    pcode = _re.sub(r'addr\s*=\s*Calc(?:Global|Flat|Scratch)Addr\([^)]+\)\s*;?\s*\n?', '', pcode)
+    pcode = pcode.replace('MEM[addr', 'MEM[ADDR')
   return pcode
 
 def parse_pcode(pcode: str, srcs: dict[str, UOp] | None = None) -> tuple[dict, list[tuple[str, UOp]]]:
@@ -554,8 +560,8 @@ def _compile_sopp(inst: ir3.SOPP | ir4.SOPP, ctx: _Ctx) -> UOp:
     return UOp.sink(ctx.wsgpr_dyn(_c(PC_LO_IDX), UOp.const(dtypes.uint32, 0xFFFFFFFF)),
                           ctx.wsgpr_dyn(_c(PC_HI_IDX), UOp.const(dtypes.uint32, 0xFFFFFFFF)))
   if inst.op in (ir3.SOPPOp.S_NOP, ir4.SOPPOp.S_NOP, ic.SOPPOp.S_NOP): return UOp.sink(*ctx.inc_pc())  # S_NOP is a no-op
-  # S_WAITCNT is a no-op in the emulator (no memory ordering to enforce). CDNA pcode for S_WAITCNT is documentation text, not executable.
-  if hasattr(inst.op, 'name') and inst.op.name == 'S_WAITCNT': return UOp.sink(*ctx.inc_pc())
+  # S_WAITCNT/S_SLEEP are no-ops in the emulator (no memory ordering/timing to enforce). CDNA pcode for these is documentation text, not executable.
+  if hasattr(inst.op, 'name') and inst.op.name in ('S_WAITCNT', 'S_SLEEP'): return UOp.sink(*ctx.inc_pc())
   # NOTE: we ignore SOPPs without PCODE
   if inst.op in _get_pcode_dict(inst.op):
     pcode = get_pcode(inst.op)
@@ -1049,7 +1055,7 @@ def _compile_mem_op(inst: ir3.DS | ir3.FLAT | ir3.GLOBAL | ir3.SCRATCH | ir4.DS 
     if 'STORE' in op_name and data_bits_mem >= 64:
       vdata = vdata | (ctx.rvgpr_dyn(vdata_reg + _c(1), lane).cast(dtypes.uint64) << UOp.const(dtypes.uint64, 32))
     srcs = {'ADDR': addr, 'VDATA': vdata, '_vmem': mem, '_active': active,
-            'laneId': lane, 'v_addr': vaddr_base, 's_saddr': saddr_base}
+            'laneId': lane, 'v_addr': vaddr_base, 's_saddr': saddr_base, 'SADDR': saddr_base, 'OFFSET': ioffset64}
     for i in range(data_bits_mem // 32):
       srcs[f'VDATA{i}'] = ctx.rvgpr_dyn(vdata_reg + _c(i), lane) if 'STORE' in op_name else UOp.const(dtypes.uint32, 0)
     return srcs
@@ -1114,7 +1120,7 @@ _INST_HANDLERS: dict[type, Callable[..., UOp]] = {
   ic.SOPP: _compile_sopp, ic.SMEM: _compile_smem, ic.SOP1: _compile_sop, ic.SOP2: _compile_sop, ic.SOPC: _compile_sop, ic.SOPK: _compile_sop,
   ic.VOP1: _compile_vop12, ic.VOP2: _compile_vop12, ic.VOPC: _compile_vopc, ic.VOP3: _compile_vop3,
   ic.VOP3_SDST: _compile_vop3, ic.VOP3SD: _compile_vop3sd, ic.VOP3P: _compile_vop3p,
-  ic.DS: _compile_mem_op, ic.FLAT: _compile_mem_op, ic.GLOBAL: _compile_mem_op, ic.SCRATCH: _compile_mem_op, ic.MUBUF: _compile_mem_op,
+  ic.DS: _compile_mem_op, ic.FLAT: _compile_mem_op, ic.GLOBAL: _compile_mem_op, ic.SCRATCH: _compile_mem_op,
 }
 
 # ═══════════════════════════════════════════════════════════════════════════════
