@@ -544,6 +544,8 @@ def _compile_sopp(inst: ir3.SOPP | ir4.SOPP, ctx: _Ctx) -> UOp:
     return UOp.sink(ctx.wsgpr_dyn(_c(PC_LO_IDX), UOp.const(dtypes.uint32, 0xFFFFFFFF)),
                           ctx.wsgpr_dyn(_c(PC_HI_IDX), UOp.const(dtypes.uint32, 0xFFFFFFFF)))
   if inst.op in (ir3.SOPPOp.S_NOP, ir4.SOPPOp.S_NOP, ic.SOPPOp.S_NOP): return UOp.sink(*ctx.inc_pc())  # S_NOP is a no-op
+  # S_WAITCNT is a no-op in the emulator (no memory ordering to enforce). CDNA pcode for S_WAITCNT is documentation text, not executable.
+  if hasattr(inst.op, 'name') and inst.op.name == 'S_WAITCNT': return UOp.sink(*ctx.inc_pc())
   # NOTE: we ignore SOPPs without PCODE
   if inst.op in _get_pcode_dict(inst.op):
     pcode = get_pcode(inst.op)
