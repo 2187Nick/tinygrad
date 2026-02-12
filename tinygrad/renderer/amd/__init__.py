@@ -63,7 +63,8 @@ def _load_formats() -> dict[str, list[type[Inst]]]:
 def detect_format(data: bytes, arch: str = "rdna3") -> type[Inst]:
   """Detect instruction format from machine code bytes."""
   assert len(data) >= 4, f"need at least 4 bytes, got {len(data)}"
-  for cls in _load_formats()[arch]:
+  fmt_key = "cdna" if arch.startswith("cdna") else arch
+  for cls in _load_formats()[fmt_key]:
     if _matches(data, cls): return cls
   raise ValueError(f"unknown {arch} format word={int.from_bytes(data[:4], 'little'):#010x}")
 

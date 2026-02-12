@@ -5,7 +5,7 @@ from tinygrad.helpers import getbits, to_mv, getenv
 from tinygrad.runtime.support import c
 
 MOCKGPU_ARCH = getenv("MOCKGPU_ARCH", "rdna3")
-GFX_TARGET_VERSION = {"rdna3": 110000, "rdna4": 120000}[MOCKGPU_ARCH]
+GFX_TARGET_VERSION = {"rdna3": 110000, "rdna4": 120000, "cdna4": 95000}[MOCKGPU_ARCH]
 import tinygrad.runtime.autogen.amd_gpu as amd_gpu, tinygrad.runtime.autogen.am.pm4_nv as pm4
 
 SDMA_MAX_COPY_SIZE = 0x400000
@@ -193,7 +193,7 @@ class PM4Executor(AMDQueue):
     # For gfx11: WAVESIZE = ceildiv(64 * size_per_thread, 256), so size_per_thread ≈ WAVESIZE * 256 / 64 = WAVESIZE * 4
     try: tmpring_size = self.gpu.regs[regCOMPUTE_TMPRING_SIZE]
     except KeyError: tmpring_size = 0
-    wavesize = (tmpring_size >> 12) & 0x3FFF  # WAVESIZE field is bits 12:25 for gfx11
+    wavesize = (tmpring_size >> 12) & (0x3FFFF if GFX_TARGET_VERSION >= 120000 else 0x3FFF)  # WAVESIZE field: 18 bits for gfx12+, 14 for gfx11
     scratch_size = wavesize * 4  # This gives the scratch size per thread (lane)
 
     assert prg_sz > 0, "Invalid prg ptr (not found in mapped ranges)"
@@ -329,7 +329,7 @@ class AMDGPU(VirtGPU):
     self.queues.append(SDMAExecutor(self, base, size, rptr, wptr))
     return len(self.queues) - 1
 
-gpu_props = """cpu_cores_count 0
+_gpu_props_rdna = """cpu_cores_count 0
 simd_count 192
 mem_banks_count 1
 caches_count 206
@@ -367,3 +367,44 @@ sdma_fw_version 20
 unique_id 11673270660693242239
 num_xcc 1
 max_engine_clk_ccompute 2400"""
+
+_gpu_props_cdna4 = """cpu_cores_count 0
+simd_count 256
+mem_banks_count 1
+caches_count 206
+io_links_count 1
+p2p_links_count 5
+cpu_core_id_base 0
+simd_id_base 2147488032
+max_waves_per_simd 16
+lds_size_in_kb 64
+gds_size_in_kb 0
+num_gws 64
+wave_front_size 64
+array_count 8
+simd_arrays_per_engine 1
+cu_per_simd_array 32
+simd_per_cu 4
+max_slots_scratch_cu 32
+gfx_target_version {gfx_target_version}
+vendor_id 4098
+device_id 29772
+location_id 34304
+domain 0
+drm_render_minor {drm_render_minor}
+hive_id 0
+num_sdma_engines 2
+num_sdma_xgmi_engines 0
+num_sdma_queues_per_engine 6
+num_cp_queues 8
+max_engine_clk_fcompute 2100
+local_mem_size 0
+fw_version 2140
+capability 671588992
+debug_prop 1495
+sdma_fw_version 20
+unique_id 11673270660693242239
+num_xcc 1
+max_engine_clk_ccompute 2100"""
+
+gpu_props = _gpu_props_cdna4 if MOCKGPU_ARCH == "cdna4" else _gpu_props_rdna

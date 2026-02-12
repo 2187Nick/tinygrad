@@ -51,8 +51,10 @@ from tinygrad.engine.realize import get_runner
 from tinygrad.renderer.amd import decode_inst
 from tinygrad.runtime.autogen.amd.rdna3.str_pcode import PCODE as PCODE_RDNA3
 from tinygrad.runtime.autogen.amd.rdna4.str_pcode import PCODE as PCODE_RDNA4
+from tinygrad.runtime.autogen.amd.cdna.str_pcode import PCODE as PCODE_CDNA
 from tinygrad.runtime.autogen.amd.rdna3 import ins as ir3
 from tinygrad.runtime.autogen.amd.rdna4 import ins as ir4
+from tinygrad.runtime.autogen.amd.cdna import ins as ic
 from tinygrad.renderer.amd.dsl import VCC_LO, EXEC_LO, SCC, ttmp
 from tinygrad.runtime.autogen.amd.common import Fmt, OpType
 from tinygrad.renderer.amd.pcode import parse_block, _FUNCS
@@ -99,11 +101,12 @@ VOPD_TO_VOP2 = {
   ir4.VOPDOp.V_DUAL_MOV_B32: ir3.VOP1Op.V_MOV_B32_E32, ir4.VOPDOp.V_DUAL_CNDMASK_B32: ir3.VOP2Op.V_CNDMASK_B32_E32,
   ir4.VOPDOp.V_DUAL_FMAAK_F32: ir3.VOP2Op.V_FMAAK_F32_E32, ir4.VOPDOp.V_DUAL_FMAMK_F32: ir3.VOP2Op.V_FMAMK_F32_E32,
 }
-WAVE_SIZE = 32
+WAVE_SIZE = 32  # default for rdna; cdna uses 64 (set dynamically in run_asm)
 # Special registers stored after inline constants (256-259)
 PC_LO_IDX, PC_HI_IDX, SCRATCH_STRIDE_IDX = 256, 257, 259
 # SGPR buffer: 0-127 = SGPRs, 128-255 = inline constants, 256-259 = special registers
-SGPR_COUNT, VGPR_SIZE = 260, 256 * 32
+SGPR_COUNT = 260
+VGPR_SIZE = 256 * WAVE_SIZE  # recalculated when WAVE_SIZE changes
 
 def _op_name(inst) -> str:
   if hasattr(inst, 'opx'): return f"{inst.opx.name}_{inst.opy.name}"  # VOPD has opx/opy not op
@@ -150,7 +153,10 @@ _pcode_fixes = {
 
 def _get_pcode_dict(op) -> dict:
   """Return the PCODE dictionary for the given opcode based on its architecture."""
-  return PCODE_RDNA4 if 'rdna4' in type(op).__module__ else PCODE_RDNA3
+  mod = type(op).__module__
+  if 'rdna4' in mod: return PCODE_RDNA4
+  if 'cdna' in mod: return PCODE_CDNA
+  return PCODE_RDNA3
 
 # Pcode parser
 @functools.cache
@@ -279,15 +285,16 @@ class _Ctx:
     self.inst_size, self._axis_id = inst_size, 0
     self.dyn_fields: list[tuple[int, int]] = []  # (lo, hi) of fields read dynamically
 
-  def range(self, n: int = 32) -> UOp:
-    """Create a lane range UOp with unique axis ID."""
+  def range(self, n: int = 0) -> UOp:
+    """Create a lane range UOp with unique axis ID. Default n=WAVE_SIZE."""
     self._axis_id += 1
-    return UOp.range(n, self._axis_id, AxisType.LOOP, dtype=dtypes.int)
+    return UOp.range(n or WAVE_SIZE, self._axis_id, AxisType.LOOP, dtype=dtypes.int)
 
   def unroll_lanes(self, get_lane_bit, exec_mask: UOp, apply_exec: bool = True) -> UOp:
-    """Combine 32 lane bits into a 32-bit mask using RANGE+REDUCE."""
+    """Combine lane bits into a mask using RANGE+REDUCE. Uses uint64 for wave64."""
     lane = self.range()
-    bit = get_lane_bit(lane).cast(dtypes.uint32) << lane.cast(dtypes.uint32)
+    dt = dtypes.uint64 if WAVE_SIZE == 64 else dtypes.uint32
+    bit = get_lane_bit(lane).cast(dt) << lane.cast(dt)
     result = bit.reduce(lane, arg=Ops.ADD)
     return result & exec_mask if apply_exec else result
 
@@ -350,13 +357,13 @@ class _Ctx:
 
   def rvgpr_dyn(self, reg: UOp, lane: UOp, valid: UOp | None = None) -> UOp:
     """Read VGPR with dynamic register index."""
-    idx = reg.cast(dtypes.int) * _c(32, dtypes.int) + lane.cast(dtypes.int)
+    idx = reg.cast(dtypes.int) * _c(WAVE_SIZE, dtypes.int) + lane.cast(dtypes.int)
     return self.vgpr.index(idx, valid, ptr=True).load() if valid is not None else self.vgpr.index(idx, ptr=True).load()
 
   def wvgpr_dyn(self, reg: UOp, lane: UOp, val: UOp, exec_mask: UOp, after: UOp | None = None) -> UOp:
     """Write VGPR with dynamic register index."""
     buf = self.vgpr.after(after) if after is not None else self.vgpr
-    offset = reg.cast(dtypes.int) * _c(32, dtypes.int) + lane.cast(dtypes.int)
+    offset = reg.cast(dtypes.int) * _c(WAVE_SIZE, dtypes.int) + lane.cast(dtypes.int)
     return buf.index(offset, _lane_active(exec_mask, lane)).store(val.cast(dtypes.uint32))
 
   def rsrc_dyn(self, off: UOp, lane: UOp | None, bits: int = 32, literal: UOp | None = None, is_f64: bool = False, do_cast: bool = True) -> UOp:
@@ -533,10 +540,10 @@ class _Ctx:
 
 def _compile_sopp(inst: ir3.SOPP | ir4.SOPP, ctx: _Ctx) -> UOp:
   simm16 = ctx.inst_field_signed(type(inst).simm16).cast(dtypes.int16)
-  if inst.op in (ir3.SOPPOp.S_ENDPGM, ir4.SOPPOp.S_ENDPGM):
+  if inst.op in (ir3.SOPPOp.S_ENDPGM, ir4.SOPPOp.S_ENDPGM, ic.SOPPOp.S_ENDPGM):
     return UOp.sink(ctx.wsgpr_dyn(_c(PC_LO_IDX), UOp.const(dtypes.uint32, 0xFFFFFFFF)),
                           ctx.wsgpr_dyn(_c(PC_HI_IDX), UOp.const(dtypes.uint32, 0xFFFFFFFF)))
-  if inst.op in (ir3.SOPPOp.S_NOP, ir4.SOPPOp.S_NOP): return UOp.sink(*ctx.inc_pc())  # S_NOP is a no-op
+  if inst.op in (ir3.SOPPOp.S_NOP, ir4.SOPPOp.S_NOP, ic.SOPPOp.S_NOP): return UOp.sink(*ctx.inc_pc())  # S_NOP is a no-op
   # NOTE: we ignore SOPPs without PCODE
   if inst.op in _get_pcode_dict(inst.op):
     pcode = get_pcode(inst.op)
@@ -552,7 +559,7 @@ def _compile_sopp(inst: ir3.SOPP | ir4.SOPP, ctx: _Ctx) -> UOp:
 
 def _compile_smem(inst: ir3.SMEM | ir4.SMEM, ctx: _Ctx) -> UOp:
   # Cache invalidation instructions are no-ops in the emulator (we don't model caches)
-  cache_inv_ops = [ir3.SMEMOp.S_GL1_INV, ir3.SMEMOp.S_DCACHE_INV, ir4.SMEMOp.S_DCACHE_INV]
+  cache_inv_ops = [ir3.SMEMOp.S_GL1_INV, ir3.SMEMOp.S_DCACHE_INV, ir4.SMEMOp.S_DCACHE_INV, ic.SMEMOp.S_DCACHE_INV, ic.SMEMOp.S_DCACHE_INV_VOL]
   if hasattr(ir4.SMEMOp, 'S_GL1_INV'): cache_inv_ops.append(ir4.SMEMOp.S_GL1_INV)
   if inst.op in cache_inv_ops:
     return UOp.sink(*ctx.inc_pc())
@@ -568,7 +575,9 @@ def _compile_smem(inst: ir3.SMEM | ir4.SMEM, ctx: _Ctx) -> UOp:
   addr = _u64(ctx.rsgpr_dyn(sbase), ctx.rsgpr_dyn(sbase + _c(1))) + offset.cast(dtypes.uint64) + ctx.rsgpr_dyn(soffset).cast(dtypes.uint64)
   _SMEM_NDWORDS = {ir3.SMEMOp.S_LOAD_B32: 1, ir3.SMEMOp.S_LOAD_B64: 2, ir3.SMEMOp.S_LOAD_B128: 4,
     ir3.SMEMOp.S_LOAD_B256: 8, ir3.SMEMOp.S_LOAD_B512: 16, ir4.SMEMOp.S_LOAD_B32: 1, ir4.SMEMOp.S_LOAD_B64: 2,
-    ir4.SMEMOp.S_LOAD_B96: 3, ir4.SMEMOp.S_LOAD_B128: 4, ir4.SMEMOp.S_LOAD_B256: 8, ir4.SMEMOp.S_LOAD_B512: 16}
+    ir4.SMEMOp.S_LOAD_B96: 3, ir4.SMEMOp.S_LOAD_B128: 4, ir4.SMEMOp.S_LOAD_B256: 8, ir4.SMEMOp.S_LOAD_B512: 16,
+    ic.SMEMOp.S_LOAD_DWORD: 1, ic.SMEMOp.S_LOAD_DWORDX2: 2, ic.SMEMOp.S_LOAD_DWORDX4: 4,
+    ic.SMEMOp.S_LOAD_DWORDX8: 8, ic.SMEMOp.S_LOAD_DWORDX16: 16}
   ndwords = _SMEM_NDWORDS[inst.op]
   stores = [ctx.wsgpr_dyn(sdata_reg + _c(i), ctx.vmem.index((addr + UOp.const(dtypes.uint64, i * 4) >> UOp.const(dtypes.uint64, 2)).cast(dtypes.int)))
             for i in range(ndwords)]
@@ -1089,6 +1098,11 @@ _INST_HANDLERS: dict[type, Callable[..., UOp]] = {
   ir4.VOP1: _compile_vop12, ir4.VOP1_SDST: _compile_vop12, ir4.VOP2: _compile_vop12, ir4.VOPC: _compile_vopc, ir4.VOP3: _compile_vop3,
   ir4.VOP3_SDST: _compile_vop3, ir4.VOP3SD: _compile_vop3sd, ir4.VOP3P: _compile_vop3p, ir4.VOPD: _compile_vopd,
   ir4.DS: _compile_mem_op, ir4.VFLAT: _compile_mem_op, ir4.VGLOBAL: _compile_mem_op, ir4.VSCRATCH: _compile_mem_op,
+  # CDNA instruction classes
+  ic.SOPP: _compile_sopp, ic.SMEM: _compile_smem, ic.SOP1: _compile_sop, ic.SOP2: _compile_sop, ic.SOPC: _compile_sop, ic.SOPK: _compile_sop,
+  ic.VOP1: _compile_vop12, ic.VOP2: _compile_vop12, ic.VOPC: _compile_vopc, ic.VOP3: _compile_vop3,
+  ic.VOP3_SDST: _compile_vop3, ic.VOP3SD: _compile_vop3sd, ic.VOP3P: _compile_vop3p,
+  ic.DS: _compile_mem_op, ic.FLAT: _compile_mem_op, ic.GLOBAL: _compile_mem_op, ic.SCRATCH: _compile_mem_op, ic.MUBUF: _compile_mem_op,
 }
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -1175,14 +1189,15 @@ class WaveState:
     for i in range(65): self._write_sgpr(128 + i, i)  # 128-192: integers 0-64
     for i in range(16): self._write_sgpr(193 + i, (-(i + 1)) & MASK32)  # 193-208: -1 to -16
     for off, val in F32_INLINE.items(): self._write_sgpr(off, val)  # 240-248: float constants
-    self._write_sgpr(EXEC_LO.offset, (1 << n_lanes) - 1)
+    self._write_sgpr(EXEC_LO.offset, (1 << min(n_lanes, 32)) - 1)
+    if n_lanes > 32: self._write_sgpr(EXEC_LO.offset + 1, (1 << (n_lanes - 32)) - 1)  # EXEC_HI for wave64
     self._write_sgpr(PC_LO_IDX, 0)
     self._write_sgpr(PC_HI_IDX, 0)
 
   def _write_sgpr(self, idx: int, val: int): self._sgpr_mv[idx] = val & MASK32
   def _read_sgpr(self, idx: int) -> int: return self._sgpr_mv[idx]
-  def _write_vgpr(self, reg: int, lane: int, val: int): self._vgpr_mv[reg * 32 + lane] = val & MASK32
-  def _read_vgpr(self, reg: int, lane: int) -> int: return self._vgpr_mv[reg * 32 + lane]
+  def _write_vgpr(self, reg: int, lane: int, val: int): self._vgpr_mv[reg * WAVE_SIZE + lane] = val & MASK32
+  def _read_vgpr(self, reg: int, lane: int) -> int: return self._vgpr_mv[reg * WAVE_SIZE + lane]
 
   @property
   def pc(self) -> int: return self._read_sgpr(PC_LO_IDX) | (self._read_sgpr(PC_HI_IDX) << 32)
@@ -1198,6 +1213,15 @@ class WaveState:
 def run_asm(lib: int, lib_sz: int, gx: int, gy: int, gz: int, lx: int, ly: int, lz: int, args_ptr: int, rsrc2: int = 0x19c,
             scratch_size: int = 0, arch: str = "rdna3") -> int:
   """Execute AMD assembly program. scratch_size is private_segment_fixed_size from kernel descriptor (per-lane)."""
+  global WAVE_SIZE, VGPR_SIZE
+  ws = 64 if arch.startswith("cdna") else 32
+  if ws != WAVE_SIZE:
+    WAVE_SIZE, VGPR_SIZE = ws, 256 * ws
+    _Ctx.vgpr = UOp(Ops.PARAM, dtypes.uint32.ptr(VGPR_SIZE), arg=1)
+    _canonical_runner_cache.clear()
+    decode_program.cache_clear()
+    from tinygrad.renderer.amd import pcode as _pcode
+    _pcode.WAVE_SIZE = ws
   program_raw = decode_program(bytes((ctypes.c_char * lib_sz).from_address(lib).raw), arch)
   program = {lib + offset: val for offset, val in program_raw.items()}  # Remap to actual addresses
   lds_size = ((rsrc2 & hsa.AMD_COMPUTE_PGM_RSRC_TWO_GRANULATED_LDS_SIZE) >> hsa.AMD_COMPUTE_PGM_RSRC_TWO_GRANULATED_LDS_SIZE_SHIFT) * 512
