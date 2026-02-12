@@ -731,7 +731,10 @@ jobs:
         run: |
           echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/rocm.gpg] https://repo.radeon.com/rocm/apt/7.2 jammy main" | sudo tee /etc/apt/sources.list.d/rocm.list
           sudo apt-get -qq update
-          sudo apt-get -y --allow-unauthenticated install comgr
+          sudo apt-get -y --allow-unauthenticated install comgr hsa-rocr
+          sudo ldconfig
+          ls -la /opt/rocm/lib/libamd_comgr.so* || echo "comgr not at /opt/rocm"
+          dpkg -s comgr 2>/dev/null | grep Version || echo "comgr package not found"
       - name: Check Device.DEFAULT
         run: |
           python3 -c "from tinygrad import Device; assert Device.DEFAULT in ['AMD'], Device.DEFAULT"
@@ -787,7 +790,10 @@ jobs:
         run: |
           echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/rocm.gpg] https://repo.radeon.com/rocm/apt/7.2 jammy main" | sudo tee /etc/apt/sources.list.d/rocm.list
           sudo apt-get -qq update
-          sudo apt-get -y --allow-unauthenticated install comgr
+          sudo apt-get -y --allow-unauthenticated install comgr hsa-rocr
+          sudo ldconfig
+          ls -la /opt/rocm/lib/libamd_comgr.so* || echo "comgr not at /opt/rocm"
+          dpkg -s comgr 2>/dev/null | grep Version || echo "comgr package not found"
       - name: Check Device.DEFAULT
         run: |
           python3 -c "from tinygrad import Device; assert Device.DEFAULT in ['AMD'], Device.DEFAULT"
