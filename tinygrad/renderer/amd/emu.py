@@ -125,6 +125,7 @@ def _op_name(inst) -> str:
 def _to_u32(val: UOp) -> UOp:
   if val.dtype == dtypes.uint32: return val
   if val.dtype.itemsize == 4: return val.bitcast(dtypes.uint32)  # same size: bitcast (float32->uint32)
+  if val.dtype in (dtypes.half, dtypes.bfloat16): return val.bitcast(dtypes.uint16).cast(dtypes.uint32)  # 16-bit float: preserve bit pattern
   return val.cast(dtypes.uint32)  # different size: cast (bool, int16, etc)
 def _lane_active(exec_mask: UOp, lane: UOp) -> UOp:
   dt = exec_mask.dtype

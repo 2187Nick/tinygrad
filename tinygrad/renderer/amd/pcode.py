@@ -229,7 +229,7 @@ _FUNCS: dict[str, Callable[..., UOp]] = {
   'isEven': lambda a: (UOp(Ops.TRUNC, a.dtype, (a,)).cast(dtypes.int) & _const(dtypes.int, 1)).eq(_const(dtypes.int, 0)),
   'max': lambda a, b: UOp(Ops.MAX, a.dtype, (a, b)),
   'min': lambda a, b: UOp(Ops.MAX, a.dtype, (a.neg(), b.neg())).neg(),
-  'pow': lambda a, b: UOp(Ops.EXP2, dtypes.float32, (b.bitcast(dtypes.float32),)),
+  'pow': lambda a, b: UOp(Ops.EXP2, b.dtype, (b,)) if b.dtype == dtypes.half else UOp(Ops.EXP2, dtypes.float32, (b.bitcast(dtypes.float32),)),
   'fma': lambda a, b, c: a * b + c,
   'i32_to_f32': lambda a: a.cast(dtypes.int).cast(dtypes.float32),
   'u32_to_f32': lambda a: a.cast(dtypes.uint32).cast(dtypes.float32),
@@ -809,6 +809,10 @@ def _subst_loop_var(line: str, loop_var: str, val: int) -> str:
 
 def _set_bits(old: UOp, val: UOp, width: int, offset: int) -> UOp:
   """Set bits [offset:offset+width) in old to val, masking and shifting appropriately."""
+  # Ensure old is uint32 for bitwise operations (float types need bitcast first)
+  if old.dtype in (dtypes.half, dtypes.bfloat16): old = old.bitcast(dtypes.uint16).cast(dtypes.uint32)
+  elif old.dtype == dtypes.float32: old = old.bitcast(dtypes.uint32)
+  elif old.dtype != dtypes.uint32: old = old.cast(dtypes.uint32)
   mask = _u32(((1 << width) - 1) << offset)
   v = (val.cast(dtypes.uint32) if val.dtype != dtypes.uint32 else val) & _u32((1 << width) - 1)
   return (old & (mask ^ _u32(0xFFFFFFFF))) | (v << _u32(offset))
