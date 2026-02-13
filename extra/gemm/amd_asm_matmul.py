@@ -207,9 +207,9 @@ class Kernel:
       ('system_sgpr_workgroup_id_x', 1), ('system_sgpr_workgroup_id_y', 1), ('system_sgpr_workgroup_id_z', 0),
       ('system_sgpr_workgroup_info', 0), ('system_vgpr_workitem_id', 0), ('next_free_vgpr', 179),
       ('next_free_sgpr', 16), ('float_round_mode_32', 0), ('float_round_mode_16_64', 0),
-      ('float_denorm_mode_32', 3), ('float_denorm_mode_16_64', 3), ('dx10_clamp', 1), ('ieee_mode', 1),
+      ('float_denorm_mode_32', 3), ('float_denorm_mode_16_64', 3)] + ([('dx10_clamp', 1), ('ieee_mode', 1),
       ('fp16_overflow', 0), ('workgroup_processor_mode', 0), ('memory_ordered', 1), ('forward_progress', 0),
-      ('shared_vgpr_count', 0)]
+      ('shared_vgpr_count', 0)] if not self.arch.startswith('gfx12') else [])
 
     return '\n'.join([
       '\t.text', f'\t.amdgcn_target "amdgcn-amd-amdhsa--{self.arch}"',

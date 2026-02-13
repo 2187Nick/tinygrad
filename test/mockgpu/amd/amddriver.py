@@ -38,7 +38,6 @@ class DRMFileDesc(VirtFileDesc):
     struct = amdgpu_drm.struct_drm_amdgpu_info.from_address(argp)
     if struct.query == amdgpu_drm.AMDGPU_INFO_DEV_INFO:
       dev_info = amdgpu_drm.struct_drm_amdgpu_info_device.from_address(struct.return_pointer)
-      # mock of gfx1100
       for se in range(4):
         for sa in range(4): dev_info.cu_bitmap[se][sa] = 0xff if (se * 4 + sa) < 12 else 0
       return 0

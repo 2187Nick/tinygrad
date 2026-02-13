@@ -3,6 +3,9 @@ from typing import Any, Callable
 from tinygrad.dtype import dtypes
 from tinygrad.uop.ops import Ops, UOp
 
+# Wave size for VGPR indexing
+WAVE_SIZE = 32
+
 # Type alias for vars dict: stores UOps for variables and tuples for lambda definitions
 VarVal = UOp | tuple[str, list[str], str]
 
@@ -226,7 +229,7 @@ _FUNCS: dict[str, Callable[..., UOp]] = {
   'isEven': lambda a: (UOp(Ops.TRUNC, a.dtype, (a,)).cast(dtypes.int) & _const(dtypes.int, 1)).eq(_const(dtypes.int, 0)),
   'max': lambda a, b: UOp(Ops.MAX, a.dtype, (a, b)),
   'min': lambda a, b: UOp(Ops.MAX, a.dtype, (a.neg(), b.neg())).neg(),
-  'pow': lambda a, b: UOp(Ops.EXP2, dtypes.float32, (b.bitcast(dtypes.float32),)),
+  'pow': lambda a, b: UOp(Ops.EXP2, b.dtype, (b,)) if b.dtype == dtypes.half else UOp(Ops.EXP2, dtypes.float32, (b.bitcast(dtypes.float32),)),
   'fma': lambda a, b, c: a * b + c,
   'i32_to_f32': lambda a: a.cast(dtypes.int).cast(dtypes.float32),
   'u32_to_f32': lambda a: a.cast(dtypes.uint32).cast(dtypes.float32),
@@ -498,7 +501,7 @@ class Parser:
         self.eat('RBRACKET')
         vgpr = self.vars.get('_vgpr')
         if vgpr is None: return _u32(0)
-        return vgpr.index(_to_u32(reg) * _u32(32) + _to_u32(lane), ptr=True).load()
+        return vgpr.index(_to_u32(reg) * _u32(WAVE_SIZE) + _to_u32(lane), ptr=True).load()
       if self.try_eat('LPAREN'):
         args = self._parse_args()
         self.eat('RPAREN')
@@ -510,8 +513,8 @@ class Parser:
       if name == 'OVERFLOW_F32': return _const(dtypes.uint32, 0x7F7FFFFF).bitcast(dtypes.float32)
       if name == 'UNDERFLOW_F64': return _const(dtypes.uint64, 1).bitcast(dtypes.float64)
       if name == 'OVERFLOW_F64': return _const(dtypes.uint64, 0x7FEFFFFFFFFFFFFF).bitcast(dtypes.float64)
-      if name == 'WAVE32': return _const(dtypes.bool, True)
-      if name == 'WAVE64': return _const(dtypes.bool, False)
+      if name == 'WAVE32': return _const(dtypes.bool, WAVE_SIZE == 32)
+      if name == 'WAVE64': return _const(dtypes.bool, WAVE_SIZE == 64)
       if name == 'WAVE_MODE' and self.try_eat('DOT') and self.try_eat_val('IEEE', 'IDENT'): return _u32(1)
       if self.try_eat('LBRACE'):
         idx = self.eat('NUM').val
@@ -523,7 +526,7 @@ class Parser:
           self.eat('RBRACKET')
           vgpr = self.vars.get('_vgpr')
           if vgpr is None: return _u32(0)
-          return vgpr.index(_to_u32(reg) * _u32(32) + _u32(int(idx)), ptr=True).load()
+          return vgpr.index(_to_u32(reg) * _u32(WAVE_SIZE) + _u32(int(idx)), ptr=True).load()
         elem = self.vars.get(f'{name}@{idx}', self.vars.get(f'{name}{idx}'))
         if elem is None:
           # Extract bit idx from base variable (like var[idx])
@@ -806,6 +809,10 @@ def _subst_loop_var(line: str, loop_var: str, val: int) -> str:
 
 def _set_bits(old: UOp, val: UOp, width: int, offset: int) -> UOp:
   """Set bits [offset:offset+width) in old to val, masking and shifting appropriately."""
+  # Ensure old is uint32 for bitwise operations (float types need bitcast first)
+  if old.dtype in (dtypes.half, dtypes.bfloat16): old = old.bitcast(dtypes.uint16).cast(dtypes.uint32)
+  elif old.dtype == dtypes.float32: old = old.bitcast(dtypes.uint32)
+  elif old.dtype != dtypes.uint32: old = old.cast(dtypes.uint32)
   mask = _u32(((1 << width) - 1) << offset)
   v = (val.cast(dtypes.uint32) if val.dtype != dtypes.uint32 else val) & _u32((1 << width) - 1)
   return (old & (mask ^ _u32(0xFFFFFFFF))) | (v << _u32(offset))
@@ -977,7 +984,7 @@ def parse_block(lines: list[str], start: int, env: dict[str, VarVal], funcs: dic
         ln = parse_tokens(lane_toks, env, funcs)
         rg, val = parse_tokens(reg_toks, env, funcs), parse_tokens(toks[j:], env, funcs)
         if assigns is not None:
-          assigns.append((f'VGPR[{_tok_str(lane_toks)}][{_tok_str(reg_toks)}]', (_to_u32(rg) * _u32(32) + _to_u32(ln), val)))
+          assigns.append((f'VGPR[{_tok_str(lane_toks)}][{_tok_str(reg_toks)}]', (_to_u32(rg) * _u32(WAVE_SIZE) + _to_u32(ln), val)))
         i += 1
         continue
 
