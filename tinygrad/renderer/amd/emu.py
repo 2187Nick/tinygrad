@@ -178,7 +178,17 @@ def _get_pcode_dict(op) -> dict:
 @functools.cache
 def get_pcode(op) -> str:
   op_name = op.name
-  pcode = _get_pcode_dict(op)[op]
+  pcode_dict = _get_pcode_dict(op)
+  if op not in pcode_dict:
+    # VOP3 _E64 ops may not have separate pcode — fallback to VOP1 _E32 equivalent
+    if '_E64' in op_name:
+      mod = type(op).__module__.rsplit('.', 1)[0]  # e.g. tinygrad.runtime.autogen.amd.cdna
+      vop1_name = op_name.replace('_E64', '_E32')
+      vop1_mod = __import__(mod + '.enum', fromlist=['VOP1Op'])
+      vop1_op = getattr(vop1_mod, 'VOP1Op')[vop1_name]
+      pcode = pcode_dict[vop1_op]
+    else: raise KeyError(op)
+  else: pcode = pcode_dict[op]
   if op_name in _pcode_fixes: pcode = pcode.replace(*_pcode_fixes[op_name])
   if 'V_DIV_SCALE' in op_name:
     dt, exp_lim, ldexp_val = ('f32', '23', '64') if 'F32' in op_name else ('f64', '52', '128')
@@ -507,7 +517,7 @@ class _Ctx:
     if 'VCC' not in srcs:
       srcs['VCC'] = self.read_vcc() if sdst_reg is None else self.rsgpr_dyn(_c(vcc_reg))
     srcs.update({'EXEC': exec_mask, 'SCC': self.rsgpr_dyn(_c(SCC.offset)), 'laneId': lane,
-                 'ROUND_MODE': _c(0), 'ROUND_TOWARD_ZERO': _c(0)})  # rounding mode: 0=RNE, RTZ constant
+                 'ROUND_MODE': _c(0), 'ROUND_TOWARD_ZERO': _c(0), 'ROUND_NEAREST_EVEN': _c(0)})  # rounding mode: 0=RNE, RTZ constant
     _, assigns = parse_pcode(pcode, srcs)
 
     # For integer ops with clamp, compute overflow using wide arithmetic
@@ -724,7 +734,15 @@ def _compile_sop(inst: ir3.SOP1 | ir3.SOP2 | ir3.SOPC | ir3.SOPK | ir4.SOP1 | ir
 
 def _compile_vop12(inst: ir3.VOP1 | ir3.VOP1_SDST | ir3.VOP2 | ir4.VOP1 | ir4.VOP1_SDST | ir4.VOP2, ctx: _Ctx) -> UOp:
   op_name = _op_name(inst)
+  op_name_u = op_name.upper()
   if op_name in ('V_READFIRSTLANE_B32_E32', 'V_PERMLANE64_B32_E32'): return ctx.compile_lane_pcode(inst.op, inst)
+  # V_ACCVGPR_{MOV,WRITE,READ}: accumulation registers alias VGPRs on CDNA4
+  if any(x in op_name_u for x in ('ACCVGPR_MOV', 'ACCVGPR_WRITE', 'ACCVGPR_READ')):
+    lane, exec_mask = ctx.range(), ctx.read_exec()
+    vdst_reg = ctx.inst_field(type(inst).vdst)
+    src = ctx.rsrc_dyn(ctx.inst_field(type(inst).src0), lane, 32)
+    store = ctx.wvgpr_dyn(vdst_reg, lane, src, exec_mask)
+    return UOp.sink(UOp.sink(store).end(lane), *ctx.inc_pc())
   lane, exec_mask, bits = ctx.range(), ctx.read_exec(), inst.canonical_op_bits
   literal = ctx.inst_field(type(inst).literal) if hasattr(type(inst), 'literal') else None  # type: ignore[union-attr]
   vdst_reg = ctx.inst_field(type(inst).vdst)
@@ -906,7 +924,7 @@ def _compile_vopc(inst: ir3.VOPC | ir3.VOP3 | ir4.VOPC | ir4.VOP3, ctx: _Ctx, op
     if not is_vopc: stores.append(ctx.wsgpr_dyn(dst_off, new_result))
   else:
     if not is_vopc:
-      if is_sdwa and WAVE_SIZE == 64:
+      if WAVE_SIZE == 64:
         lo, hi = _split64(new_result)
         stores = [ctx.wsgpr_dyn(dst_off, lo), ctx.wsgpr_dyn(dst_off + _c(1), hi)]
       else:
@@ -1147,7 +1165,17 @@ def _compile_wmma(inst: ir3.VOP3P | ir4.VOP3P, ctx: _Ctx) -> UOp:
 
 def _compile_vop3p(inst: ir3.VOP3P | ir4.VOP3P, ctx: _Ctx) -> UOp:
   op_name = _op_name(inst)
+  op_name_u = op_name.upper()
   if 'WMMA' in op_name and ('16X16X16_F16' in op_name or '16X16X16_BF16' in op_name): return _compile_wmma(inst, ctx)
+
+  # V_ACCVGPR_WRITE/READ: on CDNA4, accumulation VGPRs share the regular VGPR file — just copy
+  if 'ACCVGPR_WRITE' in op_name_u or 'ACCVGPR_READ' in op_name_u:
+    lane = ctx.range()
+    exec_mask = ctx.read_exec()
+    vdst_reg = ctx.inst_field(type(inst).vdst)
+    src = ctx.rsrc_dyn(ctx.inst_field(type(inst).src0), lane, 32)
+    store = ctx.wvgpr_dyn(vdst_reg, lane, src, exec_mask)
+    return UOp.sink(UOp.sink(store).end(lane), *ctx.inc_pc())
 
   lane = ctx.range()
   exec_mask = ctx.read_exec()
@@ -1214,11 +1242,10 @@ def _compile_vop3p(inst: ir3.VOP3P | ir4.VOP3P, ctx: _Ctx) -> UOp:
       r_lo = _sel(f0_lo, f0_hi, 0, False) * _sel(f1_lo, f1_hi, 1, False) + _sel(f2_lo, f2_hi, 2, False)
       r_hi = _sel(f0_lo, f0_hi, 0, True) * _sel(f1_lo, f1_hi, 1, True) + _sel(f2_lo, f2_hi, 2, True)
     elif 'MOV' in op_name:
-      # V_PK_MOV_B32: packed move — opsel[0] picks src0 half, opsel_hi[0] picks src1 half
+      # V_PK_MOV_B32: packed move — OPSEL[0] picks src0 half for lo, OPSEL[1] picks src1 half for hi
       _opsel = getattr(inst, 'opsel', 0) or 0
       opsel_lo = (_opsel >> 0) & 1 if _opsel else 0
-      opsel_hi_val = getattr(inst, 'opsel_hi', 0) or 0
-      opsel_hi_bit = (opsel_hi_val >> 0) & 1
+      opsel_hi_bit = (_opsel >> 1) & 1 if _opsel else 0
       mov_lo = s0_hi if opsel_lo else s0_lo
       mov_hi = s1_hi if opsel_hi_bit else s1_lo
       d_lo, d_hi = mov_lo, mov_hi
@@ -1236,7 +1263,7 @@ def _compile_vop3p(inst: ir3.VOP3P | ir4.VOP3P, ctx: _Ctx) -> UOp:
   opsel_hi2 = getattr(inst, 'opsel_hi2', 1) if getattr(inst, 'opsel_hi2', 1) is not None else 1
   neg, neg_hi = getattr(inst, 'neg', 0) or 0, getattr(inst, 'neg_hi', 0) or 0
 
-  if 'FMA_MIX' in op_name:
+  if 'FMA_MIX' in op_name or 'MAD_MIX' in op_name:
     combined_opsel_hi = (opsel_hi & 0x3) | ((opsel_hi2 & 0x1) << 2)
     # For FMA_MIX: neg_hi is ABS (not neg!), neg is actual negation
     def apply_abs(v, bit, opsel_hi_bit, opsel_bit):
@@ -1457,7 +1484,7 @@ def _compile_mem_op(inst: ir3.DS | ir3.FLAT | ir3.GLOBAL | ir3.SCRATCH | ir4.DS 
       return UOp.sink(*ended, *ctx.inc_pc())
 
   # Standard path: single lane range
-  writes_return_data = '_RTN' in op_name or (is_lds and op_name.startswith('DS_LOAD')) or bool(is_atomic and glc)
+  writes_return_data = '_RTN' in op_name or (is_lds and (op_name.startswith('DS_LOAD') or op_name.startswith('DS_READ'))) or bool(is_atomic and glc)
   lane = ctx.range()
   active = _lane_active(exec_mask, lane)
   pcode_vars, assigns = parse_pcode(pcode, make_srcs(lane))
@@ -1644,11 +1671,15 @@ def run_asm(lib: int, lib_sz: int, gx: int, gy: int, gz: int, lx: int, ly: int, 
                 sgpr_idx += 1
 
             # RDNA4 SPI places workgroup IDs in architected TTMP registers:
-            #   ttmp[9] = workgroup_id_x (full 32 bits)
-            #   ttmp[7] = workgroup_id_y (low 16 bits) | (workgroup_id_z << 16)
+            # ttmp[9] = workgroup_id_x (full 32 bits)
+            # ttmp[7] = workgroup_id_y (low 16 bits) | (workgroup_id_z << 16)
             if arch == "rdna4":
               st._write_sgpr(ttmp[9].offset, gidx)
               st._write_sgpr(ttmp[7].offset, (gidy & 0xFFFF) | ((gidz & 0xFFFF) << 16))
+            #if arch =="rdna4":
+            #  st._write_sgpr(ttmp[9].offset, gidx)
+            #  st._write_sgpr(ttmp[10].offset, gidy)
+            #  st._write_sgpr(ttmp[11].offset, gidz)
 
             # v0 = packed workitem IDs, scratch stride in secret SGPR
             for lane in range(n_lanes):
