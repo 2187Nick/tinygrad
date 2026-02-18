@@ -644,7 +644,8 @@ def _compile_smem(inst: ir3.SMEM | ir4.SMEM, ctx: _Ctx) -> UOp:
     stores = [ctx.wsgpr_dyn(sdata_reg, extracted)]
     return UOp.sink(*stores, *ctx.inc_pc())
   ndwords = _SMEM_NDWORDS[inst.op]
-  stores = [ctx.wsgpr_dyn(sdata_reg + _c(i), ctx.vmem.index((addr + UOp.const(dtypes.uint64, i * 4) >> UOp.const(dtypes.uint64, 2)).cast(dtypes.int64)))
+  stores = [ctx.wsgpr_dyn(sdata_reg + _c(i),
+            ctx.vmem.index((addr + UOp.const(dtypes.uint64, i * 4) >> UOp.const(dtypes.uint64, 2)).cast(dtypes.int64)))
             for i in range(ndwords)]
   return UOp.sink(*stores, *ctx.inc_pc())
 
@@ -938,7 +939,7 @@ def _compile_wmma(inst: ir3.VOP3P | ir4.VOP3P, ctx: _Ctx) -> UOp:
       v = ctx.rvgpr_dyn(src + _c(reg), UOp.const(dtypes.int, lane))
       return cvt(v & UOp.const(dtypes.uint32, 0xFFFF)), cvt(v >> UOp.const(dtypes.uint32, 16))
     # Build 16x16 A matrix (column-major in VGPRs)
-    mat_a = [[None]*16 for _ in range(16)]
+    mat_a: list[list[UOp]] = [[UOp.const(dtypes.float32, 0)]*16 for _ in range(16)]
     for row in range(16):
       for col in range(16):
         lane = row + (col // 8) * 16
@@ -947,7 +948,7 @@ def _compile_wmma(inst: ir3.VOP3P | ir4.VOP3P, ctx: _Ctx) -> UOp:
         lo, hi = _read_vgpr_f16(src0_r, reg, lane)
         mat_a[row][col] = lo if half_sel == 0 else hi
     # Build 16x16 B matrix (row-major in VGPRs)
-    mat_b = [[None]*16 for _ in range(16)]
+    mat_b: list[list[UOp]] = [[UOp.const(dtypes.float32, 0)]*16 for _ in range(16)]
     for row in range(16):
       for col in range(16):
         lane = col + (row // 8) * 16
@@ -957,7 +958,7 @@ def _compile_wmma(inst: ir3.VOP3P | ir4.VOP3P, ctx: _Ctx) -> UOp:
         mat_b[row][col] = lo if half_sel == 0 else hi
     if is_f16_output:
       # C matrix (row-major, f16): same layout as B
-      mat_c = [[None]*16 for _ in range(16)]
+      mat_c: list[list[UOp]] = [[UOp.const(dtypes.float32, 0)]*16 for _ in range(16)]
       for row in range(16):
         for col in range(16):
           lane = col + (row // 8) * 16
@@ -965,7 +966,8 @@ def _compile_wmma(inst: ir3.VOP3P | ir4.VOP3P, ctx: _Ctx) -> UOp:
           half_sel = (row % 8) % 2
           lo, hi = _read_vgpr_f16(src2_r, reg, lane)
           mat_c[row][col] = lo if half_sel == 0 else hi
-      mat_d = [[sum(mat_a[r][k] * mat_b[k][c] for k in range(16)) + mat_c[r][c] for c in range(16)] for r in range(16)]
+      mat_d = [[sum((mat_a[r][k] * mat_b[k][c] for k in range(16)), start=UOp.const(dtypes.float32, 0)) + mat_c[r][c]
+                for c in range(16)] for r in range(16)]
       def f32_to_f16_bits(v: UOp) -> UOp: return v.cast(dtypes.half).bitcast(dtypes.uint16).cast(dtypes.uint32)
       def f32_to_bf16_bits(v: UOp) -> UOp: return (v.bitcast(dtypes.uint32) >> UOp.const(dtypes.uint32, 16)) & UOp.const(dtypes.uint32, 0xFFFF)
       out_cvt = f32_to_bf16_bits if is_bf16 else f32_to_f16_bits
@@ -987,7 +989,8 @@ def _compile_wmma(inst: ir3.VOP3P | ir4.VOP3P, ctx: _Ctx) -> UOp:
       # C/D matrix (row-major, f32): C[row, col] at lane=col+(row/8)*16, reg=row%8
       mat_c = [[ctx.rvgpr_dyn(src2_r + _c(row % 8), UOp.const(dtypes.int, col + (row // 8) * 16)).bitcast(dtypes.float32)
                 for col in range(16)] for row in range(16)]
-      mat_d = [[sum(mat_a[r][k] * mat_b[k][c] for k in range(16)) + mat_c[r][c] for c in range(16)] for r in range(16)]
+      mat_d = [[sum((mat_a[r][k] * mat_b[k][c] for k in range(16)), start=UOp.const(dtypes.float32, 0)) + mat_c[r][c]
+                for c in range(16)] for r in range(16)]
       stores = [ctx.wvgpr_dyn(vdst_reg + _c(row % 8), UOp.const(dtypes.int, col + (row // 8) * 16),
                 mat_d[row][col].bitcast(dtypes.uint32), exec_mask) for row in range(16) for col in range(16)]
   else:
@@ -999,14 +1002,16 @@ def _compile_wmma(inst: ir3.VOP3P | ir4.VOP3P, ctx: _Ctx) -> UOp:
     if is_f16_output:
       mat_c = [cvt(ctx.rvgpr_dyn(src2_r + _c(i // 32), UOp.const(dtypes.int, i % 32)) & UOp.const(dtypes.uint32, 0xFFFF))
                 for i in range(256)]
-      mat_d = [sum(mat_a[row*16+k] * mat_b[col*16+k] for k in range(16)) + mat_c[row*16+col] for row in range(16) for col in range(16)]
+      mat_d = [sum((mat_a[row*16+k] * mat_b[col*16+k] for k in range(16)), start=UOp.const(dtypes.float32, 0)) + mat_c[row*16+col]
+               for row in range(16) for col in range(16)]
       def f32_to_f16_bits(v: UOp) -> UOp: return v.cast(dtypes.half).bitcast(dtypes.uint16).cast(dtypes.uint32)
       def f32_to_bf16_bits(v: UOp) -> UOp: return (v.bitcast(dtypes.uint32) >> UOp.const(dtypes.uint32, 16)) & UOp.const(dtypes.uint32, 0xFFFF)
       out_cvt = f32_to_bf16_bits if is_bf16 else f32_to_f16_bits
       stores = [ctx.wvgpr_dyn(vdst_reg + _c(i // 32), UOp.const(dtypes.int, i % 32), out_cvt(mat_d[i]), exec_mask) for i in range(256)]
     else:
       mat_c = [ctx.rvgpr_dyn(src2_r + _c(i // 32), UOp.const(dtypes.int, i % 32)).bitcast(dtypes.float32) for i in range(256)]
-      mat_d = [sum(mat_a[row*16+k] * mat_b[col*16+k] for k in range(16)) + mat_c[row*16+col] for row in range(16) for col in range(16)]
+      mat_d = [sum((mat_a[row*16+k] * mat_b[col*16+k] for k in range(16)), start=UOp.const(dtypes.float32, 0)) + mat_c[row*16+col]
+               for row in range(16) for col in range(16)]
       stores = [ctx.wvgpr_dyn(vdst_reg + _c(i // 32), UOp.const(dtypes.int, i % 32), mat_d[i].bitcast(dtypes.uint32), exec_mask) for i in range(256)]
   return UOp.sink(*stores, *ctx.inc_pc())
 
