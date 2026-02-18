@@ -1432,15 +1432,14 @@ class WaveState:
     for i in range(65): self._write_sgpr(128 + i, i)  # 128-192: integers 0-64
     for i in range(16): self._write_sgpr(193 + i, (-(i + 1)) & MASK32)  # 193-208: -1 to -16
     for off, val in F32_INLINE.items(): self._write_sgpr(off, val)  # 240-248: float constants
-    self._write_sgpr(EXEC_LO.offset, (1 << min(n_lanes, 32)) - 1)
-    if n_lanes > 32: self._write_sgpr(EXEC_LO.offset + 1, (1 << (n_lanes - 32)) - 1)  # EXEC_HI for wave64
+    self._write_sgpr(EXEC_LO.offset, (1 << n_lanes) - 1)
     self._write_sgpr(PC_LO_IDX, 0)
     self._write_sgpr(PC_HI_IDX, 0)
 
   def _write_sgpr(self, idx: int, val: int): self._sgpr_mv[idx] = val & MASK32
   def _read_sgpr(self, idx: int) -> int: return self._sgpr_mv[idx]
-  def _write_vgpr(self, reg: int, lane: int, val: int): self._vgpr_mv[reg * WAVE_SIZE + lane] = val & MASK32
-  def _read_vgpr(self, reg: int, lane: int) -> int: return self._vgpr_mv[reg * WAVE_SIZE + lane]
+  def _write_vgpr(self, reg: int, lane: int, val: int): self._vgpr_mv[reg * 32 + lane] = val & MASK32
+  def _read_vgpr(self, reg: int, lane: int) -> int: return self._vgpr_mv[reg * 32 + lane]
 
   @property
   def pc(self) -> int: return self._read_sgpr(PC_LO_IDX) | (self._read_sgpr(PC_HI_IDX) << 32)
@@ -1460,13 +1459,6 @@ def run_asm(lib: int, lib_sz: int, gx: int, gy: int, gz: int, lx: int, ly: int, 
   program = {lib + offset: val for offset, val in program_raw.items()}  # Remap to actual addresses
   lds_size = ((rsrc2 & hsa.AMD_COMPUTE_PGM_RSRC_TWO_GRANULATED_LDS_SIZE) >> hsa.AMD_COMPUTE_PGM_RSRC_TWO_GRANULATED_LDS_SIZE_SHIFT) * 512
   total_threads = lx * ly * lz
-  if DEBUG >= 2:
-    user_sgpr = (rsrc2 & hsa.AMD_COMPUTE_PGM_RSRC_TWO_USER_SGPR_COUNT) >> hsa.AMD_COMPUTE_PGM_RSRC_TWO_USER_SGPR_COUNT_SHIFT
-    en_x = bool(rsrc2 & hsa.AMD_COMPUTE_PGM_RSRC_TWO_ENABLE_SGPR_WORKGROUP_ID_X)
-    en_y = bool(rsrc2 & hsa.AMD_COMPUTE_PGM_RSRC_TWO_ENABLE_SGPR_WORKGROUP_ID_Y)
-    en_z = bool(rsrc2 & hsa.AMD_COMPUTE_PGM_RSRC_TWO_ENABLE_SGPR_WORKGROUP_ID_Z)
-    print(f"[emu] dispatch grid=({gx},{gy},{gz}) local=({lx},{ly},{lz}) rsrc2={rsrc2:#x} user_sgpr={user_sgpr} "
-          f"en_wgid=({en_x},{en_y},{en_z}) arch={arch} scratch={scratch_size} lds={lds_size}")
 
   # Use Buffer objects with external_ptr=0 for vmem
   vmem_buf = Buffer('CPU', 1 << 46, dtypes.uint32, options=BufferSpec(external_ptr=0)).ensure_allocated()
@@ -1493,9 +1485,7 @@ def run_asm(lib: int, lib_sz: int, gx: int, gy: int, gz: int, lx: int, ly: int, 
                 st._write_sgpr(sgpr_idx, gid)
                 sgpr_idx += 1
 
-            # RDNA4 SPI places workgroup IDs in architected TTMP registers:
-            #   ttmp[9] = workgroup_id_x (full 32 bits)
-            #   ttmp[7] = workgroup_id_y (low 16 bits) | (workgroup_id_z << 16)
+            # RDNA4 TTMP workgroup IDs (per ISA): ttmp9 = X[31:0], ttmp7 = {Z[15:0], Y[15:0]}
             if arch == "rdna4":
               st._write_sgpr(ttmp[9].offset, gidx)
               st._write_sgpr(ttmp[7].offset, (gidy & 0xFFFF) | ((gidz & 0xFFFF) << 16))
