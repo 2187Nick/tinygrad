@@ -627,7 +627,7 @@ def _compile_smem(inst: ir3.SMEM | ir4.SMEM, ctx: _Ctx) -> UOp:
   # CDNA SMEM has soffset_en bit - only add soffset when enabled
   soffset_val = ctx.rsgpr_dyn(soffset).cast(dtypes.uint64)
   if hasattr(type(inst), 'soffset_en'):
-    soffset_en = ctx.inst_field(type(inst).soffset_en)
+    soffset_en = ctx.inst_field(type(inst).soffset_en)  # type: ignore[union-attr]
     soffset_val = soffset_en.ne(_c(0)).where(soffset_val, UOp.const(dtypes.uint64, 0))
   addr = _u64(ctx.rsgpr_dyn(sbase), ctx.rsgpr_dyn(sbase + _c(1))) + offset.cast(dtypes.uint64) + soffset_val
   _SMEM_NDWORDS = {ir3.SMEMOp.S_LOAD_B32: 1, ir3.SMEMOp.S_LOAD_B64: 2, ir3.SMEMOp.S_LOAD_B128: 4,
@@ -736,7 +736,7 @@ def _compile_vop12(inst: ir3.VOP1 | ir3.VOP1_SDST | ir3.VOP2 | ir4.VOP1 | ir4.VO
     # Handle VOP1 hi-half source operand (src0 >= v[128] for 16-bit ops)
     # SDWA: use vsrc0 (VGPR) instead of src0 (which is the SDWA marker 0xF9)
     if hasattr(type(inst), 'vsrc0'):
-      src0_off = _c(256) + ctx.inst_field(type(inst).vsrc0)
+      src0_off = _c(256) + ctx.inst_field(type(inst).vsrc0)  # type: ignore[union-attr]
     else:
       src0_off = ctx.inst_field(type(inst).src0)
     s0 = ctx.rsrc_dyn(src0_off, lane, bits['s0'], literal)
@@ -758,7 +758,7 @@ def _compile_vop12(inst: ir3.VOP1 | ir3.VOP1_SDST | ir3.VOP2 | ir4.VOP1 | ir4.VO
     # Handle VOP2 hi-half src0 operand (src0 >= v[128] for 16-bit ops)
     # SDWA: use vsrc0 (VGPR) instead of src0 (which is the SDWA marker 0xF9)
     if hasattr(type(inst), 'vsrc0'):
-      src0_off = _c(256) + ctx.inst_field(type(inst).vsrc0)
+      src0_off = _c(256) + ctx.inst_field(type(inst).vsrc0)  # type: ignore[union-attr]
     else:
       src0_off = ctx.inst_field(type(inst).src0)
     s0 = ctx.rsrc_dyn(src0_off, lane, bits['s0'], literal)
@@ -851,7 +851,7 @@ def _compile_vopc(inst: ir3.VOPC | ir3.VOP3 | ir4.VOPC | ir4.VOP3, ctx: _Ctx, op
   if is_vopc:
     # SDWA VOPC: use vsrc0 (VGPR) instead of src0 (which is the SDWA token 0xF9)
     if hasattr(type(inst), 'vsrc0'):
-      src0_off = _c(256) + ctx.inst_field(type(inst).vsrc0)
+      src0_off = _c(256) + ctx.inst_field(type(inst).vsrc0)  # type: ignore[union-attr]
     else:
       src0_off = ctx.inst_field(type(inst).src0)
     vsrc1_off = ctx.inst_field(type(inst).vsrc1)  # type: ignore[union-attr]
@@ -877,7 +877,7 @@ def _compile_vopc(inst: ir3.VOPC | ir3.VOP3 | ir4.VOPC | ir4.VOP3, ctx: _Ctx, op
   sdwa_s1_sext = getattr(inst, 'src1_sext', 0) if is_sdwa else 0
   # SDWA VOPC_SDWA_SDST: destination is an SGPR pair, not VCC
   if is_sdwa and hasattr(type(inst), 'sdst'):
-    dst_off = ctx.inst_field(type(inst).sdst)
+    dst_off = ctx.inst_field(type(inst).sdst)  # type: ignore[union-attr]
     is_vopc = False  # treat like VOP3 for write destination
 
   is_float, is_f64, pcode = any(x in op_name for x in ('_F32', '_F64', '_F16')), '_F64' in op_name, get_pcode(inst.op)
@@ -1133,21 +1133,19 @@ def _compile_wmma(inst: ir3.VOP3P | ir4.VOP3P, ctx: _Ctx) -> UOp:
     def read_f16_mat(src) -> list[UOp]:
       return [f for l in range(16) for r in range(8) for v in [ctx.rvgpr_dyn(src + _c(r), UOp.const(dtypes.int, l))]
               for f in [cvt(v & UOp.const(dtypes.uint32, 0xFFFF)), cvt(v >> UOp.const(dtypes.uint32, 16))]]
-    mat_a: list[UOp]
-    mat_b: list[UOp]
-    mat_a, mat_b = read_f16_mat(src0_r), read_f16_mat(src1_r)
+    mat_a, mat_b = read_f16_mat(src0_r), read_f16_mat(src1_r)  # type: ignore[no-redef]
     if is_f16_output:
-      mat_c: list[UOp] = [cvt(ctx.rvgpr_dyn(src2_r + _c(i // 32), UOp.const(dtypes.int, i % 32)) & UOp.const(dtypes.uint32, 0xFFFF))
+      mat_c = [cvt(ctx.rvgpr_dyn(src2_r + _c(i // 32), UOp.const(dtypes.int, i % 32)) & UOp.const(dtypes.uint32, 0xFFFF))  # type: ignore[no-redef]
                 for i in range(256)]
-      mat_d: list[UOp] = [sum((mat_a[row*16+k] * mat_b[col*16+k] for k in range(16)), start=UOp.const(dtypes.float32, 0)) + mat_c[row*16+col]
+      mat_d = [sum((mat_a[row*16+k] * mat_b[col*16+k] for k in range(16)), start=UOp.const(dtypes.float32, 0)) + mat_c[row*16+col]  # type: ignore[no-redef]
                for row in range(16) for col in range(16)]
       def f32_to_f16_bits(v: UOp) -> UOp: return v.cast(dtypes.half).bitcast(dtypes.uint16).cast(dtypes.uint32)
       def f32_to_bf16_bits(v: UOp) -> UOp: return (v.bitcast(dtypes.uint32) >> UOp.const(dtypes.uint32, 16)) & UOp.const(dtypes.uint32, 0xFFFF)
       out_cvt = f32_to_bf16_bits if is_bf16 else f32_to_f16_bits
       stores = [ctx.wvgpr_dyn(vdst_reg + _c(i // 32), UOp.const(dtypes.int, i % 32), out_cvt(mat_d[i]), exec_mask) for i in range(256)]
     else:
-      mat_c: list[UOp] = [ctx.rvgpr_dyn(src2_r + _c(i // 32), UOp.const(dtypes.int, i % 32)).bitcast(dtypes.float32) for i in range(256)]
-      mat_d: list[UOp] = [sum((mat_a[row*16+k] * mat_b[col*16+k] for k in range(16)), start=UOp.const(dtypes.float32, 0)) + mat_c[row*16+col]
+      mat_c = [ctx.rvgpr_dyn(src2_r + _c(i // 32), UOp.const(dtypes.int, i % 32)).bitcast(dtypes.float32) for i in range(256)]  # type: ignore[no-redef]
+      mat_d = [sum((mat_a[row*16+k] * mat_b[col*16+k] for k in range(16)), start=UOp.const(dtypes.float32, 0)) + mat_c[row*16+col]  # type: ignore[no-redef]
                for row in range(16) for col in range(16)]
       stores = [ctx.wvgpr_dyn(vdst_reg + _c(i // 32), UOp.const(dtypes.int, i % 32), mat_d[i].bitcast(dtypes.uint32), exec_mask) for i in range(256)]
   return UOp.sink(*stores, *ctx.inc_pc())
