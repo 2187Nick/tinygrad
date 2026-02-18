@@ -998,23 +998,24 @@ def _compile_wmma(inst: ir3.VOP3P | ir4.VOP3P, ctx: _Ctx) -> UOp:
     def read_f16_mat(src) -> list[UOp]:
       return [f for l in range(16) for r in range(8) for v in [ctx.rvgpr_dyn(src + _c(r), UOp.const(dtypes.int, l))]
               for f in [cvt(v & UOp.const(dtypes.uint32, 0xFFFF)), cvt(v >> UOp.const(dtypes.uint32, 16))]]
-    mat_a: list[UOp]
-    mat_b: list[UOp]
-    mat_a, mat_b = read_f16_mat(src0_r), read_f16_mat(src1_r)
+    mat_a, mat_b = read_f16_mat(src0_r), read_f16_mat(src1_r)  # type: ignore[assignment]
     if is_f16_output:
-      mat_c: list[UOp] = [cvt(ctx.rvgpr_dyn(src2_r + _c(i // 32), UOp.const(dtypes.int, i % 32)) & UOp.const(dtypes.uint32, 0xFFFF))
+      mat_c = [cvt(ctx.rvgpr_dyn(src2_r + _c(i // 32), UOp.const(dtypes.int, i % 32)) & UOp.const(dtypes.uint32, 0xFFFF))  # type: ignore[assignment,misc]
                 for i in range(256)]
-      mat_d: list[UOp] = [sum((mat_a[row*16+k] * mat_b[col*16+k] for k in range(16)), start=UOp.const(dtypes.float32, 0)) + mat_c[row*16+col]
+      mat_d = [sum((mat_a[row*16+k] * mat_b[col*16+k] for k in range(16)), start=UOp.const(dtypes.float32, 0)) + mat_c[row*16+col]  # type: ignore[assignment,operator,misc]
                for row in range(16) for col in range(16)]
       def f32_to_f16_bits(v: UOp) -> UOp: return v.cast(dtypes.half).bitcast(dtypes.uint16).cast(dtypes.uint32)
       def f32_to_bf16_bits(v: UOp) -> UOp: return (v.bitcast(dtypes.uint32) >> UOp.const(dtypes.uint32, 16)) & UOp.const(dtypes.uint32, 0xFFFF)
       out_cvt = f32_to_bf16_bits if is_bf16 else f32_to_f16_bits
-      stores = [ctx.wvgpr_dyn(vdst_reg + _c(i // 32), UOp.const(dtypes.int, i % 32), out_cvt(mat_d[i]), exec_mask) for i in range(256)]
+      stores = [ctx.wvgpr_dyn(vdst_reg + _c(i // 32), UOp.const(dtypes.int, i % 32), out_cvt(mat_d[i]), exec_mask)  # type: ignore[arg-type]
+                for i in range(256)]
     else:
-      mat_c: list[UOp] = [ctx.rvgpr_dyn(src2_r + _c(i // 32), UOp.const(dtypes.int, i % 32)).bitcast(dtypes.float32) for i in range(256)]
-      mat_d: list[UOp] = [sum((mat_a[row*16+k] * mat_b[col*16+k] for k in range(16)), start=UOp.const(dtypes.float32, 0)) + mat_c[row*16+col]
+      mat_c = [ctx.rvgpr_dyn(src2_r + _c(i // 32), UOp.const(dtypes.int, i % 32)).bitcast(dtypes.float32)  # type: ignore[assignment]
+               for i in range(256)]
+      mat_d = [sum((mat_a[row*16+k] * mat_b[col*16+k] for k in range(16)), start=UOp.const(dtypes.float32, 0)) + mat_c[row*16+col]  # type: ignore[assignment,operator,misc]
                for row in range(16) for col in range(16)]
-      stores = [ctx.wvgpr_dyn(vdst_reg + _c(i // 32), UOp.const(dtypes.int, i % 32), mat_d[i].bitcast(dtypes.uint32), exec_mask) for i in range(256)]
+      stores = [ctx.wvgpr_dyn(vdst_reg + _c(i // 32), UOp.const(dtypes.int, i % 32), mat_d[i].bitcast(dtypes.uint32),  # type: ignore[attr-defined]
+                exec_mask) for i in range(256)]
   return UOp.sink(*stores, *ctx.inc_pc())
 
 def _compile_vop3p(inst: ir3.VOP3P | ir4.VOP3P, ctx: _Ctx) -> UOp:
