@@ -43,7 +43,7 @@ def _bitreverse(v: UOp, bits: int) -> UOp:
 
 def _extract_bits(val: UOp, hi: int, lo: int) -> UOp:
   dt = dtypes.uint64 if val.dtype in (dtypes.uint64, dtypes.int64) else dtypes.uint32
-  return ((val >> _const(dt, lo)) if lo > 0 else val) & _const(val.dtype, (1 << (hi - lo + 1)) - 1)
+  return ((val >> _const(dt, lo)) if lo > 0 else val) & _const(dt, (1 << (hi - lo + 1)) - 1)
 
 def _set_bit(old, pos, val):
   mask = _u32(1) << pos
@@ -557,7 +557,8 @@ class Parser:
       self.eat('LBRACKET')
       self.eat_val('laneId', 'IDENT')
       self.eat('RBRACKET')
-      result = (base >> _to_u32(self.vars['laneId'])) & _u32(1)
+      lane_shift = self.vars['laneId'].cast(base.dtype) if base.dtype != dtypes.uint32 else _to_u32(self.vars['laneId'])
+      result = (base >> lane_shift) & _const(base.dtype, 1)
       if self.try_eat('DOT'):
         dt_name = self.eat('IDENT').val
         return result.cast(DTYPES.get(dt_name, dtypes.uint32))
