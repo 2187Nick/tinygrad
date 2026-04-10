@@ -122,12 +122,26 @@ _LDS_LATENCY = 32        # LDS read/write completion latency
 _SMEM_LATENCY = 200      # Scalar memory read latency (DRAM, approximate — variable on real HW)
 _VMEM_LATENCY = 300      # Vector memory read/write latency (DRAM, approximate — variable on real HW)
 _BARRIER_RESUME = 18     # Cycles from last wave arriving at barrier to first instruction after barrier
-_WAVESTART_GAP = 4       # Cycles between consecutive WAVESTART allocations
+_WAVESTART_GAP = 1       # Cycles between consecutive WAVESTART allocations (confirmed from GFX1100 SQTT traces)
 _FIRST_INST_GAP = 2      # Cycles from WAVESTART to first instruction issue
 # S_DELAY_ALU INSTID → stall cycles mapping (indexed 0-11):
 # 0=NO_DEP, 1-4=VALU_DEP_1..4 (latency 4: stall=4-N), 5-7=TRANS32_DEP_1..3 (latency 10: stall=10-N),
 # 8=FMA_ACCUM_CYCLE_1, 9-11=SALU_CYCLE_1..3
 _INSTID_STALLS = (0, 3, 2, 1, 0, 9, 8, 7, 1, 1, 2, 3)
+
+# Per-instruction SQ issue cost: multi-cycle ops occupy the execution unit for N cycles,
+# preventing the same wave from issuing again until the unit is free. Other waves can still
+# issue on the next global clock tick. Suffix number in InstOp name = issue cost.
+_INSTOP_ISSUE_COST: dict[InstOp, int] = {}
+for _op in InstOp:
+  _parts = _op.name.rsplit('_', 1)
+  if len(_parts) == 2 and _parts[1].isdigit() and int(_parts[1]) > 1: _INSTOP_ISSUE_COST[_op] = int(_parts[1])
+del _op, _parts
+
+def _get_issue_cost(pkt_cls, kwargs) -> int:
+  """Get the SQ issue cost for an instruction packet (default 1 cycle)."""
+  if pkt_cls is INST and 'op' in kwargs: return _INSTOP_ISSUE_COST.get(kwargs['op'], 1)
+  return 1
 
 def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, type, dict]]:
   """Simulate RDNA3 SQ round-robin scheduling to assign cycle-accurate timestamps.
@@ -267,6 +281,7 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
     issue_cycle += stall
 
     timed.append((issue_cycle, wid, pkt_cls, kwargs))
+    issue_cost = _get_issue_cost(pkt_cls, kwargs)
 
     # Track memory operation completion times
     if cat == 'smem': lgkm_pend[i].append(issue_cycle + _SMEM_LATENCY)
@@ -277,11 +292,11 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
     # Update wave state
     if cat == 'barrier':
       at_barrier[i] = True
-      ready[i] = issue_cycle + 1
+      ready[i] = issue_cycle + issue_cost
     elif cat == 'waveend':
       wave_done[i] = True
     else:
-      ready[i] = issue_cycle + 1
+      ready[i] = issue_cycle + issue_cost
 
     clock = issue_cycle + 1
     rr = (i + 1) % n
