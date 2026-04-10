@@ -428,10 +428,11 @@ def _init_sqtt_encoder(entry_pc: int):
     nibbles: list[int] = []
     _emit_nibbles(nibbles, LAYOUT_HEADER, layout=3, sel_a=6)
     # Emit COMPUTE_PGM_LO/HI REG packets so rocprof can reconstruct the wave's initial PC.
-    # subop is the offset from regCOMPUTE_DISPATCH_INITIATOR (0x1BA0): LO=0xC, HI=0xD. hi_byte=0x80 = is_config bit, slot=0 (CS).
+    # subop = offset from regCOMPUTE_DISPATCH_INITIATOR (0x1BA0): LO=0xC, HI=0xD.
+    # hi_byte=0x82 = is_config(bit7) + slot MSB(bit1); slot=4 = CS compute pipe (matches real hardware).
     pgm = entry_pc >> 8
-    _emit_nibbles(nibbles, REG, delta=0, slot=0, hi_byte=0x80, subop=0xC, val32=pgm & 0xFFFFFFFF)
-    _emit_nibbles(nibbles, REG, delta=0, slot=0, hi_byte=0x80, subop=0xD, val32=(pgm >> 32) & 0xFFFFFFFF)
+    _emit_nibbles(nibbles, REG, delta=0, slot=4, hi_byte=0x82, subop=0xC, val32=pgm & 0xFFFFFFFF)
+    _emit_nibbles(nibbles, REG, delta=0, slot=4, hi_byte=0x82, subop=0xD, val32=(pgm >> 32) & 0xFFFFFFFF)
     prev_time = 0
     for ts, _, pkt_cls, kwargs in timed:
       delta = max(ts - prev_time, 0)
