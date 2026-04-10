@@ -80,7 +80,7 @@ sqtt_traces: list[bytes] = []
 
 # Encoder primitives
 from tinygrad.renderer.amd.sqtt import (_build_decode_tables, PACKET_TYPES_RDNA3, LAYOUT_HEADER, WAVESTART, WAVEEND, INST, IMMEDIATE, VALUINST,
-                                        TS_DELTA_SHORT, TS_DELTA_S5_W3, InstOp)
+                                        TS_DELTA_SHORT, TS_DELTA_S5_W3, REG, InstOp)
 
 _NIB_COUNTS: dict = {cls: nc for _, (cls, nc, *_) in _build_decode_tables(PACKET_TYPES_RDNA3)[0].items()}
 
@@ -306,7 +306,7 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
 
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def _init_sqtt_encoder():
+def _init_sqtt_encoder(entry_pc: int):
   """Initialize and return SQTT encoder with cycle-accurate timing model.
 
   Uses deferred emission: emit() collects per-wave events, finalize() runs the SQ timing
@@ -375,7 +375,7 @@ def _init_sqtt_encoder():
     w = wave_id & 0x1F
     events = wave_events.setdefault(wave_id, [])
     if wave_id not in started:
-      events.append((WAVESTART, {'simd': 0, 'cu_lo': 0, 'wave': w, 'id7': wave_id}, 'wavestart', None))
+      events.append((WAVESTART, {'simd': 0, 'cu_lo': 0, 'wave': w, 'id7': (entry_pc >> 2) & 0x3FFF}, 'wavestart', None))
       started.add(wave_id)
     inst_type, inst_op, op_name = type(inst), inst.op.value if hasattr(inst, 'op') else 0, inst.op.name if hasattr(inst, 'op') else ""
 
@@ -427,6 +427,11 @@ def _init_sqtt_encoder():
     # Encode packets with correct inter-event deltas
     nibbles: list[int] = []
     _emit_nibbles(nibbles, LAYOUT_HEADER, layout=3, sel_a=6)
+    # Emit COMPUTE_PGM_LO/HI REG packets so rocprof can reconstruct the wave's initial PC.
+    # subop is the offset from regCOMPUTE_DISPATCH_INITIATOR (0x1BA0): LO=0xC, HI=0xD. hi_byte=0x82 marks config registers.
+    pgm = entry_pc >> 8
+    _emit_nibbles(nibbles, REG, delta=0, slot=0, hi_byte=0x82, subop=0xC, val32=pgm & 0xFFFFFFFF)
+    _emit_nibbles(nibbles, REG, delta=0, slot=0, hi_byte=0x82, subop=0xD, val32=(pgm >> 32) & 0xFFFFFFFF)
     prev_time = 0
     for ts, _, pkt_cls, kwargs in timed:
       delta = max(ts - prev_time, 0)
@@ -2366,7 +2371,7 @@ def run_asm(lib: int, lib_sz: int, gx: int, gy: int, gz: int, lx: int, ly: int, 
 
   # Initialize SQTT encoder — emits packets inline as instructions execute (only when profiling)
   if PROFILE:
-    sqtt_emit, sqtt_finish, sqtt_finalize = _init_sqtt_encoder()
+    sqtt_emit, sqtt_finish, sqtt_finalize = _init_sqtt_encoder(lib)
 
   def _ensure_compiled(pc: int) -> tuple[Callable, list[int], bool, Inst]:
     if pc not in program:
