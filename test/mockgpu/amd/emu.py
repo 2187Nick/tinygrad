@@ -375,7 +375,8 @@ def _init_sqtt_encoder(entry_pc: int):
     w = wave_id & 0x1F
     events = wave_events.setdefault(wave_id, [])
     if wave_id not in started:
-      events.append((WAVESTART, {'simd': 0, 'cu_lo': 0, 'wave': w, 'id7': (entry_pc >> 2) & 0x3FFF}, 'wavestart', None))
+      # id7=0x20 → pipe=0, me=1 (bits[4:3]=pipe, bit[5]=me) matching REG hi_byte=0x82 so rocprof reads correct wave_start_addr
+      events.append((WAVESTART, {'simd': 0, 'cu_lo': 0, 'wave': w, 'id7': 0x20}, 'wavestart', None))
       started.add(wave_id)
     inst_type, inst_op, op_name = type(inst), inst.op.value if hasattr(inst, 'op') else 0, inst.op.name if hasattr(inst, 'op') else ""
 
