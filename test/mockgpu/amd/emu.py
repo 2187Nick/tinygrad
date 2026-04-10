@@ -375,8 +375,7 @@ def _init_sqtt_encoder(entry_pc: int):
     w = wave_id & 0x1F
     events = wave_events.setdefault(wave_id, [])
     if wave_id not in started:
-      # id7=0x20 → pipe=0, me=1 (bits[4:3]=pipe, bit[5]=me) matching REG hi_byte=0x82 so rocprof reads correct wave_start_addr
-      events.append((WAVESTART, {'simd': 0, 'cu_lo': 0, 'wave': w, 'id7': 0x20}, 'wavestart', None))
+      events.append((WAVESTART, {'simd': 0, 'cu_lo': 0, 'wave': w, 'id7': 0}, 'wavestart', None))
       started.add(wave_id)
     inst_type, inst_op, op_name = type(inst), inst.op.value if hasattr(inst, 'op') else 0, inst.op.name if hasattr(inst, 'op') else ""
 
@@ -429,10 +428,10 @@ def _init_sqtt_encoder(entry_pc: int):
     nibbles: list[int] = []
     _emit_nibbles(nibbles, LAYOUT_HEADER, layout=3, sel_a=6)
     # Emit COMPUTE_PGM_LO/HI REG packets so rocprof can reconstruct the wave's initial PC.
-    # subop is the offset from regCOMPUTE_DISPATCH_INITIATOR (0x1BA0): LO=0xC, HI=0xD. hi_byte=0x82 marks config registers.
+    # subop is the offset from regCOMPUTE_DISPATCH_INITIATOR (0x1BA0): LO=0xC, HI=0xD. hi_byte=0x80 = is_config bit, slot=0 (CS).
     pgm = entry_pc >> 8
-    _emit_nibbles(nibbles, REG, delta=0, slot=0, hi_byte=0x82, subop=0xC, val32=pgm & 0xFFFFFFFF)
-    _emit_nibbles(nibbles, REG, delta=0, slot=0, hi_byte=0x82, subop=0xD, val32=(pgm >> 32) & 0xFFFFFFFF)
+    _emit_nibbles(nibbles, REG, delta=0, slot=0, hi_byte=0x80, subop=0xC, val32=pgm & 0xFFFFFFFF)
+    _emit_nibbles(nibbles, REG, delta=0, slot=0, hi_byte=0x80, subop=0xD, val32=(pgm >> 32) & 0xFFFFFFFF)
     prev_time = 0
     for ts, _, pkt_cls, kwargs in timed:
       delta = max(ts - prev_time, 0)

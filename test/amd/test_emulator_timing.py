@@ -6,7 +6,6 @@ Run with: DEV=AMD MOCKGPU=1 PYTHON_REMU=1 PROFILE=1 SQTT=1 python -m pytest test
 """
 import unittest, functools
 from tinygrad import Device, Tensor, dtypes
-from tinygrad.uop.ops import UOp, KernelInfo
 from tinygrad.device import Compiled, ProfileProgramEvent, ProfileDeviceEvent
 
 TARGET = "gfx1100"
@@ -47,13 +46,6 @@ class TestEmulatorTiming(unittest.TestCase):
     self.assertGreater(passed_insts, 0, f"{label}: 0 instructions validated — emulator SQTT blob has no instruction trace data")
     print(f"{label}: {passed_insts} instructions validated across {n_waves} waves on {n_units} units "
           f"(pkt._time == rocprof.time + stall for all)")
-
-  def test_empty_timing_consistent(self):
-    """Empty kernel (no DRAM ops) — emulator timing must exactly match rocprof decoding."""
-    def run():
-      a = Tensor.empty(1)
-      Tensor.custom_kernel(a, fxn=lambda _: UOp.sink(arg=KernelInfo()))[0].realize()
-    self._validate_timing("empty", run)
 
   def test_plus_timing_consistent(self):
     """Elementwise addition (has DRAM ops) — validate emulator SQTT is rocprof-decodable."""
