@@ -113,9 +113,17 @@ def _init_sqtt_encoder():
   _FLAT = (ir3.FLAT, ir4.VFLAT, irc.FLAT)
   _SCRATCH = (ir3.SCRATCH, ir4.VSCRATCH, irc.SCRATCH)
 
+  # S_DELAY_ALU INSTID → stall cycles mapping (indexed 0-11):
+  # 0=NO_DEP, 1-4=VALU_DEP_1..4 (latency 4: stall=4-N), 5-7=TRANS32_DEP_1..3 (latency 10: stall=10-N),
+  # 8=FMA_ACCUM_CYCLE_1, 9-11=SALU_CYCLE_1..3
+  _INSTID_STALLS = (0, 3, 2, 1, 0, 9, 8, 7, 1, 1, 2, 3)
+
+  # Per-wave delay state: wave_id -> [inst_count, dep0_target, dep0_stall, dep1_target, dep1_stall]
+  # inst_count: total instructions seen (all types); dep*_target: inst_count when stall should fire
+  wave_delay_state: dict[int, list] = {}
+
   # SOPP classification sets
-  _SOPP_SKIP = {SOPPOp3.S_ENDPGM.value, SOPPOp3.S_ENDPGM_SAVED.value, SOPPOp3.S_ENDPGM_ORDERED_PS_DONE.value,
-                SOPPOp3.S_DELAY_ALU.value}
+  _SOPP_SKIP = {SOPPOp3.S_ENDPGM.value, SOPPOp3.S_ENDPGM_SAVED.value, SOPPOp3.S_ENDPGM_ORDERED_PS_DONE.value}
   _SOPP_IMMEDIATE = {SOPPOp3.S_NOP.value, SOPPOp3.S_CLAUSE.value, SOPPOp3.S_WAITCNT.value, SOPPOp3.S_WAITCNT_DEPCTR.value,
                      SOPPOp3.S_WAIT_IDLE.value, SOPPOp3.S_WAIT_EVENT.value, SOPPOp3.S_SLEEP.value,
                      SOPPOp3.S_SET_INST_PREFETCH_DISTANCE.value}
@@ -163,19 +171,45 @@ def _init_sqtt_encoder():
       _emit_nibbles(nibbles, WAVESTART, delta=1, simd=0, cu_lo=0, wave=w, id7=wave_id)
       started.add(wave_id)
     inst_type, inst_op, op_name = type(inst), inst.op.value if hasattr(inst, 'op') else 0, inst.op.name if hasattr(inst, 'op') else ""
+
+    # Per-wave S_DELAY_ALU state: [inst_count, dep0_target, dep0_stall, dep1_target, dep1_stall]
+    ws = wave_delay_state.setdefault(wave_id, [0, -1, 0, -1, 0])
+    ws[0] += 1  # count every instruction (all types) for INSTSKIP tracking
+
     if issubclass(inst_type, _SOPP):
       if inst_op in _SOPP_SKIP: return
-      elif inst_op in _SOPP_IMMEDIATE: _emit_nibbles(nibbles, IMMEDIATE, delta=1, wave=w)
-      elif inst_op in _SOPP_BARRIER: _emit_nibbles(nibbles, INST, delta=1, wave=w, op=InstOp.BARRIER)
+      # S_DELAY_ALU: parse stall hints and store in wave state — no packet emitted
+      if inst_op == SOPPOp3.S_DELAY_ALU.value:
+        simm16 = inst.simm16
+        instid0 = simm16 & 0xF
+        instskip = (simm16 >> 4) & 0x7
+        instid1 = (simm16 >> 7) & 0xF
+        # DEP0: applies to instruction at offset +1 from S_DELAY_ALU
+        ws[1] = ws[0] + 1
+        ws[2] = _INSTID_STALLS[instid0]
+        # DEP1: applies to instruction at offset +(instskip+1) from S_DELAY_ALU
+        ws[3] = ws[0] + instskip + 1 if instid1 else -1
+        ws[4] = _INSTID_STALLS[instid1] if instid1 else 0
+        return
+
+    # Compute delta for this packet-emitting instruction
+    stall = 0
+    if ws[1] == ws[0]: stall = max(stall, ws[2]); ws[1] = -1
+    if ws[3] == ws[0]: stall = max(stall, ws[4]); ws[3] = -1
+    delta = 1 + stall
+
+    if issubclass(inst_type, _SOPP):
+      if inst_op in _SOPP_IMMEDIATE: _emit_nibbles(nibbles, IMMEDIATE, delta=delta, wave=w)
+      elif inst_op in _SOPP_BARRIER: _emit_nibbles(nibbles, INST, delta=delta, wave=w, op=InstOp.BARRIER)
       elif inst_op in _SOPP_BRANCH:
-        _emit_nibbles(nibbles, INST, delta=1, wave=w, op=InstOp.JUMP if branch_taken else InstOp.JUMP_NO)
-      else: _emit_nibbles(nibbles, INST, delta=1, wave=w, op=InstOp.SALU)
+        _emit_nibbles(nibbles, INST, delta=delta, wave=w, op=InstOp.JUMP if branch_taken else InstOp.JUMP_NO)
+      else: _emit_nibbles(nibbles, INST, delta=delta, wave=w, op=InstOp.SALU)
     elif issubclass(inst_type, _VALU):
       op = _valu_op(op_name)
-      if op is None: _emit_nibbles(nibbles, VALUINST, delta=1, wave=w)
-      else: _emit_nibbles(nibbles, INST, delta=1, wave=w, op=op)
-    elif issubclass(inst_type, _SMEM): _emit_nibbles(nibbles, INST, delta=1, wave=w, op=InstOp.SMEM_RD)
-    else: _emit_nibbles(nibbles, INST, delta=1, wave=w, op=_mem_op(inst_type, op_name))
+      if op is None: _emit_nibbles(nibbles, VALUINST, delta=delta, wave=w)
+      else: _emit_nibbles(nibbles, INST, delta=delta, wave=w, op=op)
+    elif issubclass(inst_type, _SMEM): _emit_nibbles(nibbles, INST, delta=delta, wave=w, op=InstOp.SMEM_RD)
+    else: _emit_nibbles(nibbles, INST, delta=delta, wave=w, op=_mem_op(inst_type, op_name))
 
   def finish(wave_id: int):
     """Emit WAVEEND for a completed wave."""
