@@ -79,7 +79,8 @@ MASK32 = 0xFFFFFFFF
 sqtt_traces: list[bytes] = []
 
 # Encoder primitives
-from tinygrad.renderer.amd.sqtt import _build_decode_tables, PACKET_TYPES_RDNA3, LAYOUT_HEADER, WAVESTART, WAVEEND, INST, IMMEDIATE, VALUINST, TS_DELTA_SHORT, InstOp
+from tinygrad.renderer.amd.sqtt import (_build_decode_tables, PACKET_TYPES_RDNA3, LAYOUT_HEADER, WAVESTART, WAVEEND, INST, IMMEDIATE, VALUINST,
+                                        TS_DELTA_SHORT, TS_DELTA_S5_W3, InstOp)
 
 _NIB_COUNTS: dict = {cls: nc for _, (cls, nc, *_) in _build_decode_tables(PACKET_TYPES_RDNA3)[0].items()}
 
@@ -93,11 +94,18 @@ def _emit_nibbles(nibbles: list[int], pkt_cls, **kwargs):
   for i in range(nc): nibbles.append((raw >> (i * 4)) & 0xF)
 
 def _emit_with_delta(nibbles: list[int], pkt_cls, delta: int, **kwargs):
-  """Emit packet with delta, prefixing TS_DELTA_SHORT packets for delta > 7."""
-  while delta > 7:
-    take = min(delta, 23)  # TS_DELTA_SHORT adds (field+8), field is 4-bit (0-15), so adds 8-23
-    _emit_nibbles(nibbles, TS_DELTA_SHORT, delta=take - 8)
-    delta -= take
+  """Emit packet with delta, prefixing TS_DELTA packets when delta exceeds packet capacity.
+  WAVESTART has 2-bit delta (max 3), all others have 3-bit delta (max 7).
+  TS_DELTA_SHORT adds field+8 (8-23 cycles), TS_DELTA_S5_W3 adds field (0-7 cycles)."""
+  max_d = 3 if pkt_cls is WAVESTART else 7
+  if delta > max_d:
+    excess = delta - max_d
+    delta = max_d
+    while excess >= 8:
+      take = min(excess, 23)
+      _emit_nibbles(nibbles, TS_DELTA_SHORT, delta=take - 8)
+      excess -= take
+    if excess > 0: _emit_nibbles(nibbles, TS_DELTA_S5_W3, delta=excess)
   _emit_nibbles(nibbles, pkt_cls, delta=delta, **kwargs)
 
 def _nibbles_to_bytes(nibbles: list[int]) -> bytes:
@@ -105,8 +113,190 @@ def _nibbles_to_bytes(nibbles: list[int]) -> bytes:
   for i in range(0, len(nibbles), 2): result.append(nibbles[i] | ((nibbles[i + 1] if i + 1 < len(nibbles) else 0) << 4))
   return bytes(result)
 
+# ═══════════════════════════════════════════════════════════════════════════════
+# SQTT TIMING MODEL — Cycle-accurate SQ scheduling simulation for RDNA3
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# Latency constants (in SQ clock cycles) — tuned against GFX1100 SQTT traces
+_LDS_LATENCY = 32        # LDS read/write completion latency
+_SMEM_LATENCY = 200      # Scalar memory read latency (DRAM, approximate — variable on real HW)
+_VMEM_LATENCY = 300      # Vector memory read/write latency (DRAM, approximate — variable on real HW)
+_BARRIER_RESUME = 18     # Cycles from last wave arriving at barrier to first instruction after barrier
+_WAVESTART_GAP = 4       # Cycles between consecutive WAVESTART allocations
+_FIRST_INST_GAP = 2      # Cycles from WAVESTART to first instruction issue
+# S_DELAY_ALU INSTID → stall cycles mapping (indexed 0-11):
+# 0=NO_DEP, 1-4=VALU_DEP_1..4 (latency 4: stall=4-N), 5-7=TRANS32_DEP_1..3 (latency 10: stall=10-N),
+# 8=FMA_ACCUM_CYCLE_1, 9-11=SALU_CYCLE_1..3
+_INSTID_STALLS = (0, 3, 2, 1, 0, 9, 8, 7, 1, 1, 2, 3)
+
+def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, type, dict]]:
+  """Simulate RDNA3 SQ round-robin scheduling to assign cycle-accurate timestamps.
+
+  Takes per-wave event lists (populated by emit/finish) and returns a flat list of
+  (timestamp, wave_id, pkt_cls, kwargs) tuples ready for delta encoding.
+
+  Scheduling model (derived from GFX1100 SQTT trace analysis):
+  - One non-zero-cost instruction issued per SQ clock cycle per SIMD
+  - IMMEDIATE-type SOPP (s_waitcnt, s_nop, s_clause): zero issue cost, processed inline
+  - S_DELAY_ALU: zero cost, updates stall hints for subsequent instructions
+  - Barrier: 1-cycle issue cost, wave stalls until all waves arrive + resume latency
+  - Round-robin among ready waves; stalled waves are skipped
+  """
+  wave_ids = sorted(wave_events.keys())
+  n = len(wave_ids)
+  if not n: return []
+
+  # Per-wave state (indexed by position in wave_ids list)
+  pc = [0] * n                                      # next event index per wave
+  ready = [0] * n                                    # earliest cycle wave can issue
+  lgkm_pend: list[list[int]] = [[] for _ in range(n)]  # pending lgkm op completion cycles
+  vm_pend: list[list[int]] = [[] for _ in range(n)]    # pending vm op completion cycles
+  at_barrier = [False] * n
+  wave_done = [False] * n
+  # S_DELAY_ALU: [packet_count, dep0_target, dep0_stall, dep1_target, dep1_stall]
+  dly: list[list[int]] = [[0, -1, 0, -1, 0] for _ in range(n)]
+
+  timed: list[tuple[int, int, type, dict]] = []
+
+  # Phase 1: Emit WAVESTART events at fixed offsets
+  for i in range(n):
+    wid = wave_ids[i]
+    events = wave_events[wid]
+    if events and events[0][2] == 'wavestart':
+      ws_time = 1 + i * _WAVESTART_GAP
+      timed.append((ws_time, wid, events[0][0], events[0][1]))
+      pc[i] = 1
+      ready[i] = ws_time + _FIRST_INST_GAP
+    else:
+      ready[i] = 1
+
+  def _drain_zero_cost(i: int):
+    """Process leading zero-cost events (delay_alu, waitcnt, immediate) for wave i."""
+    wid = wave_ids[i]
+    events = wave_events[wid]
+    while pc[i] < len(events):
+      pkt_cls, kwargs, cat, extra = events[pc[i]]
+      if cat == 'delay_alu':
+        simm16 = extra
+        ds = dly[i]
+        ds[1] = ds[0] + 1
+        ds[2] = _INSTID_STALLS[min(simm16 & 0xF, 11)]
+        instid1 = (simm16 >> 7) & 0xF
+        ds[3] = ds[0] + ((simm16 >> 4) & 0x7) + 1 if instid1 else -1
+        ds[4] = _INSTID_STALLS[min(instid1, 11)] if instid1 else 0
+        pc[i] += 1
+        continue
+      if cat == 'waitcnt':
+        simm16 = extra
+        lgkm_th = (simm16 >> 4) & 0x3f
+        vm_th = (simm16 >> 10) & 0x3f
+        stall_until = ready[i]
+        # lgkmcnt: stall until at most lgkm_th ops are still pending
+        sl = sorted(lgkm_pend[i])
+        if lgkm_th < len(sl):
+          stall_until = max(stall_until, sl[len(sl) - lgkm_th - 1])
+        # vmcnt: stall until at most vm_th ops are still pending
+        sv = sorted(vm_pend[i])
+        if vm_th < len(sv):
+          stall_until = max(stall_until, sv[len(sv) - vm_th - 1])
+        timed.append((stall_until, wid, pkt_cls, kwargs))
+        ready[i] = stall_until + 1  # waitcnt occupies the stall_until cycle; next issue at +1
+        pc[i] += 1
+        # Prune completed ops
+        lgkm_pend[i] = [c for c in lgkm_pend[i] if c > stall_until]
+        vm_pend[i] = [c for c in vm_pend[i] if c > stall_until]
+        continue
+      if cat == 'immediate':
+        timed.append((ready[i], wid, pkt_cls, kwargs))
+        pc[i] += 1
+        continue
+      break  # hit a non-zero-cost event
+
+  # Phase 2: Round-robin instruction scheduling
+  clock = min(ready) if ready else 1
+  rr = 0  # round-robin starting index
+  max_iters = sum(len(e) for e in wave_events.values()) * n * 10 + 1000
+
+  for _ in range(max_iters):
+    if all(wave_done): break
+
+    # Drain zero-cost events for all active waves
+    for i in range(n):
+      if not wave_done[i] and not at_barrier[i]: _drain_zero_cost(i)
+
+    # Find next wave to issue a non-zero-cost instruction
+    # Priority: earliest ready cycle, round-robin tiebreak
+    best, best_cycle = -1, 1 << 62
+    for offset in range(n):
+      i = (rr + offset) % n
+      if wave_done[i] or at_barrier[i]: continue
+      if pc[i] >= len(wave_events[wave_ids[i]]): continue
+      if ready[i] < best_cycle:
+        best_cycle = ready[i]
+        best = i
+
+    if best == -1:
+      # All waves blocked — check barrier release
+      barrier_waves = [i for i in range(n) if at_barrier[i]]
+      if not barrier_waves: break
+      # Check that all non-done waves are at barrier (no straggling active waves)
+      non_done_non_barrier = any(not wave_done[i] and not at_barrier[i] and pc[i] < len(wave_events[wave_ids[i]]) for i in range(n))
+      if non_done_non_barrier: break  # deadlock prevention
+      # Release barrier: all non-done waves resume after latency from last arrival
+      release_cycle = max(ready[i] for i in barrier_waves) + _BARRIER_RESUME
+      for i in barrier_waves:
+        at_barrier[i] = False
+        ready[i] = release_cycle
+      continue
+
+    i = best
+    wid = wave_ids[i]
+    pkt_cls, kwargs, cat, extra = wave_events[wid][pc[i]]
+    issue_cycle = max(clock, ready[i])
+
+    # Apply S_DELAY_ALU stall
+    ds = dly[i]
+    ds[0] += 1  # count packet-emitting instructions for INSTSKIP tracking
+    stall = 0
+    if ds[1] == ds[0]:
+      stall = max(stall, ds[2])
+      ds[1] = -1
+    if ds[3] == ds[0]:
+      stall = max(stall, ds[4])
+      ds[3] = -1
+    issue_cycle += stall
+
+    timed.append((issue_cycle, wid, pkt_cls, kwargs))
+
+    # Track memory operation completion times
+    if cat == 'smem': lgkm_pend[i].append(issue_cycle + _SMEM_LATENCY)
+    elif cat in ('ds_rd', 'ds_wr'): lgkm_pend[i].append(issue_cycle + _LDS_LATENCY)
+    elif cat == 'vmem_rd': vm_pend[i].append(issue_cycle + _VMEM_LATENCY)
+    elif cat == 'vmem_wr': vm_pend[i].append(issue_cycle + _VMEM_LATENCY)
+
+    # Update wave state
+    if cat == 'barrier':
+      at_barrier[i] = True
+      ready[i] = issue_cycle + 1
+    elif cat == 'waveend':
+      wave_done[i] = True
+    else:
+      ready[i] = issue_cycle + 1
+
+    clock = issue_cycle + 1
+    rr = (i + 1) % n
+    pc[i] += 1
+
+  return timed
+
+# ═══════════════════════════════════════════════════════════════════════════════
+
 def _init_sqtt_encoder():
-  """Initialize and return SQTT encoder state. Called once per dispatch with tracing enabled."""
+  """Initialize and return SQTT encoder with cycle-accurate timing model.
+
+  Uses deferred emission: emit() collects per-wave events, finalize() runs the SQ timing
+  simulation to assign cycle-accurate timestamps, then encodes the interleaved SQTT stream.
+  """
   from tinygrad.runtime.autogen.amd.rdna3.enum import SOPPOp as SOPPOp3
   from tinygrad.runtime.autogen.amd.rdna4.enum import SOPPOp as SOPPOp4
   import re
@@ -120,15 +310,6 @@ def _init_sqtt_encoder():
   _GLOBAL = (ir3.GLOBAL, ir4.VGLOBAL, irc.GLOBAL)
   _FLAT = (ir3.FLAT, ir4.VFLAT, irc.FLAT)
   _SCRATCH = (ir3.SCRATCH, ir4.VSCRATCH, irc.SCRATCH)
-
-  # S_DELAY_ALU INSTID → stall cycles mapping (indexed 0-11):
-  # 0=NO_DEP, 1-4=VALU_DEP_1..4 (latency 4: stall=4-N), 5-7=TRANS32_DEP_1..3 (latency 10: stall=10-N),
-  # 8=FMA_ACCUM_CYCLE_1, 9-11=SALU_CYCLE_1..3
-  _INSTID_STALLS = (0, 3, 2, 1, 0, 9, 8, 7, 1, 1, 2, 3)
-
-  # Per-wave delay state: wave_id -> [inst_count, dep0_target, dep0_stall, dep1_target, dep1_stall]
-  # inst_count: total instructions seen (all types); dep*_target: inst_count when stall should fire
-  wave_delay_state: dict[int, list] = {}
 
   # SOPP classification sets
   _SOPP_SKIP = {SOPPOp3.S_ENDPGM.value, SOPPOp3.S_ENDPGM_SAVED.value, SOPPOp3.S_ENDPGM_ORDERED_PS_DONE.value}
@@ -168,63 +349,75 @@ def _init_sqtt_encoder():
     if issubclass(t, _SCRATCH): return InstOp.FLAT_WR_3 if is_store else InstOp.FLAT_RD_2
     return InstOp.SALU
 
-  nibbles: list[int] = []
+  # Deferred event storage: wave_id -> [(pkt_cls_or_None, kwargs, category, extra)]
+  # Categories: 'wavestart', 'salu', 'valu', 'smem', 'ds_rd', 'ds_wr', 'vmem_rd', 'vmem_wr',
+  #             'waitcnt', 'immediate', 'barrier', 'branch', 'delay_alu', 'waveend'
+  wave_events: dict[int, list] = {}
   started: set[int] = set()
-  _emit_nibbles(nibbles, LAYOUT_HEADER, layout=3, sel_a=6)
 
   def emit(wave_id: int, inst, branch_taken: bool|None):
-    """Emit an SQTT packet for one executed instruction."""
+    """Collect an instruction event for deferred timing simulation."""
     w = wave_id & 0x1F
+    events = wave_events.setdefault(wave_id, [])
     if wave_id not in started:
-      _emit_nibbles(nibbles, WAVESTART, delta=1, simd=0, cu_lo=0, wave=w, id7=wave_id)
+      events.append((WAVESTART, {'simd': 0, 'cu_lo': 0, 'wave': w, 'id7': wave_id}, 'wavestart', None))
       started.add(wave_id)
     inst_type, inst_op, op_name = type(inst), inst.op.value if hasattr(inst, 'op') else 0, inst.op.name if hasattr(inst, 'op') else ""
 
-    # Per-wave S_DELAY_ALU state: [inst_count, dep0_target, dep0_stall, dep1_target, dep1_stall]
-    ws = wave_delay_state.setdefault(wave_id, [0, -1, 0, -1, 0])
-    ws[0] += 1  # count every instruction (all types) for INSTSKIP tracking
-
     if issubclass(inst_type, _SOPP):
       if inst_op in _SOPP_SKIP: return
-      # S_DELAY_ALU: parse stall hints and store in wave state — no packet emitted
       if inst_op == SOPPOp3.S_DELAY_ALU.value:
-        simm16 = inst.simm16
-        instid0 = simm16 & 0xF
-        instskip = (simm16 >> 4) & 0x7
-        instid1 = (simm16 >> 7) & 0xF
-        # DEP0: applies to instruction at offset +1 from S_DELAY_ALU
-        ws[1] = ws[0] + 1
-        ws[2] = _INSTID_STALLS[min(instid0, 11)]
-        # DEP1: applies to instruction at offset +(instskip+1) from S_DELAY_ALU
-        ws[3] = ws[0] + instskip + 1 if instid1 else -1
-        ws[4] = _INSTID_STALLS[min(instid1, 11)] if instid1 else 0
+        events.append((None, {}, 'delay_alu', inst.simm16))
         return
+      if inst_op in _SOPP_IMMEDIATE:
+        cat = 'waitcnt' if inst_op == SOPPOp3.S_WAITCNT.value else 'immediate'
+        events.append((IMMEDIATE, {'wave': w}, cat, inst.simm16 if cat == 'waitcnt' else None))
+        return
+      if inst_op in _SOPP_BARRIER:
+        events.append((INST, {'wave': w, 'op': InstOp.BARRIER}, 'barrier', None))
+        return
+      if inst_op in _SOPP_BRANCH:
+        events.append((INST, {'wave': w, 'op': InstOp.JUMP if branch_taken else InstOp.JUMP_NO}, 'branch', None))
+        return
+      events.append((INST, {'wave': w, 'op': InstOp.SALU}, 'salu', None))
+      return
 
-    # Compute delta for this packet-emitting instruction
-    stall = 0
-    if ws[1] == ws[0]: stall = max(stall, ws[2]); ws[1] = -1
-    if ws[3] == ws[0]: stall = max(stall, ws[4]); ws[3] = -1
-    delta = 1 + stall
-
-    if issubclass(inst_type, _SOPP):
-      if inst_op in _SOPP_IMMEDIATE: _emit_with_delta(nibbles, IMMEDIATE, delta=delta, wave=w)
-      elif inst_op in _SOPP_BARRIER: _emit_with_delta(nibbles, INST, delta=delta, wave=w, op=InstOp.BARRIER)
-      elif inst_op in _SOPP_BRANCH:
-        _emit_with_delta(nibbles, INST, delta=delta, wave=w, op=InstOp.JUMP if branch_taken else InstOp.JUMP_NO)
-      else: _emit_with_delta(nibbles, INST, delta=delta, wave=w, op=InstOp.SALU)
-    elif issubclass(inst_type, _VALU):
+    if issubclass(inst_type, _VALU):
       op = _valu_op(op_name)
-      if op is None: _emit_with_delta(nibbles, VALUINST, delta=delta, wave=w)
-      else: _emit_with_delta(nibbles, INST, delta=delta, wave=w, op=op)
-    elif issubclass(inst_type, _SMEM): _emit_with_delta(nibbles, INST, delta=delta, wave=w, op=InstOp.SMEM_RD)
-    else: _emit_with_delta(nibbles, INST, delta=delta, wave=w, op=_mem_op(inst_type, op_name))
+      if op is None: events.append((VALUINST, {'wave': w}, 'valu', None))
+      else: events.append((INST, {'wave': w, 'op': op}, 'valu', None))
+      return
+
+    if issubclass(inst_type, _SMEM):
+      events.append((INST, {'wave': w, 'op': InstOp.SMEM_RD}, 'smem', None))
+      return
+
+    # DS / GLOBAL / FLAT / SCRATCH memory operations
+    mem_op_val = _mem_op(inst_type, op_name)
+    is_store = "STORE" in op_name
+    if issubclass(inst_type, _DS): cat = 'ds_wr' if is_store else 'ds_rd'
+    elif issubclass(inst_type, (*_GLOBAL, *_FLAT, *_SCRATCH)): cat = 'vmem_wr' if is_store else 'vmem_rd'
+    else: cat = 'salu'
+    events.append((INST, {'wave': w, 'op': mem_op_val}, cat, None))
 
   def finish(wave_id: int):
-    """Emit WAVEEND for a completed wave."""
-    if wave_id in started: _emit_nibbles(nibbles, WAVEEND, delta=1, simd=0, cu_lo=0, wave=wave_id & 0x1F)
+    """Record wave completion for deferred encoding."""
+    if wave_id in started:
+      wave_events.setdefault(wave_id, []).append((WAVEEND, {'simd': 0, 'cu_lo': 0, 'wave': wave_id & 0x1F}, 'waveend', None))
 
   def finalize() -> bytes:
-    """Pad and return the encoded SQTT blob."""
+    """Run timing simulation, encode interleaved SQTT stream with cycle-accurate deltas."""
+    timed = _simulate_sq_timing(wave_events)
+    timed.sort(key=lambda x: (x[0], x[1]))  # sort by timestamp, wave_id tiebreak
+    # Encode packets with correct inter-event deltas
+    nibbles: list[int] = []
+    _emit_nibbles(nibbles, LAYOUT_HEADER, layout=3, sel_a=6)
+    prev_time = 0
+    for ts, _, pkt_cls, kwargs in timed:
+      delta = max(ts - prev_time, 0)
+      _emit_with_delta(nibbles, pkt_cls, delta=delta, **kwargs)
+      prev_time = ts
+    # Pad to 32-byte alignment
     while len(nibbles) % 2 != 0: nibbles.append(0)
     nibbles.extend([0] * 32)
     while len(nibbles) % 64 != 0: nibbles.append(0)
