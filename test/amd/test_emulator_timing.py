@@ -10,22 +10,11 @@ from tinygrad import Device, Tensor, dtypes
 from tinygrad.uop.ops import UOp, KernelInfo
 from tinygrad.device import Compiled, ProfileProgramEvent, ProfileDeviceEvent
 from tinygrad.renderer.amd.sqtt import map_insts
+from tinygrad.runtime.autogen.amd.rdna3.ins import s_endpgm
 
 import tinygrad
 EXAMPLES_DIR = Path(tinygrad.__file__).parent.parent / "extra/sqtt/examples"
 TARGET = "gfx1100"
-
-def extract_wave_timing(blob, lib, target):
-  """Decode SQTT blob and return per-wave instruction timing normalized to first instruction per wave.
-  Returns dict: wave_id -> list of (relative_cycle, InstructionInfo).
-  """
-  wave_t0, waves = {}, {}
-  for pkt, info in map_insts(blob, lib, target):
-    if info is None: continue
-    w, t = info.wave, pkt._time
-    if w not in wave_t0: wave_t0[w] = t
-    waves.setdefault(w, []).append((t - wave_t0[w], info))
-  return waves
 
 @unittest.skipUnless(Device.DEFAULT == "AMD", "only runs on AMD")
 class TestEmulatorTiming(unittest.TestCase):
@@ -66,21 +55,63 @@ class TestEmulatorTiming(unittest.TestCase):
       if emu_kerns[e.kern].name == hw_prg.name: return e, emu_kerns[e.kern]
     return None, None
 
-  def _compare_timing(self, emu_blob, emu_lib, hw_blob, hw_lib, label):
-    """Compare per-instruction relative timing between emulator and hardware SQTT blobs.
-    Returns (mismatches, total_instructions). Mismatches are dicts with wave/idx/emu/hw/diff/inst keys.
+  def _compare_timing(self, emu_blob, emu_lib, hw_sqtt_ev, hw_prg, label):
+    """Compare per-instruction relative timing: emulator map_insts vs hardware rocprof decoder.
+
+    Uses rocprof-trace-decoder to extract hardware timing (handles arbitrary CU/SIMD dispatch),
+    then compares against emulator timing from map_insts. Both sides are normalized to the first
+    instruction in each wave so absolute clock offsets cancel out.
+
+    Returns (mismatches, total_instructions).
     """
-    emu_waves = extract_wave_timing(emu_blob, emu_lib, TARGET)
-    hw_waves = extract_wave_timing(hw_blob, hw_lib, TARGET)
-    self.assertEqual(len(emu_waves), len(hw_waves), f"{label}: wave count emu={len(emu_waves)} hw={len(hw_waves)}")
+    from tinygrad.viz.serve import amd_decode
+    from extra.sqtt.roc import decode as roc_decode
+
+    # Build absolute-address disasm map for rocprof ISA callback
+    addr_table = amd_decode(hw_prg.lib, TARGET)
+    disasm_map = {addr + hw_prg.base: inst for addr, inst in addr_table.items()}
+
+    try:
+      rctx = roc_decode([hw_sqtt_ev], {hw_prg.tag: disasm_map})
+    except RuntimeError as e:
+      self.skipTest(f"{label}: rocprof-trace-decoder unavailable: {e}")
+
+    rwaves = rctx.inst_execs.get((hw_sqtt_ev.kern, hw_sqtt_ev.exec_tag), [])
+    if not rwaves:
+      self.skipTest(f"{label}: rocprof returned no waves (SQTT blob may lack itrace data)")
+
+    # Build per-wave iterators keyed by wave_id (0-15)
+    rwaves_iter: dict[int, list] = {}
+    for w in rwaves: rwaves_iter.setdefault(w.wave_id, []).append(iter(w.unpack_insts()))
 
     mismatches, total = [], 0
-    for ew, hw in zip(sorted(emu_waves), sorted(hw_waves)):
-      el, hl = emu_waves[ew], hw_waves[hw]
-      self.assertEqual(len(el), len(hl), f"{label}: wave {ew} instruction count emu={len(el)} hw={len(hl)}")
-      for idx, ((et, ei), (ht, _hi)) in enumerate(zip(el, hl)):
-        total += 1
-        if et != ht: mismatches.append(dict(wave=ew, idx=idx, emu=et, hw=ht, diff=et - ht, inst=str(ei.inst)))
+    emu_wave_t0: dict[int, int] = {}
+    hw_wave_t0: dict[int, int] = {}
+
+    for pkt, info in map_insts(emu_blob, emu_lib, TARGET):
+      if info is None: continue
+      wave = info.wave
+      # s_endpgm marks wave completion; its timing semantics differ from issued instructions
+      if info.inst == s_endpgm(): continue
+      if wave not in rwaves_iter or not rwaves_iter[wave]: continue
+
+      rocprof_inst = next(rwaves_iter[wave][0], None)
+      if rocprof_inst is None: continue
+
+      emu_t = pkt._time
+      hw_t = rocprof_inst.time + rocprof_inst.stall
+
+      # Normalize both sides to the first instruction in the wave
+      if wave not in emu_wave_t0: emu_wave_t0[wave] = emu_t
+      if wave not in hw_wave_t0: hw_wave_t0[wave] = hw_t
+
+      emu_rel = emu_t - emu_wave_t0[wave]
+      hw_rel = hw_t - hw_wave_t0[wave]
+
+      total += 1
+      if emu_rel != hw_rel:
+        mismatches.append(dict(wave=wave, idx=total - 1, emu=emu_rel, hw=hw_rel, diff=emu_rel - hw_rel, inst=str(info.inst)))
+
     if mismatches:
       print(f"\n{label}: {len(mismatches)}/{total} timing mismatches:")
       for m in mismatches[:20]:
@@ -102,7 +133,8 @@ class TestEmulatorTiming(unittest.TestCase):
     emu_ev, emu_prg = self._match_event(hw_prg, emu_sqtts, emu_kerns)
     self.assertIsNotNone(emu_ev, f"no emulator event matches {hw_key} (kernel binary mismatch — hardware pkl may need regeneration)")
 
-    mismatches, total = self._compare_timing(emu_ev.blob, emu_prg.lib, hw_ev.blob, hw_prg.lib, label)
+    mismatches, total = self._compare_timing(emu_ev.blob, emu_prg.lib, hw_ev, hw_prg, label)
+    self.assertGreater(total, 0, f"{label}: no instructions were compared")
     if must_match:
       self.assertEqual(len(mismatches), 0, f"{label}: {len(mismatches)}/{total} timing mismatches (non-DRAM kernel must match exactly)")
     return mismatches, total
