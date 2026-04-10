@@ -79,7 +79,7 @@ MASK32 = 0xFFFFFFFF
 sqtt_traces: list[bytes] = []
 
 # Encoder primitives
-from tinygrad.renderer.amd.sqtt import _build_decode_tables, PACKET_TYPES_RDNA3, LAYOUT_HEADER, WAVESTART, WAVEEND, INST, IMMEDIATE, VALUINST, InstOp
+from tinygrad.renderer.amd.sqtt import _build_decode_tables, PACKET_TYPES_RDNA3, LAYOUT_HEADER, WAVESTART, WAVEEND, INST, IMMEDIATE, VALUINST, TS_DELTA_SHORT, InstOp
 
 _NIB_COUNTS: dict = {cls: nc for _, (cls, nc, *_) in _build_decode_tables(PACKET_TYPES_RDNA3)[0].items()}
 
@@ -91,6 +91,14 @@ def _encode_raw(pkt_cls, **kwargs) -> tuple[int, int]:
 def _emit_nibbles(nibbles: list[int], pkt_cls, **kwargs):
   raw, nc = _encode_raw(pkt_cls, **kwargs)
   for i in range(nc): nibbles.append((raw >> (i * 4)) & 0xF)
+
+def _emit_with_delta(nibbles: list[int], pkt_cls, delta: int, **kwargs):
+  """Emit packet with delta, prefixing TS_DELTA_SHORT packets for delta > 7."""
+  while delta > 7:
+    take = min(delta, 23)  # TS_DELTA_SHORT adds (field+8), field is 4-bit (0-15), so adds 8-23
+    _emit_nibbles(nibbles, TS_DELTA_SHORT, delta=take - 8)
+    delta -= take
+  _emit_nibbles(nibbles, pkt_cls, delta=delta, **kwargs)
 
 def _nibbles_to_bytes(nibbles: list[int]) -> bytes:
   result = bytearray()
@@ -186,10 +194,10 @@ def _init_sqtt_encoder():
         instid1 = (simm16 >> 7) & 0xF
         # DEP0: applies to instruction at offset +1 from S_DELAY_ALU
         ws[1] = ws[0] + 1
-        ws[2] = _INSTID_STALLS[instid0]
+        ws[2] = _INSTID_STALLS[min(instid0, 11)]
         # DEP1: applies to instruction at offset +(instskip+1) from S_DELAY_ALU
         ws[3] = ws[0] + instskip + 1 if instid1 else -1
-        ws[4] = _INSTID_STALLS[instid1] if instid1 else 0
+        ws[4] = _INSTID_STALLS[min(instid1, 11)] if instid1 else 0
         return
 
     # Compute delta for this packet-emitting instruction
@@ -199,17 +207,17 @@ def _init_sqtt_encoder():
     delta = 1 + stall
 
     if issubclass(inst_type, _SOPP):
-      if inst_op in _SOPP_IMMEDIATE: _emit_nibbles(nibbles, IMMEDIATE, delta=delta, wave=w)
-      elif inst_op in _SOPP_BARRIER: _emit_nibbles(nibbles, INST, delta=delta, wave=w, op=InstOp.BARRIER)
+      if inst_op in _SOPP_IMMEDIATE: _emit_with_delta(nibbles, IMMEDIATE, delta=delta, wave=w)
+      elif inst_op in _SOPP_BARRIER: _emit_with_delta(nibbles, INST, delta=delta, wave=w, op=InstOp.BARRIER)
       elif inst_op in _SOPP_BRANCH:
-        _emit_nibbles(nibbles, INST, delta=delta, wave=w, op=InstOp.JUMP if branch_taken else InstOp.JUMP_NO)
-      else: _emit_nibbles(nibbles, INST, delta=delta, wave=w, op=InstOp.SALU)
+        _emit_with_delta(nibbles, INST, delta=delta, wave=w, op=InstOp.JUMP if branch_taken else InstOp.JUMP_NO)
+      else: _emit_with_delta(nibbles, INST, delta=delta, wave=w, op=InstOp.SALU)
     elif issubclass(inst_type, _VALU):
       op = _valu_op(op_name)
-      if op is None: _emit_nibbles(nibbles, VALUINST, delta=delta, wave=w)
-      else: _emit_nibbles(nibbles, INST, delta=delta, wave=w, op=op)
-    elif issubclass(inst_type, _SMEM): _emit_nibbles(nibbles, INST, delta=delta, wave=w, op=InstOp.SMEM_RD)
-    else: _emit_nibbles(nibbles, INST, delta=delta, wave=w, op=_mem_op(inst_type, op_name))
+      if op is None: _emit_with_delta(nibbles, VALUINST, delta=delta, wave=w)
+      else: _emit_with_delta(nibbles, INST, delta=delta, wave=w, op=op)
+    elif issubclass(inst_type, _SMEM): _emit_with_delta(nibbles, INST, delta=delta, wave=w, op=InstOp.SMEM_RD)
+    else: _emit_with_delta(nibbles, INST, delta=delta, wave=w, op=_mem_op(inst_type, op_name))
 
   def finish(wave_id: int):
     """Emit WAVEEND for a completed wave."""
