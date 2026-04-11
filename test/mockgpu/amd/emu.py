@@ -79,7 +79,7 @@ MASK32 = 0xFFFFFFFF
 sqtt_traces: list[bytes] = []
 
 # Encoder primitives
-from tinygrad.renderer.amd.sqtt import (_build_decode_tables, PACKET_TYPES_RDNA3, LAYOUT_HEADER, WAVESTART, WAVEEND, INST, IMMEDIATE, VALUINST,
+from tinygrad.renderer.amd.sqtt import (_build_decode_tables, PACKET_TYPES_RDNA3, LAYOUT_HEADER, WAVESTART, WAVEALLOC, WAVEEND, INST, IMMEDIATE, VALUINST,
                                         TS_DELTA_SHORT, TS_DELTA_S5_W3, REG, SNAPSHOT, TS_WAVE_STATE, InstOp)
 
 _NIB_COUNTS: dict = {cls: nc for _, (cls, nc, *_) in _build_decode_tables(PACKET_TYPES_RDNA3)[0].items()}
@@ -424,6 +424,14 @@ def _init_sqtt_encoder(entry_pc: int):
     """Run timing simulation, encode interleaved SQTT stream with cycle-accurate deltas."""
     timed = _simulate_sq_timing(wave_events)
     timed.sort(key=lambda x: (x[0], x[1]))  # sort by timestamp, wave_id tiebreak
+    # Insert WAVEALLOC before each WAVESTART: rocprof requires the WAVEALLOC lifecycle token
+    # to associate the current dispatch PGM_LO/HI register context with the new wave.
+    # Without it, rocprof has no PC base and reports DATA_LOST.
+    expanded: list = []
+    for entry in timed:
+      if entry[2] is WAVESTART: expanded.append((entry[0], entry[1], WAVEALLOC, {}))
+      expanded.append(entry)
+    timed = expanded
     # Encode packets with correct inter-event deltas
     nibbles: list[int] = []
     _emit_nibbles(nibbles, LAYOUT_HEADER, layout=3, sel_a=6)
@@ -435,9 +443,11 @@ def _init_sqtt_encoder(entry_pc: int):
     pgm = entry_pc >> 8
     _emit_nibbles(nibbles, REG, delta=0, slot=4, hi_byte=0x82, subop=0xC, val32=pgm & 0xFFFFFFFF)
     _emit_nibbles(nibbles, REG, delta=0, slot=4, hi_byte=0x82, subop=0xD, val32=(pgm >> 32) & 0xFFFFFFFF)
-    # SNAPSHOT + TS_WAVE_STATE signal that compute state has been captured (rocprof uses these to commit PGM_LO/HI to the wave)
-    _emit_nibbles(nibbles, SNAPSHOT, delta=0, snap=0)
-    _emit_nibbles(nibbles, TS_WAVE_STATE, delta=0, coarse=0)
+    # SNAPSHOT.snap: bitmask of active wave slots (bit i = wave i is active).
+    # TS_WAVE_STATE.coarse bit 0 = wave_interest; must be 1 so rocprof processes wave instruction data.
+    n_waves = len(wave_events)
+    _emit_nibbles(nibbles, SNAPSHOT, delta=0, snap=(1 << n_waves) - 1)
+    _emit_nibbles(nibbles, TS_WAVE_STATE, delta=0, coarse=1)  # wave_interest=True
     prev_time = 0
     for ts, _, pkt_cls, kwargs in timed:
       delta = max(ts - prev_time, 0)
