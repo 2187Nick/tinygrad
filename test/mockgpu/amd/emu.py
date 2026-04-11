@@ -80,7 +80,7 @@ sqtt_traces: list[bytes] = []
 
 # Encoder primitives
 from tinygrad.renderer.amd.sqtt import (
-  _build_decode_tables, PACKET_TYPES_RDNA3, LAYOUT_HEADER, WAVESTART, WAVEALLOC, WAVEEND,
+  _build_decode_tables, PACKET_TYPES_RDNA3, LAYOUT_HEADER, WAVESTART, WAVEEND,
   INST, IMMEDIATE, VALUINST, TS_DELTA_SHORT, TS_DELTA_S5_W3, REG, SNAPSHOT, TS_WAVE_STATE, InstOp)
 
 _NIB_COUNTS: dict = {cls: nc for _, (cls, nc, *_) in _build_decode_tables(PACKET_TYPES_RDNA3)[0].items()}
@@ -313,7 +313,7 @@ def _init_sqtt_encoder(entry_pc: int):
   Uses deferred emission: emit() collects per-wave events, finalize() runs the SQ timing
   simulation to assign cycle-accurate timestamps, then encodes the interleaved SQTT stream.
   """
-  from tinygrad.runtime.autogen.amd.rdna3.enum import SOPPOp as SOPPOp3
+  from tinygrad.runtime.autogen.amd.rdna3.enum import SOPPOp as SOPPOp3, SOPKOp as SOPKOp3
   from tinygrad.runtime.autogen.amd.rdna4.enum import SOPPOp as SOPPOp4
   import re
 
@@ -342,6 +342,11 @@ def _init_sqtt_encoder(entry_pc: int):
   _SOPP_BRANCH = {SOPPOp3.S_BRANCH.value, SOPPOp3.S_CBRANCH_SCC0.value, SOPPOp3.S_CBRANCH_SCC1.value,
                   SOPPOp3.S_CBRANCH_VCCZ.value, SOPPOp3.S_CBRANCH_VCCNZ.value,
                   SOPPOp3.S_CBRANCH_EXECZ.value, SOPPOp3.S_CBRANCH_EXECNZ.value}
+
+  # RDNA3-only SOPK waitcnt instructions (RDNA4 uses SOPP s_wait_* instead)
+  _SOPK = (ir3.SOPK, ir4.SOPK, irc.SOPK)
+  _SOPK_WAITCNT_LGKM = SOPKOp3.S_WAITCNT_LGKMCNT.value   # simm16[5:0] = lgkm threshold
+  _SOPK_WAITCNT_VM = SOPKOp3.S_WAITCNT_VMCNT.value        # simm16[5:0] = vm threshold
 
   # VALU sub-classification patterns
   _VALUT_4_RE = re.compile(r'V_(EXP|LOG|RCP|RSQ|SQRT|SIN|COS|CEIL|FLOOR|TRUNC|RNDNE|FRACT|FREXP)_')
@@ -399,6 +404,20 @@ def _init_sqtt_encoder(entry_pc: int):
       events.append((INST, {'wave': w, 'op': InstOp.SALU}, 'salu', None))
       return
 
+    if issubclass(inst_type, _SOPK):
+      op_val = inst.op.value if hasattr(inst, 'op') else 0
+      if op_val == _SOPK_WAITCNT_LGKM:
+        # s_waitcnt_lgkmcnt: simm16[5:0]=lgkm threshold; encode for _drain_zero_cost: bits[9:4]=lgkm, bits[15:10]=vm(63=don't wait)
+        lgkm_th = inst.simm16 & 0x3f
+        events.append((IMMEDIATE, {'wave': w}, 'waitcnt', (lgkm_th << 4) | (0x3f << 10)))
+        return
+      if op_val == _SOPK_WAITCNT_VM:
+        vm_th = inst.simm16 & 0x3f
+        events.append((IMMEDIATE, {'wave': w}, 'waitcnt', (0x3f << 4) | (vm_th << 10)))
+        return
+      events.append((INST, {'wave': w, 'op': InstOp.SALU}, 'salu', None))
+      return
+
     if issubclass(inst_type, _VALU):
       op = _valu_op(op_name)
       if op is None: events.append((VALUINST, {'wave': w}, 'valu', None))
@@ -425,46 +444,25 @@ def _init_sqtt_encoder(entry_pc: int):
   def finalize() -> bytes:
     """Run timing simulation, encode interleaved SQTT stream with cycle-accurate deltas."""
     timed = _simulate_sq_timing(wave_events)
-    # Sort by (timestamp, lifecycle_priority) using Python's stable sort.
-    # At equal timestamps, WAVESTART must come before instruction packets so rocprof sees
-    # each wave's WAVEALLOC/WAVESTART lifecycle token before any instruction from that wave.
-    # Without this, an early-wave instruction (low wave_id) at ts=N would sort before a
-    # later-wave WAVESTART also at ts=N → rocprof reports DATA_LOST for the later wave.
-    # We rely on stable sort to preserve the scheduler emission order within the same
-    # (ts, priority) bucket (e.g., barrier-resumed waves keep their round-robin order).
-    timed.sort(key=lambda x: (x[0], 0 if x[2] is WAVESTART else 1))
-    # Insert WAVEALLOC before each WAVESTART: rocprof requires the WAVEALLOC lifecycle token
-    # to associate the current dispatch PGM_LO/HI register context with the new wave.
-    # Without it, rocprof has no PC base and reports DATA_LOST.
-    expanded: list = []
-    for entry in timed:
-      if entry[2] is WAVESTART: expanded.append((entry[0], entry[1], WAVEALLOC, {}))
-      expanded.append(entry)
-    timed = expanded
-    # Encode packets with correct inter-event deltas
+    # Sort: all WAVESTARTs first as a preamble (matching real hardware where all wave allocations
+    # appear consecutively before any instructions), then remaining packets ordered by timestamp.
+    timed.sort(key=lambda x: (0 if x[2] is WAVESTART else 1, x[0]))
     nibbles: list[int] = []
     _emit_nibbles(nibbles, LAYOUT_HEADER, layout=3, sel_a=6)
     # DISPATCH_INITIATOR: dispatch-scoped, emitted once globally.
     _emit_nibbles(nibbles, REG, delta=0, slot=4, hi_byte=0x82, subop=0x80, val32=0x80000003)
-    # SNAPSHOT.snap=0: no waves are active yet at snapshot time. Each wave is established
-    # via WAVEALLOC+WAVESTART as they're allocated, so we don't pre-claim occupancy.
-    # Claiming all N waves active before WAVEALLOC/WAVESTART can trigger DATA_LOST.
-    # TS_WAVE_STATE.coarse bit 0 = wave_interest; must be 1 so rocprof processes wave instruction data.
+    # PGM_LO/HI: emitted once before all WAVESTARTs (real hardware emits at dispatch time, not per-wave).
+    # slot=4 encodes me=1,pipe=0; subop=0xC/0xD are SPI_SHADER_PGM_LO/HI_CS registers.
+    pgm = entry_pc >> 8
+    _emit_nibbles(nibbles, REG, delta=0, slot=4, hi_byte=0x82, subop=0xC, val32=pgm & 0xFFFFFFFF)
+    _emit_nibbles(nibbles, REG, delta=0, slot=4, hi_byte=0x82, subop=0xD, val32=(pgm >> 32) & 0xFFFFFFFF)
     _emit_nibbles(nibbles, SNAPSHOT, delta=0, snap=0)
     _emit_nibbles(nibbles, TS_WAVE_STATE, delta=0, coarse=1)  # wave_interest=True
-    # slot=4 encodes me=1,pipe=0 (MEC compute engine). WAVESTART id7=0x20 sets the same me=1.
-    # Both must agree so rocprof reads PGM from wave_start_addr[me&1=1][pipe=0] — matching what we wrote.
-    # Re-emit PGM_LO/HI before each WAVEALLOC: rocprof consumes the program address once per
-    # WAVEALLOC/WAVESTART pair, so each wave allocation needs a fresh program address context.
-    pgm = entry_pc >> 8
     prev_time = 0
     for ts, _, pkt_cls, kwargs in timed:
-      if pkt_cls is WAVEALLOC:
-        _emit_nibbles(nibbles, REG, delta=0, slot=4, hi_byte=0x82, subop=0xC, val32=pgm & 0xFFFFFFFF)
-        _emit_nibbles(nibbles, REG, delta=0, slot=4, hi_byte=0x82, subop=0xD, val32=(pgm >> 32) & 0xFFFFFFFF)
       delta = max(ts - prev_time, 0)
       _emit_with_delta(nibbles, pkt_cls, delta=delta, **kwargs)
-      prev_time = ts
+      prev_time = max(ts, prev_time)  # actual encoded time; clamped deltas (delta=0) don't advance time
     # Pad to 32-byte alignment
     while len(nibbles) % 2 != 0: nibbles.append(0)
     nibbles.extend([0] * 32)
