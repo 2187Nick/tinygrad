@@ -425,7 +425,13 @@ def _init_sqtt_encoder(entry_pc: int):
   def finalize() -> bytes:
     """Run timing simulation, encode interleaved SQTT stream with cycle-accurate deltas."""
     timed = _simulate_sq_timing(wave_events)
-    timed.sort(key=lambda x: (x[0], x[1]))  # sort by timestamp, wave_id tiebreak
+    # Sort by (timestamp, lifecycle_priority, wave_id).
+    # At equal timestamps, WAVESTART must precede instructions and WAVEEND must follow them.
+    # Without this, early-wave instructions can appear before later-wave WAVEALLOC/WAVESTART
+    # (e.g. wave=0 instruction at ts=3 would sort before wave=2 WAVESTART at ts=3 by wave_id),
+    # which causes rocprof to report DATA_LOST for the later waves.
+    _LIFECYCLE_PRI = {WAVESTART: 0, WAVEEND: 2}
+    timed.sort(key=lambda x: (x[0], _LIFECYCLE_PRI.get(x[2], 1), x[1]))
     # Insert WAVEALLOC before each WAVESTART: rocprof requires the WAVEALLOC lifecycle token
     # to associate the current dispatch PGM_LO/HI register context with the new wave.
     # Without it, rocprof has no PC base and reports DATA_LOST.
