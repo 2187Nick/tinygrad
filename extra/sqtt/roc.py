@@ -100,7 +100,12 @@ def decode(sqtt_evs:list[ProfileSQTTEvent], disasms:dict[str, dict[int, Inst]]) 
 
   @rocprof.rocprof_trace_decoder_isa_callback_t
   def isa_cb(instr_ptr, mem_size_ptr, size_ptr, pc, _):
-    instr, mem_size_ptr[0] = ROCParseCtx.disasms[unwrap(ROCParseCtx.active_run)[0]][pc.address]
+    kern = unwrap(ROCParseCtx.active_run)[0]
+    if pc.address not in ROCParseCtx.disasms[kern]:
+      # rocprof asked for an unknown PC — return size 0 so it skips this instruction instead of silently failing via ctypes exception swallowing
+      mem_size_ptr[0] = 0
+      return rocprof.ROCPROFILER_THREAD_TRACE_DECODER_STATUS_SUCCESS
+    instr, mem_size_ptr[0] = ROCParseCtx.disasms[kern][pc.address]
 
     # this is the number of bytes to next instruction, set to 0 for end_pgm
     if instr == "s_endpgm": mem_size_ptr[0] = 0

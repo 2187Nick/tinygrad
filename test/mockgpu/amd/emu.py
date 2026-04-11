@@ -433,6 +433,8 @@ def _init_sqtt_encoder(entry_pc: int):
     pgm = entry_pc >> 8
     _emit_nibbles(nibbles, REG, delta=0, slot=4, hi_byte=0x82, subop=0xC, val32=pgm & 0xFFFFFFFF)
     _emit_nibbles(nibbles, REG, delta=0, slot=4, hi_byte=0x82, subop=0xD, val32=(pgm >> 32) & 0xFFFFFFFF)
+    # Emit COMPUTE_DISPATCH_INITIATOR (subop=0x80) so rocprof recognises a compute dispatch and binds PGM_LO/HI to the wave PC.
+    _emit_nibbles(nibbles, REG, delta=0, slot=4, hi_byte=0x82, subop=0x80, val32=0x00000001)
     prev_time = 0
     for ts, _, pkt_cls, kwargs in timed:
       delta = max(ts - prev_time, 0)
