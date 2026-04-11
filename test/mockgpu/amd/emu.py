@@ -375,7 +375,8 @@ def _init_sqtt_encoder(entry_pc: int):
     w = wave_id & 0x1F
     events = wave_events.setdefault(wave_id, [])
     if wave_id not in started:
-      events.append((WAVESTART, {'simd': 0, 'cu_lo': 0, 'wave': w, 'id7': 0}, 'wavestart', None))
+      # id7 bit 5 = me=1 (MEC compute engine), bits 4:3 = pipe=0 — must match REG(slot=4) which encodes me=1,pipe=0
+      events.append((WAVESTART, {'simd': 0, 'cu_lo': 0, 'wave': w, 'id7': 0x20}, 'wavestart', None))
       started.add(wave_id)
     inst_type, inst_op, op_name = type(inst), inst.op.value if hasattr(inst, 'op') else 0, inst.op.name if hasattr(inst, 'op') else ""
 
@@ -435,10 +436,8 @@ def _init_sqtt_encoder(entry_pc: int):
     # Encode packets with correct inter-event deltas
     nibbles: list[int] = []
     _emit_nibbles(nibbles, LAYOUT_HEADER, layout=3, sel_a=6)
-    # Real hardware preamble structure (matching gfx1100 real SQTT):
-    # 1. COMPUTE_DISPATCH_INITIATOR first (subop=0x80, val=0x80000003) to arm dispatch tracking
-    # 2. COMPUTE_PGM_LO/HI so rocprof can reconstruct the wave's initial PC
-    # 3. SNAPSHOT + TS_WAVE_STATE state-latch packets to commit state before waves begin
+    # REG preamble: slot=4 encodes me=1,pipe=0 (MEC compute engine). WAVESTART id7=0x20 sets the same me=1.
+    # Both must agree so rocprof reads PGM from wave_start_addr[me&1=1][pipe=0] — matching what we wrote.
     _emit_nibbles(nibbles, REG, delta=0, slot=4, hi_byte=0x82, subop=0x80, val32=0x80000003)
     pgm = entry_pc >> 8
     _emit_nibbles(nibbles, REG, delta=0, slot=4, hi_byte=0x82, subop=0xC, val32=pgm & 0xFFFFFFFF)
