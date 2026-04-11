@@ -74,14 +74,16 @@ class _ROCParseCtx:
                                                                              ev.end_time, insts_blob))
 
 def dump_blob(blob: bytes) -> None:
-  """Call rocprof's own dump_data on the raw SQTT blob and print each message."""
+  """Call rocprof's own dump_data on the raw SQTT blob (only if symbol is available)."""
+  try: fn = rocprof.dll.rocprof_trace_decoder_dump_data
+  except AttributeError: return
   msgs: list[str] = []
   @rocprof.rocprofiler_thread_trace_decoder_debug_callback_t
   def dbg_cb(level, fname_ptr, msg_ptr, _):
     msg = ctypes.cast(msg_ptr, ctypes.c_char_p).value
     msgs.append(f"[{level}] {msg.decode(errors='replace') if msg else ''}")
   data_arr = (ctypes.c_char * len(blob)).from_buffer_copy(blob)
-  rocprof.rocprof_trace_decoder_dump_data(data_arr, len(blob), dbg_cb, None)
+  fn(data_arr, len(blob), dbg_cb, None)
   for m in msgs: print("SQTT_DUMP:", m)
 
 def decode(sqtt_evs:list[ProfileSQTTEvent], disasms:dict[str, dict[int, Inst]]) -> _ROCParseCtx:
