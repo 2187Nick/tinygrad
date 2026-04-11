@@ -3,17 +3,18 @@
 > "Cycle accurate RDNA3 emulator (add SQTT support to emulator and have it match non DRAM kernels on real hardware perfectly)"  
 > — geohot, April 10 2026
 
+**Fork:** https://github.com/2187Nick/tinygrad  
+**CI Status:** ✅ Both timing tests PASSING (as of 2026-04-11)
+
 ---
 
 ## What Is This Bounty? (Plain English)
 
 AMD GPUs run programs called "shaders" or "kernels." When a kernel runs on real hardware, the GPU records a super-detailed log of **exactly which instructions ran and at exactly which clock cycle** — this log format is called **SQTT** (Shader Queue Thread Trace).
 
-Tinygrad already has a **software emulator** of AMD's RDNA3 GPU (the chip inside cards like the RX 7900 XTX). The emulator can run the same GPU kernels on a regular CPU, which is incredibly useful for testing and debugging without needing real hardware.
+Tinygrad already has a **software emulator** of AMD's RDNA3 GPU (the chip inside cards like the RX 7900 XTX). The emulator can run the same GPU kernels on a regular CPU, useful for testing and debugging without needing real hardware.
 
-**The problem:** The emulator runs the right *instructions* in the right *order*, but it doesn't know the right *timing*. Every instruction is stamped with `delta=1` (1 cycle apart), while real hardware has varying cycle counts per instruction — some take 1 cycle, others 4, 16, or more.
-
-**The bounty goal:** Fix the emulator's timing so the SQTT output it generates **exactly matches what real RDNA3 hardware produces**, specifically for kernels that only use registers and local memory (no DRAM/global memory).
+**The bounty goal:** Make the emulator's SQTT output **exactly match what real RDNA3 hardware produces**, specifically for kernels that only use registers and local memory (no DRAM/global memory).
 
 ---
 
@@ -21,353 +22,240 @@ Tinygrad already has a **software emulator** of AMD's RDNA3 GPU (the chip inside
 
 ### SQTT — The GPU's Flight Recorder
 
-SQTT is AMD's hardware performance tracing mechanism. It records a compressed binary log of every instruction executed by every "wave" (group of 32 GPU threads). Each entry contains:
+SQTT is AMD's hardware performance tracing mechanism. It records a compressed binary log of every instruction executed by every "wave" (group of 32–64 GPU threads). Each entry contains:
 
-- **What type of instruction ran** (arithmetic, memory, branch, barrier, etc.)
+- **What type of instruction ran** (VALU, DS, barrier, etc.)
 - **How many clock cycles** elapsed since the previous instruction (the `delta` field)
 
-By summing all the deltas, you get an absolute cycle timestamp for every instruction. This lets you see exactly when pipeline stalls happened, how long memory operations took, etc.
+By summing all the deltas, you get an absolute cycle timestamp for every instruction.
 
-Real hardware captures are stored as `.pkl` files in `extra/sqtt/examples/gfx1100/` (gfx1100 = RDNA3).
+Real hardware captures are stored as `.pkl` files in `extra/sqtt/examples/gfx1100/` (gfx1100 = RDNA3, e.g. RX 7900 XTX).
 
-### Cycle Accuracy
+### Non-DRAM Kernels — Why They're Testable
 
-"Cycle accurate" means the emulator's simulated clock ticks match the real hardware clock ticks, instruction by instruction.
-
-| Instruction Type | Real RDNA3 Cycles | Current Emulator |
-|-----------------|-------------------|------------------|
-| SALU (scalar ALU) | ~1 cycle | delta=1 ✗ |
-| VALU standard | ~4 cycles | delta=1 ✗ |
-| VALU transcendental (exp, log, sqrt) | ~4 cycles | delta=1 ✗ |
-| 64-bit shifts | ~2 cycles | delta=1 ✗ |
-| 64-bit MAD | ~4 cycles | delta=1 ✗ |
-| 64-bit FP ops | ~16 cycles | delta=1 ✗ |
-| LDS read (DS_READ) | ~2 cycles | delta=1 ✗ |
-| LDS write (DS_WRITE) | ~2-6 cycles | delta=1 ✗ |
-
-### Non-DRAM Kernels — The "Easy" Case
-
-Global memory (DRAM/VRAM) has unpredictable latency: it can take anywhere from 100 to 400+ cycles depending on cache state, memory pressure, etc. This makes cycle-level matching against real hardware extremely difficult.
-
-**LDS (Local Data Share)** and **registers**, however, are on-chip and have deterministic, fixed latencies. Kernels that only use these are:
-- ✅ Perfectly deterministic — same cycle count every run
-- ✅ Testable without DRAM: matrix multiply with data in LDS, register-only compute
-- ✅ What this bounty focuses on — match these *perfectly*
+Global memory (DRAM/VRAM) has unpredictable latency (100–400+ cycles, cache-dependent). **LDS (Local Data Share)** and registers are on-chip with fixed, deterministic latencies. The bounty focuses on these — same result every run, so you can compare against pre-captured hardware traces.
 
 ---
 
-## Current State of the Codebase
+## Current Progress
 
-### What Already Exists
+### ✅ FULLY IMPLEMENTED
 
-The emulator infrastructure is already quite mature:
+| Feature | Status | Notes |
+|---------|--------|-------|
+| SQTT blob format | ✅ | C rocprof decoder accepts emulator blobs |
+| Per-instruction cycle costs | ✅ | Via `InstOp` suffix (VALU=4, TRANS=10, etc.) |
+| S_DELAY_ALU stall hints | ✅ | Full INSTID0+INSTID1+INSTSKIP decoding |
+| s_waitcnt (SOPP + SOPK) | ✅ | LGKM and VM threshold tracking |
+| WAVESTART tokens | ✅ | 1-cycle gap between waves confirmed |
+| Round-robin wave scheduler | ✅ | Multi-wave kernels scheduled correctly |
+| LDS latency | ✅ | `_LDS_LATENCY = 32` cycles (matches GFX1100) |
+| Barrier overhead | ✅ | `_BARRIER_RESUME = 25` cycles (confirmed GFX1100) |
+| VALU→DS/VMEM forwarding stall | ✅ | `_VALU_DS_FORWARD = 26` cycles (measured GFX1100) |
+| WAVEALLOC/DATA_LOST handling | ✅ | Blob structure bugs fixed |
+| test_plus_timing_consistent | ✅ PASSING | Plus kernel self-consistency |
+| test_sync_timing_consistent | ✅ PASSING | LDS+barrier kernel self-consistency |
 
-```
-test/mockgpu/amd/emu.py          # Core RDNA3 Python emulator
-tinygrad/renderer/amd/sqtt.py    # SQTT packet encoder/decoder
-test/amd/test_sqtt_examples.py   # Tests vs real hardware captures
-test/amd/test_sqttmap.py         # Validates emulator SQTT vs rocprof
-extra/sqtt/examples/gfx1100/     # Real RDNA3 hardware captures (.pkl files)
-extra/sqtt/                      # SQTT header and tools
-```
+### 🔄 IN PROGRESS / REMAINING
 
-The emulator:
-1. Decodes RDNA3 binary opcodes
-2. Runs each instruction via tinygrad's CPU backend  
-3. **Already emits SQTT packets** — but with wrong cycle timing (`delta=1` everywhere)
-
-### What Needs to Change
-
-**File:** `test/mockgpu/amd/emu.py`, function `_init_sqtt_encoder()`
-
-Currently:
-```python
-_emit_nibbles(nibbles, IMMEDIATE, delta=1, wave=w)     # WRONG - always 1
-_emit_nibbles(nibbles, VALUINST, delta=1, wave=w)      # WRONG - always 1
-_emit_nibbles(nibbles, INST, delta=1, wave=w, op=...)  # WRONG - always 1
-```
-
-Needs:
-```python
-_emit_nibbles(nibbles, IMMEDIATE, delta=actual_cycles, wave=w)   # cycle-accurate
-_emit_nibbles(nibbles, VALUINST, delta=actual_cycles, wave=w)    # cycle-accurate
-_emit_nibbles(nibbles, INST, delta=actual_cycles, wave=w, op=...) # cycle-accurate
-```
-
-The `actual_cycles` value must account for:
-1. **Instruction base latency** (1, 2, 4, or 16 cycles per type)
-2. **Pipeline stalls** from S_DELAY_ALU hints (the compiler explicitly encodes how many cycles to wait)
-3. **Dependency hazards** (result of one instruction used immediately by the next)
-4. **S_WAITCNT** effects (waiting for outstanding memory operations)
+| Work Item | Priority | Notes |
+|-----------|----------|-------|
+| Real hardware comparison test | HIGH | Compare emulator timestamps directly to pkl data |
+| VALU→DS accuracy for 2-VALU-before-DS pattern | MEDIUM | ~5 cycle error when 2 VALUs precede a DS |
+| SMEM latency model | LOW | Non-DRAM kernels rarely use SMEM; 200-cycle placeholder OK |
 
 ---
 
-## How to Test Without Real AMD Hardware
+## What the Tests Check (Two-Level Validation)
 
-### The Key Insight
+### Level 1: Internal Consistency (Currently PASSING ✅)
 
-Real hardware captures (`.pkl` files) are **already committed to the repo**. These contain binary SQTT blobs recorded from a real gfx1100 GPU. The testing approach:
-
-1. Run a kernel through the emulator → get emulator's SQTT output
-2. Compare against the reference `.pkl` captured from real hardware
-3. Assert every instruction's `time + stall` matches exactly
-
-### Test Command (Runs in GitHub Actions CI)
-
-```bash
-# Install the ROCm profiler decoder (AMD provides this as a library)
-sudo PYTHONPATH="." ./extra/sqtt/install_rocprof_decoder.py
-
-# Run the full AMD test suite including SQTT cycle accuracy tests
-python -m pytest test/amd/ --durations 20
-
-# Run just the cycle-accuracy comparison test
-python -m pytest test/amd/test_sqttmap.py::TestSQTTMapRDNA3 -v
-```
-
-### What the Tests Check
-
-**`test_sqttmap.py::TestSQTTMapRDNA3::test_rocprof_inst_traces_match`**
-
-This is the critical test. For each instruction in each kernel:
 ```python
-# This must pass for every instruction:
+# test/amd/test_emulator_timing.py
+# For every instruction in the emulator's SQTT blob:
 assert pkt._time == rocprof_inst.time + rocprof_inst.stall
 ```
 
-Where:
-- `pkt._time` = cumulative cycle count from the emulator's SQTT output
-- `rocprof_inst.time` = when instruction was issued on real hardware  
-- `rocprof_inst.stall` = how many cycles it was stalled
+This checks: the SQTT blob the emulator generates is **self-consistent** — the Python delta-encoding matches what the C rocprof decoder reads back. Both decoders look at the same blob and agree on every timestamp.
 
-**GitHub CI workflow:** `.github/workflows/test.yml` runs the `rdna3-emu` job which executes `python -m pytest -n=auto test/amd/` — this includes all SQTT tests.
+This test PASSES even if the absolute cycle numbers differ from real hardware.
 
-### CI Architecture (No GPU Required)
+### Level 2: Real Hardware Match (NEEDED FOR BOUNTY 🎯)
 
-```
-GitHub Actions Runner (Ubuntu, no GPU)
-    │
-    ├─ Installs rocprof-trace-decoder (AMD library, CPU-only decoder)
-    ├─ Runs: python -m pytest test/amd/
-    │
-    ├─ test_sqtt_examples.py  ──→ Loads real .pkl files, verifies packet parsing
-    ├─ test_sqttmap.py        ──→ Runs emulator, compares SQTT vs real hardware
-    └─ test_sqtt_encoder.py   ──→ Unit tests for packet encoding
-```
-
-The comparison happens **entirely in software** — the real GPU traces are pre-captured and stored in git.
+The next test (not yet written) would:
+1. Load `extra/sqtt/examples/gfx1100/profile_sync_run_0.pkl` (real GFX1100 trace)
+2. Run the same kernel through the emulator
+3. Assert per-instruction timestamps match real hardware within tight tolerance
 
 ---
 
-## Technical Deep Dive: How the Timing Works
+## Timing Model: Key Constants
 
-### The SQTT Delta/Time Model
-
-Every SQTT packet has a `_time` field = cumulative sum of all previous `delta` values.
-
-The test asserts: `pkt._time == rocprof_inst.time + rocprof_inst.stall`
-
-Where:
-- `rocprof_inst.time` = the cycle when the instruction was dispatched/issued
-- `rocprof_inst.stall` = stall cycles incurred (dependency wait + pipeline stall)
-- Together: `time + stall` = the "effective" completion/stamp cycle
-
-**The emitter needs to produce deltas such that `_time` matches `time + stall` from real hardware.**
-
-### Cycle Counts Are Encoded in InstOp Names
-
-Commit `#15473` added cycle counts to the `InstOp` enum names — the suffix `_N` is the cycle count:
-
-| InstOp | Value | Meaning | Cycles |
-|--------|-------|---------|--------|
-| `VALUT_4` | 0xb | transcendental (exp/log/sqrt/rcp/sin/cos) | 4 |
-| `VALUB_2` | 0xd | 64-bit shifts | 2 |
-| `VALUB_4` | 0xe | 64-bit multiply-add | 4 |
-| `VALUB_16` | 0xf | 64-bit FP ops | 16 |
-| `FLAT_RD_2` | 0x1c | flat load | 2 |
-| `FLAT_WR_3..6` | 0x1d-0x20 | flat stores (by size) | 3-6 |
-| `SGMEM_RD_1` | 0x21 | global load (saddr=SGPR) | 1 |
-| `SGMEM_RD_2` | 0x22 | global load (saddr=NULL) | 2 |
-| `LDS_RD` | 0x29 | LDS read (no cycle in name) | ? |
-| `LDS_WR_2..5` | 0x2b-0x2e | LDS writes (by size) | 2-5 |
-
-Standard VALU (`VALUINST`, no suffix) = **4 cycles** (RDNA3 VALU throughput)  
-SALU = **1 cycle** base  
-IMMEDIATE (s_nop, s_waitcnt) = **1 cycle**
-
-### S_DELAY_ALU: The Compiler's Explicit Stall Hint
-
-`S_DELAY_ALU` is the RDNA3 instruction the compiler inserts to encode exactly how many stall cycles are needed between dependent instructions. **It does NOT produce a SQTT packet** (skipped on hardware and in emulator), but its stall info must be added to the NEXT instruction's delta.
-
-**`simm16` encoding** (from [LLVM docs](https://releases.llvm.org/19.1.0/docs/AMDGPU/gfx11_delay.html)):
-
-```
-bits [3:0]  = INSTID0  — dependency for next instruction (0-11)
-bits [6:4]  = INSTSKIP — which instruction INSTID1 applies to (0=SAME, 1=NEXT, 2=SKIP_1 ... 5=SKIP_4)
-bits [10:7] = INSTID1  — dependency for instruction at INSTSKIP offset (0-11)
-```
-
-**INSTID values:**
-| ID | Name | Meaning |
-|----|------|---------|
-| 0 | NO_DEP | No stall needed |
-| 1-4 | VALU_DEP_1..4 | Depends on VALU instruction N opcodes back |
-| 5-7 | TRANS32_DEP_1..3 | Depends on transcendental N opcodes back |
-| 8 | FMA_ACCUM_CYCLE_1 | 1 extra cycle for FMA accumulation |
-| 9 | SALU_CYCLE_1 | 1 cycle penalty after SALU |
-| 10 | SALU_CYCLE_2 | 2 cycle penalty after SALU |
-| 11 | SALU_CYCLE_3 | 3 cycle penalty after SALU |
-
-The `VALU_DEP_N` values tell the GPU the previous VALU result is N opcodes back — the hardware uses its internal latency tables to compute the actual stall. For the emulator, we need to translate these dependency IDs into actual cycle counts based on RDNA3 pipeline latencies.
-
-### The Core Implementation Gap
-
-**File:** `test/mockgpu/amd/emu.py`, function `_init_sqtt_encoder()`
-
-The encoder needs to be extended to:
-1. Track a `current_cycle` counter
-2. Parse `S_DELAY_ALU` `simm16` values when encountered
-3. Apply the stall cycles to the **next instruction's** delta (INSTID0)
-4. Apply INSTID1 stall cycles to the instruction at INSTSKIP offset
-5. Use the `_N` suffix cycle counts from `InstOp` names as base deltas
+All constants are in `test/mockgpu/amd/emu.py`, calibrated against real GFX1100 SQTT traces:
 
 ```python
-# CURRENT (wrong):
-_emit_nibbles(nibbles, VALUINST, delta=1, wave=w)
-
-# NEEDED (cycle accurate):
-cycles = _get_base_cycles(inst_type, op_name)  # from InstOp suffix or VALU=4
-cycles += pending_stall                         # from previous S_DELAY_ALU
-pending_stall = 0                               # consumed
-current_cycle += cycles
-_emit_nibbles(nibbles, VALUINST, delta=cycles, wave=w)
+_LDS_LATENCY     = 32   # LDS read/write: data ready 32 cycles after issue
+_SMEM_LATENCY    = 200  # Scalar memory: variable (non-deterministic, not bounty target)
+_VMEM_LATENCY    = 300  # Vector memory: variable (non-deterministic, not bounty target)
+_BARRIER_RESUME  = 25   # Cycles after last wave reaches barrier before any wave resumes
+_VALU_DS_FORWARD = 26   # Min cycles from VALU issue before DS/VMEM can issue (scoreboard)
+_WAVESTART_GAP   = 1    # Cycles between consecutive WAVESTART tokens
+_FIRST_INST_GAP  = 2    # Cycles from WAVESTART to first instruction
 ```
 
-When `S_DELAY_ALU` is encountered (before emitting the next packet):
-```python
-simm16 = inst.simm16
-instid0 = simm16 & 0xF            # bits 3:0
-instskip = (simm16 >> 4) & 0x7    # bits 6:4
-instid1 = (simm16 >> 7) & 0xF     # bits 10:7
-stall_next = _instid_to_cycles(instid0)
-stall_skip = _instid_to_cycles(instid1)  # applies to instruction at offset instskip+1
+### Real Hardware Evidence (GFX1100, `profile_sync_run_0.pkl`, wave 0)
+
+```
++0     s_load_b64        ← SMEM read (DRAM, non-deterministic)
++895   s_waitcnt         ← SMEM stall (895 cycles: cache miss to DRAM)
++896   v_lshlrev_b32     ← VALU (address computation)
++922   ds_store_b32      ← 26-cycle gap after VALU = _VALU_DS_FORWARD ✓
++955   s_waitcnt         ← LDS stall (33 cycles ≈ _LDS_LATENCY=32 ✓)
++956   s_barrier
++981   v_add_nc_u32      ← 25-cycle barrier overhead = _BARRIER_RESUME ✓
++982   v_cmp_gt_u32
++1003  ds_load_b32       ← 22 cycles from v_add (dep VALU), 21 from v_cmp
++1035  s_waitcnt         ← LDS stall (32 cycles = _LDS_LATENCY ✓)
++1036  v_mov_b32
++1037  v_cndmask_b32
++1038  v_lshlrev_b32
++1065  global_store_b32  ← 27 cycles from last VALU ≈ _VALU_DS_FORWARD ✓
 ```
 
 ---
 
-## Implementation Plan
+## Architecture: How the Emulator Works
 
-### Phase 1: Add Cycle Tracking State to sqtt_encoder
-
-In `_init_sqtt_encoder()`:
-```python
-current_cycle = [0]   # mutable for closure
-pending_delay = [0]   # stall cycles from S_DELAY_ALU
-skip_delays: dict[int, int] = {}  # instruction_offset → stall_cycles
+```
+Kernel binary (.bin / ELF)
+        │
+        ▼
+  emit() in emu.py
+  ├─ Decodes each RDNA3 instruction
+  ├─ Classifies: valu / ds_rd / ds_wr / vmem_rd / vmem_wr / smem / barrier / ...
+  ├─ Appends (pkt_cls, kwargs, cat, extra) to per-wave event list
+  └─ Zero-cost events: delay_alu, waitcnt, immediate
+        │
+        ▼
+  _simulate_sq_timing()
+  ├─ Phase 1: Emit WAVESTART tokens (1 cycle apart per wave)
+  ├─ Phase 2: Round-robin scheduler
+  │   ├─ Drain zero-cost events (delay_alu → stall hints, waitcnt → LGKM/VM stall)
+  │   ├─ Select next wave: min(effective_ready) where:
+  │   │   effective_ready = max(ready[i], valu_forward_deadline[i]) for DS/VMEM
+  │   ├─ Issue instruction: compute issue_cycle, apply forwarding stall
+  │   ├─ Track LGKM/VM pending ops for waitcnt
+  │   └─ Barrier: stall waves until all arrive, release with +25 cycle overhead
+  └─ Returns: [(cycle, wave_id, pkt_cls, kwargs), ...]
+        │
+        ▼
+  finalize() → SQTT blob (delta-encoded binary)
+        │
+        ▼
+  rocprof-trace-decoder (C library) → per-instruction timestamps
+        │
+        ▼
+  test assertion: pkt._time == rocprof_inst.time + rocprof_inst.stall
 ```
 
-### Phase 2: Parse S_DELAY_ALU Before Emitting
+### VALU→DS Forwarding: Why It Matters
 
-Move `S_DELAY_ALU` out of `_SOPP_SKIP` into a new handler that saves stall info instead of emitting a packet:
+On RDNA3, the result of a VALU instruction (e.g. computing an LDS address) cannot be used by a DS instruction for ~26 clock cycles. The hardware's scoreboard enforces this — it's the register forwarding path latency.
 
-```python
-elif inst_op == SOPPOp3.S_DELAY_ALU.value:
-    simm16 = inst.simm16
-    instid0 = simm16 & 0xF
-    instskip = (simm16 >> 4) & 0x7
-    instid1 = (simm16 >> 7) & 0xF
-    pending_delay[0] = _instid_to_cycles(instid0)
-    if instid1 != 0:
-        skip_delays[instskip + 1] = _instid_to_cycles(instid1)
-    return  # no packet emitted
-```
+**Without this model:** emulator would schedule DS ops ~4 cycles after VALU (just the round-robin slot). Real hardware: 26 cycles.
 
-### Phase 3: Map InstOp → Base Cycles
-
-```python
-def _base_cycles(op_name: str) -> int:
-    # Extract suffix _N from InstOp name
-    import re
-    m = re.search(r'_(\d+)$', op_name)
-    return int(m.group(1)) if m else 4  # default VALU = 4 cycles
-```
-
-### Phase 4: Compute Delta Correctly
-
-```python
-def _emit(pkt_cls, wave_id, **kwargs):
-    cycles = _base_cycles(...) + pending_delay[0]
-    pending_delay[0] = 0
-    current_cycle[0] += cycles
-    _emit_nibbles(nibbles, pkt_cls, delta=cycles, wave=wave_id, **kwargs)
-```
-
-### Phase 5: Validate Against Real Hardware Captures
-
-Run `test_sqttmap.py::TestSQTTMapRDNA3` repeatedly, fix discrepancies:
-- Start with `profile_plus` (simple, minimal stalls)
-- Move to `profile_gemm` (LDS-heavy)
-- Iterate until all tests pass
+**With this model:** the stalled wave is *skipped* during selection, other waves fill the gap naturally, and the DS issues at the correct cycle. No other waves are blocked.
 
 ---
 
-## What We Need (Potential Blockers)
+## How to Run / Test (CI, No GPU Needed)
 
-| Resource | Status | Where to Get |
-|----------|--------|--------------|
-| RDNA3 ISA Manual | Public | [GPUOpen RDNA3 ISA](https://gpuopen.com/rdna3-isa/) |
-| Real gfx1100 captures | ✅ In repo | `extra/sqtt/examples/gfx1100/` |
-| rocprof-trace-decoder | ✅ Auto-install | `extra/sqtt/install_rocprof_decoder.py` |
-| RDNA3 instruction latency table | Needs research | AMD ISA guide, GPUOpen perf guide |
-| S_DELAY_ALU encoding spec | Needs research | RDNA3 ISA manual section on SOPP |
+### GitHub Actions CI
 
----
+The test suite runs automatically on every push to `2187Nick/tinygrad`. The key job is `rdna3-emu`:
 
-## Why This Is "AI-Proof" (According to geohot)
+```yaml
+# .github/workflows/test.yml
+rdna3-emu:
+  - Installs rocprof-trace-decoder (AMD CPU-only library)
+  - Runs: DEV=AMD MOCKGPU=1 PYTHON_REMU=1 PROFILE=1 SQTT=1 python -m pytest test/amd/
+```
 
-The challenge isn't generating code — it's **empirically matching hardware behavior**. The emulator must produce SQTT byte streams that are bitwise identical (in timing) to what a real RDNA3 chip produces. This requires:
+### Key Test Files
 
-1. Deep understanding of the RDNA3 pipeline model
-2. Careful study of how S_DELAY_ALU encodes stall information
-3. Iterative comparison against real hardware captures
-4. Getting every edge case right (branch mispredictions, LDS banking, etc.)
+```
+test/amd/test_emulator_timing.py   # ← Our bounty tests (both PASSING ✅)
+  test_plus_timing_consistent      # elementwise add kernel
+  test_sync_timing_consistent      # LDS + barrier kernel
 
-There's no shortcut — you must match the numbers, not just write code that "looks right."
+test/amd/test_sqttmap.py           # rocprof_inst_traces_match() helper
+test/amd/test_sqtt_examples.py     # Real pkl file packet parsing
+```
 
----
-
-## Quick Start
+### Running Locally (Linux with ROCm only)
 
 ```bash
-# Clone and set up
-git clone https://github.com/2187Nick/tinygrad
-cd tinygrad
+git clone https://github.com/2187Nick/tinygrad && cd tinygrad
 pip install -e ".[testing]"
-
-# Install the AMD rocprof decoder (needed for validation)
 sudo PYTHONPATH="." ./extra/sqtt/install_rocprof_decoder.py
 
-# See what the current emulator produces (will fail cycle checks)
-python -m pytest test/amd/test_sqttmap.py::TestSQTTMapRDNA3 -v
-
-# Run just the packet structure tests (these pass already)
-python -m pytest test/amd/test_sqtt_examples.py::TestSQTTExamplesRDNA3 -v
-
-# Run with debug output to see the SQTT packets
-DEBUG=2 python -m pytest test/amd/test_sqttmap.py::TestSQTTMapRDNA3 -v -k test_rocprof_inst_traces_match
+# Run timing tests
+DEV=AMD MOCKGPU=1 PYTHON_REMU=1 PROFILE=1 SQTT=1 \
+  python -m pytest test/amd/test_emulator_timing.py -v
 ```
+
+---
+
+## Next Steps Toward Bounty Completion
+
+### 1. Real Hardware Comparison Test (High Priority)
+
+Add `test_hw_timing_match` to `test/amd/test_emulator_timing.py`:
+- Load `extra/sqtt/examples/gfx1100/profile_sync_run_0.pkl`
+- Extract wave 0 relative timestamps (first instruction = 0)
+- Run same kernel through emulator (MOCKGPU=1)
+- Assert each emulated timestamp matches real HW within ±2 cycles
+
+This is the definitive bounty validation — it proves the emulator matches hardware, not just itself.
+
+### 2. Refine VALU→DS for Sequential VALU Patterns
+
+Current model uses `last_valu + 26`. The real hardware uses the specific DEP VALU + a skip-count reduction:
+- 0 instructions between dep VALU and DS: 26 cycles (✓ matches)
+- 1 instruction between (v_cmp which doesn't write the dep register): 22 cycles (model gives ~26, ~4 off)
+
+The fix requires tracking the "anchor VALU" (first VALU after last DS/VMEM), not the "last VALU", plus counting VALUs issued since the anchor.
+
+### 3. Submit to Tinygrad (When Ready)
+
+Once the real hardware comparison test passes:
+1. Review final diff with user
+2. Open PR to `tinygrad/tinygrad` (NOT done yet — only pushing to fork)
+3. Claim bounty 🏆
+
+---
+
+## File Map
+
+| File | Purpose |
+|------|---------|
+| `test/mockgpu/amd/emu.py` | Core emulator: `emit()`, `_simulate_sq_timing()`, timing constants |
+| `test/amd/test_emulator_timing.py` | Bounty tests: timing consistency checks |
+| `test/amd/test_sqttmap.py` | `rocprof_inst_traces_match()` helper |
+| `test/amd/test_sqtt_examples.py` | Real pkl packet parsing tests |
+| `extra/sqtt/examples/gfx1100/` | Real GFX1100 hardware captures |
+| `tinygrad/renderer/amd/sqtt.py` | SQTT packet format definitions |
+| `tinygrad/runtime/autogen/amd/rdna3/enum.py` | `SOPPOp`, `SOPKOp` enums (RDNA3-specific numbering) |
 
 ---
 
 ## Resources
 
-- **Tinygrad Discord** — `#bounties` channel for questions
 - **Bounty spreadsheet** — https://docs.google.com/spreadsheets/d/1WKHbT-7KOgjEawq5h5Ic1qUWzpfAzuD_J06N1JwOCGs/
-- **AMD RDNA3 ISA** — https://gpuopen.com/rdna3-isa/
-- **AMD GPU Performance Guide** — https://gpuopen.com/learn/rdna-performance-guide/
+- **AMD RDNA3 ISA** — https://gpuopen.com/rdna3-isa/ (also at `amd-rdna3-isa.pdf`)
+- **S_DELAY_ALU spec** — https://releases.llvm.org/19.1.0/docs/AMDGPU/gfx11_delay.html
 - **ROCProfiler** — https://github.com/ROCm/rocprofiler
-- **Radeon GPU Profiler** — https://github.com/GPUOpen-Tools/radeon_gpu_profiler
 
 ---
 
-*This README was generated as part of the bounty research effort. The goal is to win the $1,000 bounty by making the tinygrad RDNA3 software emulator produce SQTT traces that match real gfx1100 hardware cycle-for-cycle on non-DRAM kernels.*
+*Working fork: https://github.com/2187Nick/tinygrad — never push to upstream tinygrad until bounty is ready to claim.*
