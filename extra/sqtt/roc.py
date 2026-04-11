@@ -73,8 +73,21 @@ class _ROCParseCtx:
     self.inst_execs.setdefault(unwrap(self.active_run), []).append(WaveExec(ev.wave_id, ev.cu, ev.simd, unwrap(self.active_se), ev.begin_time,
                                                                              ev.end_time, insts_blob))
 
+def dump_blob(blob: bytes) -> None:
+  """Call rocprof's own dump_data on the raw SQTT blob and print each message."""
+  msgs: list[str] = []
+  @rocprof.rocprofiler_thread_trace_decoder_debug_callback_t
+  def dbg_cb(level, fname_ptr, msg_ptr, _):
+    msg = ctypes.cast(msg_ptr, ctypes.c_char_p).value
+    msgs.append(f"[{level}] {msg.decode(errors='replace') if msg else ''}")
+  data_arr = (ctypes.c_char * len(blob)).from_buffer_copy(blob)
+  rocprof.rocprof_trace_decoder_dump_data(data_arr, len(blob), dbg_cb, None)
+  for m in msgs: print("SQTT_DUMP:", m)
+
 def decode(sqtt_evs:list[ProfileSQTTEvent], disasms:dict[str, dict[int, Inst]]) -> _ROCParseCtx:
   ROCParseCtx = _ROCParseCtx(sqtt_evs, disasms)
+  if DEBUG >= 1:
+    for ev in sqtt_evs: dump_blob(ev.blob)
 
   @rocprof.rocprof_trace_decoder_se_data_callback_t
   def copy_cb(buf, buf_size, _):
@@ -97,6 +110,15 @@ def decode(sqtt_evs:list[ProfileSQTTEvent], disasms:dict[str, dict[int, Inst]]) 
         if DEBUG >= 5:
           pairs = [(ev.shader_clock, ev.realtime_clock) for ev in (rocprof.rocprofiler_thread_trace_decoder_realtime_t * n).from_address(events_ptr)]
           print(f"REALTIME {pairs}")
+      case rocprof.ROCPROFILER_THREAD_TRACE_DECODER_RECORD_INFO:
+        # rocprof diagnostic flags: DATA_LOST, STITCH_INCOMPLETE, WAVE_INCOMPLETE, etc.
+        if DEBUG >= 1:
+          info_name = rocprof.enum_rocprofiler_thread_trace_decoder_info_t.get(n)
+          print(f"trace_cb INFO: {info_name} (n={n})")
+      case rocprof.ROCPROFILER_THREAD_TRACE_DECODER_RECORD_SHADERDATA:
+        if DEBUG >= 2:
+          for ev in (rocprof.rocprofiler_thread_trace_decoder_shaderdata_t * n).from_address(events_ptr):
+            print(f"trace_cb SHADERDATA: wave_id={ev.wave_id} cu={ev.cu} simd={ev.simd} flags={ev.flags} value={ev.value:#x} time={ev.time}")
       case _:
         if DEBUG >= 2: print(f"trace_cb record_type={rocprof.enum_rocprofiler_thread_trace_decoder_record_type_t.get(record_type)} n={n}")
     return rocprof.ROCPROFILER_THREAD_TRACE_DECODER_STATUS_SUCCESS
@@ -107,7 +129,7 @@ def decode(sqtt_evs:list[ProfileSQTTEvent], disasms:dict[str, dict[int, Inst]]) 
     insts = ROCParseCtx.disasms.get(kern)
     if insts is None or pc.address not in insts:
       # rocprof asked for an unknown PC — return size 0 so it skips instead of silently failing via ctypes exception swallowing
-      if DEBUG >= 2:
+      if DEBUG >= 1:
         known = list((insts or {}).keys())[:3]
         print(f"isa_cb: MISS pc={pc.address:#x} code_obj_id={pc.code_object_id} kern={kern} kern_in_disasms={insts is not None} known_pcs={[hex(k) for k in known]}")
       mem_size_ptr[0] = 0
