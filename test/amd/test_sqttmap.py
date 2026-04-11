@@ -3,8 +3,7 @@ import unittest, pickle, contextlib, io
 from typing import Iterator
 from pathlib import Path
 from tinygrad.helpers import DEBUG, getenv, temp, ansistrip
-from tinygrad.renderer.amd.sqtt import print_packets, map_insts
-from tinygrad.runtime.autogen.amd.rdna3.ins import s_endpgm
+from tinygrad.renderer.amd.sqtt import print_packets, map_insts, WAVEEND
 from tinygrad.viz.serve import sqtt_timeline
 from test.amd.disasm import disasm
 
@@ -35,14 +34,19 @@ def rocprof_inst_traces_match(sqtt, prg, target):
     if DEBUG >= 2: print_packets([(pkt, info)])
     if info is None: continue
     if DEBUG >= 2: print(f"{' '*29}{disasm(info.inst)}")
-    # WAVEEND emits a synthetic s_endpgm marker — the emulator does not emit an INST packet
-    # for s_endpgm, so rocprof has no corresponding entry. Check before consuming from rocprof.
-    if info.inst == s_endpgm():
-      completed_wave = list(rwaves_iter[info.wave].pop(0))
-      assert len(completed_wave) == 0, f"incomplete instructions in wave {info.wave}"
+    # WAVEEND always yields a synthetic s_endpgm marker. On real hardware, rocprof's wave-end
+    # processing emits one final InstExec for s_endpgm; the emulator does not emit an INST
+    # packet for s_endpgm so rocprof has no corresponding entry. Drain 0 or 1 remaining entries.
+    if isinstance(pkt, WAVEEND):
+      remaining = list(rwaves_iter[info.wave].pop(0))
+      assert len(remaining) <= 1, f"incomplete instructions in wave {info.wave}: {remaining}"
+      if remaining:
+        ref_pc = remaining[0].pc - prg.base
+        assert ref_pc == info.pc, f"s_endpgm pc mismatch {ref_pc} != {info.pc}"
       continue
     rocprof_inst = next(rwaves_iter[info.wave][0])
     ref_pc = rocprof_inst.pc-prg.base
+    # always check pc matches
     assert ref_pc == info.pc, f"pc mismatch {ref_pc}:{disasm_map[rocprof_inst.pc]} != {info.pc}:{disasm(info.inst)}"
     assert pkt._time == rocprof_inst.time+rocprof_inst.stall
     passed_insts += 1
