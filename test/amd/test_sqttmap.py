@@ -35,17 +35,16 @@ def rocprof_inst_traces_match(sqtt, prg, target):
     if DEBUG >= 2: print_packets([(pkt, info)])
     if info is None: continue
     if DEBUG >= 2: print(f"{' '*29}{disasm(info.inst)}")
-    rocprof_inst = next(rwaves_iter[info.wave][0])
-    ref_pc = rocprof_inst.pc-prg.base
-    # always check pc matches
-    assert ref_pc == info.pc, f"pc mismatch {ref_pc}:{disasm_map[rocprof_inst.pc]} != {info.pc}:{disasm(info.inst)}"
-    # special handling for s_endpgm, it marks the wave completion.
+    # WAVEEND emits a synthetic s_endpgm marker — the emulator does not emit an INST packet
+    # for s_endpgm, so rocprof has no corresponding entry. Check before consuming from rocprof.
     if info.inst == s_endpgm():
       completed_wave = list(rwaves_iter[info.wave].pop(0))
       assert len(completed_wave) == 0, f"incomplete instructions in wave {info.wave}"
-    # otherwise the packet timestamp is time + "stall"
-    else:
-      assert pkt._time == rocprof_inst.time+rocprof_inst.stall
+      continue
+    rocprof_inst = next(rwaves_iter[info.wave][0])
+    ref_pc = rocprof_inst.pc-prg.base
+    assert ref_pc == info.pc, f"pc mismatch {ref_pc}:{disasm_map[rocprof_inst.pc]} != {info.pc}:{disasm(info.inst)}"
+    assert pkt._time == rocprof_inst.time+rocprof_inst.stall
     passed_insts += 1
 
   for k,v in rwaves_iter.items():

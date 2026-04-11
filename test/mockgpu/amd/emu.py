@@ -79,8 +79,9 @@ MASK32 = 0xFFFFFFFF
 sqtt_traces: list[bytes] = []
 
 # Encoder primitives
-from tinygrad.renderer.amd.sqtt import (_build_decode_tables, PACKET_TYPES_RDNA3, LAYOUT_HEADER, WAVESTART, WAVEALLOC, WAVEEND, INST, IMMEDIATE, VALUINST,
-                                        TS_DELTA_SHORT, TS_DELTA_S5_W3, REG, SNAPSHOT, TS_WAVE_STATE, InstOp)
+from tinygrad.renderer.amd.sqtt import (
+  _build_decode_tables, PACKET_TYPES_RDNA3, LAYOUT_HEADER, WAVESTART, WAVEALLOC, WAVEEND,
+  INST, IMMEDIATE, VALUINST, TS_DELTA_SHORT, TS_DELTA_S5_W3, REG, SNAPSHOT, TS_WAVE_STATE, InstOp)
 
 _NIB_COUNTS: dict = {cls: nc for _, (cls, nc, *_) in _build_decode_tables(PACKET_TYPES_RDNA3)[0].items()}
 
@@ -436,19 +437,24 @@ def _init_sqtt_encoder(entry_pc: int):
     # Encode packets with correct inter-event deltas
     nibbles: list[int] = []
     _emit_nibbles(nibbles, LAYOUT_HEADER, layout=3, sel_a=6)
-    # REG preamble: slot=4 encodes me=1,pipe=0 (MEC compute engine). WAVESTART id7=0x20 sets the same me=1.
-    # Both must agree so rocprof reads PGM from wave_start_addr[me&1=1][pipe=0] — matching what we wrote.
+    # DISPATCH_INITIATOR: dispatch-scoped, emitted once globally.
     _emit_nibbles(nibbles, REG, delta=0, slot=4, hi_byte=0x82, subop=0x80, val32=0x80000003)
-    pgm = entry_pc >> 8
-    _emit_nibbles(nibbles, REG, delta=0, slot=4, hi_byte=0x82, subop=0xC, val32=pgm & 0xFFFFFFFF)
-    _emit_nibbles(nibbles, REG, delta=0, slot=4, hi_byte=0x82, subop=0xD, val32=(pgm >> 32) & 0xFFFFFFFF)
-    # SNAPSHOT.snap: bitmask of active wave slots (bit i = wave i is active).
+    # SNAPSHOT.snap=0: no waves are active yet at snapshot time. Each wave is established
+    # via WAVEALLOC+WAVESTART as they're allocated, so we don't pre-claim occupancy.
+    # Claiming all N waves active before WAVEALLOC/WAVESTART can trigger DATA_LOST.
     # TS_WAVE_STATE.coarse bit 0 = wave_interest; must be 1 so rocprof processes wave instruction data.
-    n_waves = len(wave_events)
-    _emit_nibbles(nibbles, SNAPSHOT, delta=0, snap=(1 << n_waves) - 1)
+    _emit_nibbles(nibbles, SNAPSHOT, delta=0, snap=0)
     _emit_nibbles(nibbles, TS_WAVE_STATE, delta=0, coarse=1)  # wave_interest=True
+    # slot=4 encodes me=1,pipe=0 (MEC compute engine). WAVESTART id7=0x20 sets the same me=1.
+    # Both must agree so rocprof reads PGM from wave_start_addr[me&1=1][pipe=0] — matching what we wrote.
+    # Re-emit PGM_LO/HI before each WAVEALLOC: rocprof consumes the program address once per
+    # WAVEALLOC/WAVESTART pair, so each wave allocation needs a fresh program address context.
+    pgm = entry_pc >> 8
     prev_time = 0
     for ts, _, pkt_cls, kwargs in timed:
+      if pkt_cls is WAVEALLOC:
+        _emit_nibbles(nibbles, REG, delta=0, slot=4, hi_byte=0x82, subop=0xC, val32=pgm & 0xFFFFFFFF)
+        _emit_nibbles(nibbles, REG, delta=0, slot=4, hi_byte=0x82, subop=0xD, val32=(pgm >> 32) & 0xFFFFFFFF)
       delta = max(ts - prev_time, 0)
       _emit_with_delta(nibbles, pkt_cls, delta=delta, **kwargs)
       prev_time = ts
