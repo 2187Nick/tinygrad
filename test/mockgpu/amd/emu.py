@@ -425,13 +425,14 @@ def _init_sqtt_encoder(entry_pc: int):
   def finalize() -> bytes:
     """Run timing simulation, encode interleaved SQTT stream with cycle-accurate deltas."""
     timed = _simulate_sq_timing(wave_events)
-    # Sort by (timestamp, lifecycle_priority, wave_id).
-    # At equal timestamps, WAVESTART must precede instructions and WAVEEND must follow them.
-    # Without this, early-wave instructions can appear before later-wave WAVEALLOC/WAVESTART
-    # (e.g. wave=0 instruction at ts=3 would sort before wave=2 WAVESTART at ts=3 by wave_id),
-    # which causes rocprof to report DATA_LOST for the later waves.
-    _LIFECYCLE_PRI = {WAVESTART: 0, WAVEEND: 2}
-    timed.sort(key=lambda x: (x[0], _LIFECYCLE_PRI.get(x[2], 1), x[1]))
+    # Sort by (timestamp, lifecycle_priority) using Python's stable sort.
+    # At equal timestamps, WAVESTART must come before instruction packets so rocprof sees
+    # each wave's WAVEALLOC/WAVESTART lifecycle token before any instruction from that wave.
+    # Without this, an early-wave instruction (low wave_id) at ts=N would sort before a
+    # later-wave WAVESTART also at ts=N → rocprof reports DATA_LOST for the later wave.
+    # We rely on stable sort to preserve the scheduler emission order within the same
+    # (ts, priority) bucket (e.g., barrier-resumed waves keep their round-robin order).
+    timed.sort(key=lambda x: (x[0], 0 if x[2] is WAVESTART else 1))
     # Insert WAVEALLOC before each WAVESTART: rocprof requires the WAVEALLOC lifecycle token
     # to associate the current dispatch PGM_LO/HI register context with the new wave.
     # Without it, rocprof has no PC base and reports DATA_LOST.
