@@ -155,7 +155,8 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
   - One non-zero-cost instruction issued per SQ clock cycle per SIMD
   - IMMEDIATE-type SOPP (s_waitcnt, s_nop, s_clause): zero issue cost, processed inline
   - S_DELAY_ALU: zero cost, updates stall hints for subsequent instructions
-  - Barrier: 1-cycle issue cost, wave stalls until all waves arrive + resume latency
+  - Barrier: 1-cycle issue cost, wave stalls until all waves arrive + _BARRIER_RESUME cycles
+  - VALU→DS/VMEM: _VALU_DS_FORWARD cycle stall on the dep wave only; other waves fill the gap
   - Round-robin among ready waves; stalled waves are skipped
   """
   wave_ids = sorted(wave_events.keys())
