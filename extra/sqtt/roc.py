@@ -89,23 +89,31 @@ def decode(sqtt_evs:list[ProfileSQTTEvent], disasms:dict[str, dict[int, Inst]]) 
       case rocprof.ROCPROFILER_THREAD_TRACE_DECODER_RECORD_OCCUPANCY:
         for ev in (rocprof.rocprofiler_thread_trace_decoder_occupancy_t * n).from_address(events_ptr): ROCParseCtx.on_occupancy_ev(ev)
       case rocprof.ROCPROFILER_THREAD_TRACE_DECODER_RECORD_WAVE:
+        if DEBUG >= 2:
+          for ev in (rocprof.rocprofiler_thread_trace_decoder_wave_t * n).from_address(events_ptr):
+            print(f"trace_cb WAVE: wave_id={ev.wave_id} instructions_size={ev.instructions_size} begin={ev.begin_time} end={ev.end_time}")
         for ev in (rocprof.rocprofiler_thread_trace_decoder_wave_t * n).from_address(events_ptr): ROCParseCtx.on_wave_ev(ev)
       case rocprof.ROCPROFILER_THREAD_TRACE_DECODER_RECORD_REALTIME:
         if DEBUG >= 5:
           pairs = [(ev.shader_clock, ev.realtime_clock) for ev in (rocprof.rocprofiler_thread_trace_decoder_realtime_t * n).from_address(events_ptr)]
           print(f"REALTIME {pairs}")
       case _:
-        if DEBUG >= 5: print(rocprof.enum_rocprofiler_thread_trace_decoder_record_type_t.get(record_type), events_ptr, n)
+        if DEBUG >= 2: print(f"trace_cb record_type={rocprof.enum_rocprofiler_thread_trace_decoder_record_type_t.get(record_type)} n={n}")
     return rocprof.ROCPROFILER_THREAD_TRACE_DECODER_STATUS_SUCCESS
 
   @rocprof.rocprof_trace_decoder_isa_callback_t
   def isa_cb(instr_ptr, mem_size_ptr, size_ptr, pc, _):
     kern = unwrap(ROCParseCtx.active_run)[0]
-    if pc.address not in ROCParseCtx.disasms[kern]:
-      # rocprof asked for an unknown PC — return size 0 so it skips this instruction instead of silently failing via ctypes exception swallowing
+    insts = ROCParseCtx.disasms.get(kern)
+    if insts is None or pc.address not in insts:
+      # rocprof asked for an unknown PC — return size 0 so it skips instead of silently failing via ctypes exception swallowing
+      if DEBUG >= 2:
+        known = list((insts or {}).keys())[:3]
+        print(f"isa_cb: MISS pc={pc.address:#x} code_obj_id={pc.code_object_id} kern={kern} kern_in_disasms={insts is not None} known_pcs={[hex(k) for k in known]}")
       mem_size_ptr[0] = 0
       return rocprof.ROCPROFILER_THREAD_TRACE_DECODER_STATUS_SUCCESS
-    instr, mem_size_ptr[0] = ROCParseCtx.disasms[kern][pc.address]
+    if DEBUG >= 3: print(f"isa_cb: HIT pc={pc.address:#x} code_obj_id={pc.code_object_id} kern={kern}")
+    instr, mem_size_ptr[0] = insts[pc.address]
 
     # this is the number of bytes to next instruction, set to 0 for end_pgm
     if instr == "s_endpgm": mem_size_ptr[0] = 0

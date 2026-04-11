@@ -80,7 +80,7 @@ sqtt_traces: list[bytes] = []
 
 # Encoder primitives
 from tinygrad.renderer.amd.sqtt import (_build_decode_tables, PACKET_TYPES_RDNA3, LAYOUT_HEADER, WAVESTART, WAVEEND, INST, IMMEDIATE, VALUINST,
-                                        TS_DELTA_SHORT, TS_DELTA_S5_W3, REG, InstOp)
+                                        TS_DELTA_SHORT, TS_DELTA_S5_W3, REG, SNAPSHOT, TS_WAVE_STATE, InstOp)
 
 _NIB_COUNTS: dict = {cls: nc for _, (cls, nc, *_) in _build_decode_tables(PACKET_TYPES_RDNA3)[0].items()}
 
@@ -427,14 +427,17 @@ def _init_sqtt_encoder(entry_pc: int):
     # Encode packets with correct inter-event deltas
     nibbles: list[int] = []
     _emit_nibbles(nibbles, LAYOUT_HEADER, layout=3, sel_a=6)
-    # Emit COMPUTE_PGM_LO/HI REG packets so rocprof can reconstruct the wave's initial PC.
-    # subop = offset from regCOMPUTE_DISPATCH_INITIATOR (0x1BA0): LO=0xC, HI=0xD.
-    # hi_byte=0x82 = is_config(bit7) + slot MSB(bit1); slot=4 = CS compute pipe (matches real hardware).
+    # Real hardware preamble structure (matching gfx1100 real SQTT):
+    # 1. COMPUTE_DISPATCH_INITIATOR first (subop=0x80, val=0x80000003) to arm dispatch tracking
+    # 2. COMPUTE_PGM_LO/HI so rocprof can reconstruct the wave's initial PC
+    # 3. SNAPSHOT + TS_WAVE_STATE state-latch packets to commit state before waves begin
+    _emit_nibbles(nibbles, REG, delta=0, slot=4, hi_byte=0x82, subop=0x80, val32=0x80000003)
     pgm = entry_pc >> 8
     _emit_nibbles(nibbles, REG, delta=0, slot=4, hi_byte=0x82, subop=0xC, val32=pgm & 0xFFFFFFFF)
     _emit_nibbles(nibbles, REG, delta=0, slot=4, hi_byte=0x82, subop=0xD, val32=(pgm >> 32) & 0xFFFFFFFF)
-    # Emit COMPUTE_DISPATCH_INITIATOR (subop=0x80) so rocprof recognises a compute dispatch and binds PGM_LO/HI to the wave PC.
-    _emit_nibbles(nibbles, REG, delta=0, slot=4, hi_byte=0x82, subop=0x80, val32=0x00000001)
+    # SNAPSHOT + TS_WAVE_STATE signal that compute state has been captured (rocprof uses these to commit PGM_LO/HI to the wave)
+    _emit_nibbles(nibbles, SNAPSHOT, delta=0, snap=0)
+    _emit_nibbles(nibbles, TS_WAVE_STATE, delta=0, coarse=0)
     prev_time = 0
     for ts, _, pkt_cls, kwargs in timed:
       delta = max(ts - prev_time, 0)
