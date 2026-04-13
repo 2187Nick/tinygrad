@@ -50,8 +50,8 @@ Global memory (DRAM/VRAM) has unpredictable latency (100–400+ cycles, cache-de
 | WAVESTART tokens | ✅ | 1-cycle gap between waves confirmed |
 | Round-robin wave scheduler | ✅ | Multi-wave kernels scheduled correctly |
 | LDS latency | ✅ | `_LDS_LATENCY = 32` cycles (matches GFX1100) |
-| Barrier overhead | ✅ | `_BARRIER_RESUME = 25` cycles (confirmed GFX1100) |
-| VALU→DS/VMEM forwarding stall | ✅ | `_VALU_DS_FORWARD = 26` cycles (measured GFX1100) |
+| Barrier overhead | ✅ | `_BARRIER_FROM_LAST = 18` cycles from last arrival (GFX1100) |
+| VALU→DS/VMEM forwarding stall | ✅ | `_VALU_DS_WR_FORWARD = 26` / `_VALU_DS_RD_FORWARD = 22` cycles (GFX1100) |
 | WAVEALLOC/DATA_LOST handling | ✅ | Blob structure bugs fixed |
 | test_plus_timing_consistent | ✅ PASSING | Plus kernel self-consistency |
 | test_sync_timing_consistent | ✅ PASSING | LDS+barrier kernel self-consistency |
@@ -94,13 +94,15 @@ The next test (not yet written) would:
 All constants are in `test/mockgpu/amd/emu.py`, calibrated against real GFX1100 SQTT traces:
 
 ```python
-_LDS_LATENCY     = 32   # LDS read/write: data ready 32 cycles after issue
-_SMEM_LATENCY    = 200  # Scalar memory: variable (non-deterministic, not bounty target)
-_VMEM_LATENCY    = 300  # Vector memory: variable (non-deterministic, not bounty target)
-_BARRIER_RESUME  = 25   # Cycles after last wave reaches barrier before any wave resumes
-_VALU_DS_FORWARD = 26   # Min cycles from VALU issue before DS/VMEM can issue (scoreboard)
-_WAVESTART_GAP   = 1    # Cycles between consecutive WAVESTART tokens
-_FIRST_INST_GAP  = 2    # Cycles from WAVESTART to first instruction
+_LDS_LATENCY       = 32   # LDS read/write: data ready 32 cycles after issue
+_SMEM_LATENCY      = 200  # Scalar memory: variable (non-deterministic, not bounty target)
+_VMEM_LATENCY      = 300  # Vector memory: variable (non-deterministic, not bounty target)
+_BARRIER_FROM_LAST = 18   # Cycles from last wave's barrier issue to release (with 2-cycle RR stagger)
+_LDS_SERVICE_COST  = 5    # Cycles the LDS unit is busy servicing one DS write (contention window)
+_VALU_DS_WR_FORWARD = 26  # Min cycles from VALU to DS_WR/VMEM_WR issue (address + data forwarding)
+_VALU_DS_RD_FORWARD = 22  # Min cycles from VALU to DS_RD/VMEM_RD issue (address-only, shorter pipeline)
+_WAVESTART_GAP     = 1    # Cycles between consecutive WAVESTART tokens
+_FIRST_INST_GAP    = 2    # Cycles from WAVESTART to first instruction
 ```
 
 ### Real Hardware Evidence (GFX1100, `profile_sync_run_0.pkl`, wave 0)
@@ -109,17 +111,17 @@ _FIRST_INST_GAP  = 2    # Cycles from WAVESTART to first instruction
 +0     s_load_b64        ← SMEM read (DRAM, non-deterministic)
 +895   s_waitcnt         ← SMEM stall (895 cycles: cache miss to DRAM)
 +896   v_lshlrev_b32     ← VALU (address computation)
-+922   ds_store_b32      ← 26-cycle gap after VALU = _VALU_DS_FORWARD ✓
++922   ds_store_b32      ← 26-cycle gap after VALU = _VALU_DS_WR_FORWARD ✓
 +955   s_waitcnt         ← LDS stall (33 cycles ≈ _LDS_LATENCY=32 ✓)
 +956   s_barrier
-+981   v_add_nc_u32      ← 25-cycle barrier overhead = _BARRIER_RESUME ✓
++981   v_add_nc_u32      ← 25-cycle barrier overhead (18 from last arrival + 7 inter-wave gap) ✓
 +982   v_cmp_gt_u32
-+1003  ds_load_b32       ← 22 cycles from v_add (dep VALU), 21 from v_cmp
++1003  ds_load_b32       ← 22 cycles from v_add (dep VALU) = _VALU_DS_RD_FORWARD ✓, 21 from v_cmp (VOPC, skipped)
 +1035  s_waitcnt         ← LDS stall (32 cycles = _LDS_LATENCY ✓)
 +1036  v_mov_b32
 +1037  v_cndmask_b32
 +1038  v_lshlrev_b32
-+1065  global_store_b32  ← 27 cycles from last VALU ≈ _VALU_DS_FORWARD ✓
++1065  global_store_b32  ← 27 cycles from last VALU ≈ _VALU_DS_WR_FORWARD ✓
 ```
 
 ---

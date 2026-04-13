@@ -124,7 +124,8 @@ _SMEM_LATENCY = 200      # Scalar memory read latency (DRAM, approximate — var
 _VMEM_LATENCY = 300      # Vector memory read/write latency (DRAM, approximate — variable on real HW)
 _BARRIER_FROM_LAST = 18  # Cycles from last wave's barrier issue to first post-barrier instruction (derived from GFX1100 SQTT traces)
 _LDS_SERVICE_COST = 5    # Cycles the LDS unit is busy servicing one DS op (contention window for subsequent waves)
-_VALU_DS_FORWARD = 26   # Cycles from last VALU issue before DS/VMEM can issue (RDNA3 forwarding path latency)
+_VALU_DS_WR_FORWARD = 26 # Cycles from last VALU to DS_WR/VMEM_WR issue (address + data forwarding)
+_VALU_DS_RD_FORWARD = 22 # Cycles from last VALU to DS_RD/VMEM_RD issue (address-only forwarding, shorter pipeline)
 _WAVESTART_GAP = 1       # Cycles between consecutive WAVESTART allocations (confirmed from GFX1100 SQTT traces)
 _FIRST_INST_GAP = 2      # Cycles from WAVESTART to first instruction issue
 # S_DELAY_ALU INSTID → stall cycles mapping (indexed 0-11):
@@ -156,8 +157,8 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
   - One non-zero-cost instruction issued per SQ clock cycle per SIMD
   - IMMEDIATE-type SOPP (s_waitcnt, s_nop, s_clause): zero issue cost, processed inline
   - S_DELAY_ALU: zero cost, updates stall hints for subsequent instructions
-  - Barrier: 1-cycle issue cost, wave stalls until all waves arrive + _BARRIER_RESUME cycles
-  - VALU→DS/VMEM: _VALU_DS_FORWARD cycle stall on the dep wave only; other waves fill the gap
+  - Barrier: 1-cycle issue cost, wave stalls until all waves arrive + _BARRIER_FROM_LAST cycles
+  - VALU→DS/VMEM: _VALU_DS_WR_FORWARD/_VALU_DS_RD_FORWARD cycle stall on the dep wave only; other waves fill the gap
   - Round-robin among ready waves; stalled waves are skipped
   """
   wave_ids = sorted(wave_events.keys())
@@ -174,9 +175,10 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
   wave_done = [False] * n
   # S_DELAY_ALU: [packet_count, dep0_target, dep0_stall, dep1_target, dep1_stall]
   dly: list[list[int]] = [[0, -1, 0, -1, 0] for _ in range(n)]
-  # VALU→DS/VMEM forwarding stall: track earliest cycle at which this wave's next DS/VMEM can issue.
+  # VALU→DS/VMEM forwarding stall: separate deadlines for writes (address+data) vs reads (address-only).
   # Integrated into wave selection so only the stalled wave defers; other waves fill the gap normally.
-  valu_forward_deadline = [0] * n
+  valu_wr_deadline = [0] * n   # earliest cycle DS_WR/VMEM_WR can issue
+  valu_rd_deadline = [0] * n   # earliest cycle DS_RD/VMEM_RD can issue
   # Shared LDS unit availability (models contention when multiple waves access LDS concurrently)
   cu_lds_available = 0
 
@@ -255,11 +257,13 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
       i = (rr + offset) % n
       if wave_done[i] or at_barrier[i]: continue
       if pc[i] >= len(wave_events[wave_ids[i]]): continue
-      # Account for VALU forwarding stall: DS/VMEM can't issue until valu_forward_deadline
+      # Account for VALU forwarding stall: DS/VMEM can't issue until forwarding deadline
       eff_ready = ready[i]
       _, _, next_cat, _ = wave_events[wave_ids[i]][pc[i]]
-      if next_cat in ('ds_rd', 'ds_wr', 'vmem_rd', 'vmem_wr'):
-        eff_ready = max(eff_ready, valu_forward_deadline[i])
+      if next_cat in ('ds_wr', 'vmem_wr'):
+        eff_ready = max(eff_ready, valu_wr_deadline[i])
+      elif next_cat in ('ds_rd', 'vmem_rd'):
+        eff_ready = max(eff_ready, valu_rd_deadline[i])
       if eff_ready < best_cycle:
         best_cycle = eff_ready
         best = i
@@ -296,8 +300,10 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
     issue_cycle += stall
 
     # Apply VALU→DS/VMEM forwarding stall (wave selection already deferred this wave; just clamp)
-    if cat in ('ds_rd', 'ds_wr', 'vmem_rd', 'vmem_wr'):
-      issue_cycle = max(issue_cycle, valu_forward_deadline[i])
+    if cat in ('ds_wr', 'vmem_wr'):
+      issue_cycle = max(issue_cycle, valu_wr_deadline[i])
+    elif cat in ('ds_rd', 'vmem_rd'):
+      issue_cycle = max(issue_cycle, valu_rd_deadline[i])
 
     timed.append((issue_cycle, wid, pkt_cls, kwargs))
     issue_cost = _get_issue_cost(pkt_cls, kwargs)
@@ -305,16 +311,20 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
     # Track memory operation completion times
     if cat == 'smem': lgkm_pend[i].append(issue_cycle + _SMEM_LATENCY)
     elif cat in ('ds_rd', 'ds_wr'):
-      # LDS contention: DS ops are serialized through the shared LDS unit
-      lds_start = max(issue_cycle, cu_lds_available)
-      lgkm_pend[i].append(lds_start + _LDS_LATENCY)
-      cu_lds_available = lds_start + _LDS_SERVICE_COST
+      # LDS contention: DS writes are serialized through the shared LDS unit; reads are not contention-limited
+      if cat == 'ds_wr':
+        lds_start = max(issue_cycle, cu_lds_available)
+        lgkm_pend[i].append(lds_start + _LDS_LATENCY)
+        cu_lds_available = lds_start + _LDS_SERVICE_COST
+      else:
+        lgkm_pend[i].append(issue_cycle + _LDS_LATENCY)
     elif cat == 'vmem_rd': vm_pend[i].append(issue_cycle + _VMEM_LATENCY)
     elif cat == 'vmem_wr': vm_pend[i].append(issue_cycle + _VMEM_LATENCY)
 
     # Track last VALU issue cycle for DS/VMEM forwarding stall (skip VOPC — writes VCC not VGPR)
     if cat == 'valu' and not extra:
-      valu_forward_deadline[i] = issue_cycle + _VALU_DS_FORWARD
+      valu_wr_deadline[i] = issue_cycle + _VALU_DS_WR_FORWARD
+      valu_rd_deadline[i] = issue_cycle + _VALU_DS_RD_FORWARD
 
     # Update wave state
     if cat == 'barrier':
