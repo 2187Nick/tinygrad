@@ -6,7 +6,7 @@
 #   arg=3: lds - local data share
 #   arg=4: scratch - per-lane scratch memory
 from __future__ import annotations
-import ctypes, functools, os, re, platform, subprocess, tempfile
+import ctypes, functools, re, platform, subprocess, tempfile
 from typing import Callable
 
 # Set/restore DAZ+FTZ (denormals-are-zero + flush-to-zero) to match RDNA3 default float mode
@@ -122,7 +122,7 @@ def _nibbles_to_bytes(nibbles: list[int]) -> bytes:
 _LDS_LATENCY = 32        # LDS read/write completion latency
 _SMEM_LATENCY = 200      # Scalar memory read latency (DRAM, approximate — variable on real HW)
 _VMEM_LATENCY = 300      # Vector memory read/write latency (DRAM, approximate — variable on real HW)
-_BARRIER_FROM_LAST = 18  # Cycles from last wave's barrier issue to first post-barrier instruction (derived from GFX1100 SQTT traces)
+_BARRIER_FROM_LAST = 10  # Cycles from last wave's barrier issue to first post-barrier instruction (derived from GFX1100 SQTT traces)
 _LDS_SERVICE_COST = 5    # Cycles the LDS unit is busy servicing one DS op (contention window for subsequent waves)
 _VALU_DS_WR_FORWARD = 26 # Cycles from last VALU to DS_WR/VMEM_WR issue (address + data forwarding)
 _VALU_DS_RD_FORWARD = 22 # Cycles from last VALU to DS_RD/VMEM_RD issue (address-only forwarding, shorter pipeline)
@@ -277,8 +277,6 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
       if non_done_non_barrier: break  # deadlock prevention
       # Release barrier: resume after fixed latency from last wave's barrier issue
       release_cycle = max(barrier_issue[i] for i in barrier_waves) + _BARRIER_FROM_LAST
-      if os.environ.get("SQTT_DEBUG"):
-        print(f"  BARRIER RELEASE: barrier_issues={[barrier_issue[i] for i in barrier_waves]} max={max(barrier_issue[i] for i in barrier_waves)} release={release_cycle}")
       for idx, i in enumerate(sorted(barrier_waves)):
         at_barrier[i] = False
         ready[i] = release_cycle + idx * 2  # 2-cycle RR stagger observed on GFX1100
@@ -309,10 +307,6 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
 
     timed.append((issue_cycle, wid, pkt_cls, kwargs))
     issue_cost = _get_issue_cost(pkt_cls, kwargs)
-
-    # DEBUG: print detailed wave scheduling for the first 2 waves
-    if n <= 2 and os.environ.get("SQTT_DEBUG"):
-      print(f"  w{i} pc={pc[i]:2d} cat={cat:8s} issue={issue_cycle:5d} cost={issue_cost} ready_was={ready[i]:5d} clock={clock:5d} extra={extra}")
 
     # Track memory operation completion times
     if cat == 'smem': lgkm_pend[i].append(issue_cycle + _SMEM_LATENCY)

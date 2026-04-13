@@ -150,9 +150,6 @@ class TestEmulatorTiming(unittest.TestCase):
     emu_sqtt, emu_prg = self._capture()
     self.assertIsNotNone(emu_sqtt, "no emulator SQTT event captured for custom_lds_sync")
     emu_traces = _extract_wave_traces(emu_sqtt.blob, emu_prg.lib, TARGET)
-    # DEBUG: print ALL emulator traces (including outside non-DRAM window)
-    for wid in sorted(emu_traces.keys())[:2]:
-      print(f"\nDEBUG full emu trace wave {wid}: {[(hex(pc), t, typ) for pc, t, typ in emu_traces[wid]]}")
 
     # --- 2. Load real HW capture and sanity-check against known constants ---
     hw_traces, hw_lib = _get_hw_traces(HW_PKL, kern_tag=0, target=TARGET)
@@ -196,7 +193,6 @@ class TestEmulatorTiming(unittest.TestCase):
       self.assertEqual(hw_inter, expected, f"wave {wave_idx}: HW pkl deltas changed!\n  got: {hw_inter}\n  expected: {expected}")
 
       print(f"\nHW vs EMU comparison for wave {wave_idx} (inter-instruction deltas):")
-      print(f"  EMU absolute timestamps: {[(hex(pc), t) for pc, t, _ in emu_window]}")
       max_diff = 0
       failures = []
       for i, (pc, hw_d, emu_d) in enumerate(zip(HW_PCS, expected, emu_inter)):
