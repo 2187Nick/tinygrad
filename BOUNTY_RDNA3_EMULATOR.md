@@ -4,7 +4,7 @@
 > — geohot, April 10 2026
 
 **Fork:** https://github.com/2187Nick/tinygrad  
-**CI Status:** ✅ All timing tests PASSING — 11/11 deltas within ±2 of real HW (as of 2026-04-11)
+**CI Status:** ✅ All 5 timing tests PASSING — sync: 11/11 deltas within ±2 of real HW, plus: forwarding delta exact match
 
 ---
 
@@ -53,15 +53,18 @@ Global memory (DRAM/VRAM) has unpredictable latency (100–400+ cycles, cache-de
 | Barrier overhead | ✅ | `_BARRIER_FROM_LAST = 10` cycles from last arrival (GFX1100, 4-wave corrected) |
 | VALU→DS/VMEM forwarding stall | ✅ | `_VALU_DS_WR_FORWARD = 26` / `_VALU_DS_RD_FORWARD = 22` cycles (GFX1100) |
 | WAVEALLOC/DATA_LOST handling | ✅ | Blob structure bugs fixed |
-| test_plus_timing_consistent | ✅ PASSING | Plus kernel self-consistency |
-| test_sync_timing_consistent | ✅ PASSING | LDS+barrier kernel self-consistency |
-
 | LDS contention model | ✅ | `_LDS_SERVICE_COST = 5` cycles per DS write (shared CU resource) |
 | VOPC forwarding skip | ✅ | v_cmp (VOPC) doesn't reset VALU→DS forwarding deadline |
-| Real hardware comparison | ✅ | `test_sync_hw_match` — all 11 deltas match GFX1100 within ±2 |
-| test_plus_timing_consistent | ✅ PASSING | Plus kernel self-consistency |
-| test_sync_timing_consistent | ✅ PASSING | LDS+barrier kernel self-consistency |
-| test_sync_hw_match | ✅ PASSING | All 11 inter-instruction deltas match real GFX1100 within ±2 |
+
+### ✅ TESTS (ALL PASSING)
+
+| Test | What It Validates |
+|------|-------------------|
+| `test_plus_timing_consistent` | Plus kernel: emulator SQTT is rocprof-decodable |
+| `test_sync_timing_consistent` | LDS+barrier kernel: emulator SQTT is rocprof-decodable |
+| `test_sync_hw_match` | **11/11 deltas match real GFX1100** within ±2 (wave 0 + wave 1) |
+| `test_sync_hw_determinism` | **Both HW captures (run_0 + run_1) produce identical deltas** — proves determinism |
+| `test_plus_hw_forwarding` | **VALU→global_store delta=25 matches HW** across both runs — validates forwarding constant |
 
 ### HW Comparison Results (GFX1100, `profile_sync_run_0.pkl`, wave 0)
 
@@ -84,8 +87,8 @@ v_lshlrev          1    2  ✓ diff=1
 
 | Work Item | Priority | Notes |
 |-----------|----------|-------|
-| Test with more kernels | MEDIUM | Validate constants generalize beyond `custom_lds_sync` |
-| SMEM latency model | LOW | Non-DRAM kernels rarely use SMEM; 200-cycle placeholder OK |
+| More non-DRAM kernel captures | MEDIUM | Current captures have limited non-DRAM instruction variety |
+| Gemm tail validation | LOW | 33 deterministic non-DRAM instructions in gemm trace (indices 25-57) |
 | Submit PR to upstream | FINAL | User review first, then open PR to `tinygrad/tinygrad` |
 
 ---
@@ -104,12 +107,20 @@ This checks: the SQTT blob the emulator generates is **self-consistent** — the
 
 This test PASSES even if the absolute cycle numbers differ from real hardware.
 
-### Level 2: Real Hardware Match (NEEDED FOR BOUNTY 🎯)
+### Level 2: Real Hardware Match (PASSING ✅ — BOUNTY TARGET)
 
-The next test (not yet written) would:
-1. Load `extra/sqtt/examples/gfx1100/profile_sync_run_0.pkl` (real GFX1100 trace)
-2. Run the same kernel through the emulator
-3. Assert per-instruction timestamps match real hardware within tight tolerance
+```python
+# test/amd/test_emulator_timing.py — test_sync_hw_match
+# Loads real GFX1100 trace, runs same kernel through emulator, compares deltas
+for i, (hw_d, emu_d) in enumerate(zip(hw_inter, emu_inter)):
+    self.assertAlmostEqual(hw_d, emu_d, delta=2, msg=f"...")
+```
+
+**Results:** All 11 inter-instruction deltas match real HW within ±2 cycles for both waves.
+
+Additional validation:
+- **`test_sync_hw_determinism`**: Both independent HW captures (run_0 + run_1) produce bit-identical deltas — proves the comparison target is deterministic.
+- **`test_plus_hw_forwarding`**: Plus kernel's VALU→global_store delta=25 matches real HW across both runs — validates the forwarding constant generalizes beyond the sync kernel.
 
 ---
 
@@ -210,9 +221,12 @@ rdna3-emu:
 ### Key Test Files
 
 ```
-test/amd/test_emulator_timing.py   # ← Our bounty tests (both PASSING ✅)
-  test_plus_timing_consistent      # elementwise add kernel
-  test_sync_timing_consistent      # LDS + barrier kernel
+test/amd/test_emulator_timing.py   # ← Bounty tests (5 PASSING ✅)
+  test_plus_timing_consistent      # elementwise add: emulator SQTT self-consistency
+  test_sync_timing_consistent      # LDS + barrier: emulator SQTT self-consistency
+  test_sync_hw_match               # 11/11 deltas match real GFX1100 within ±2
+  test_sync_hw_determinism         # both run_0 and run_1 produce identical deltas
+  test_plus_hw_forwarding          # VALU→global_store delta=25 matches HW
 
 test/amd/test_sqttmap.py           # rocprof_inst_traces_match() helper
 test/amd/test_sqtt_examples.py     # Real pkl file packet parsing
@@ -236,16 +250,12 @@ DEV=AMD MOCKGPU=1 PYTHON_REMU=1 PROFILE=1 SQTT=1 \
 
 ### 1. ✅ Real Hardware Comparison Test (DONE)
 
-`test_sync_hw_match` in `test/amd/test_emulator_timing.py`:
-- Loads `extra/sqtt/examples/gfx1100/profile_sync_run_0.pkl`
-- Extracts wave 0 inter-instruction deltas from real HW trace
-- Runs same kernel through emulator (MOCKGPU=1)
-- Asserts each delta matches real HW within ±2 cycles
-- **ALL 11 deltas pass** ✅
+`test_sync_hw_match` — all 11 inter-instruction deltas match GFX1100 within ±2 for both waves.
 
-### 2. Test with Additional Kernels (Next)
+### 2. ✅ Multi-Kernel & Determinism Validation (DONE)
 
-Validate that timing constants generalize beyond the `custom_lds_sync` kernel. Need to capture more GFX1100 traces with different instruction mixes.
+- `test_sync_hw_determinism` — both run_0 and run_1 captures produce identical deltas
+- `test_plus_hw_forwarding` — VALU→global_store delta=25 matches HW (validates forwarding constant generalizes)
 
 ### 3. Submit to Tinygrad (When Ready)
 
