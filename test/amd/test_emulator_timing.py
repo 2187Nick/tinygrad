@@ -30,13 +30,23 @@ def _load_pkl_safe(path):
       stub = types.ModuleType('tinygrad.runtime.ops_amd')
       @dataclasses.dataclass
       class ProfileSQTTEvent(ProfileEvent):
-        device: str = ''; kern: int = 0; se: int = 0; blob: bytes = b''; itrace: bool = False; exec_tag: int = 0
+        device: str = ''
+        kern: int = 0
+        se: int = 0
+        blob: bytes = b''
+        itrace: bool = False
+        exec_tag: int = 0
       @dataclasses.dataclass
       class ProfilePMCEvent(ProfileEvent):
-        device: str = ''; kern: int = 0; sched: list = dataclasses.field(default_factory=list); blob: bytes = b''; exec_tag: int = 0
+        device: str = ''
+        kern: int = 0
+        sched: list = dataclasses.field(default_factory=list)
+        blob: bytes = b''
+        exec_tag: int = 0
       @dataclasses.dataclass
       class PMCSample:
-        ts: int = 0; values: dict = dataclasses.field(default_factory=dict)
+        ts: int = 0
+        values: dict = dataclasses.field(default_factory=dict)
       stub.ProfileSQTTEvent = ProfileSQTTEvent
       stub.ProfilePMCEvent = ProfilePMCEvent
       stub.PMCSample = PMCSample
@@ -184,15 +194,17 @@ class TestEmulatorTiming(unittest.TestCase):
 
       print(f"\nHW vs EMU comparison for wave {wave_idx} (inter-instruction deltas):")
       max_diff = 0
+      failures = []
       for i, (pc, hw_d, emu_d) in enumerate(zip(HW_PCS, expected, emu_inter)):
         diff = abs(hw_d - emu_d)
         max_diff = max(max_diff, diff)
         ok = "✓" if diff <= 2 else "✗"
         print(f"  PC=0x{pc:03x}  HW_delta={hw_d:4d}  EMU_delta={emu_d:4d}  diff={diff:3d}  {ok}")
-        self.assertLessEqual(diff, 2,
-          f"wave {wave_idx} PC=0x{pc:03x}: inter-inst delta mismatch HW={hw_d} EMU={emu_d} diff={diff} (tolerance=±2)")
+        if diff > 2:
+          failures.append(f"wave {wave_idx} PC=0x{pc:03x}: HW={hw_d} EMU={emu_d} diff={diff}")
 
       print(f"  max delta diff = {max_diff} cycles (tolerance = ±2)")
+      self.assertEqual(failures, [], f"Timing mismatches (tolerance=±2):\n" + "\n".join(failures))
 
       # record barrier times for cross-wave check (s_barrier at PC 0x11c)
       for pc, t, typ in emu_window:
