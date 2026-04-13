@@ -312,8 +312,8 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
     elif cat == 'vmem_rd': vm_pend[i].append(issue_cycle + _VMEM_LATENCY)
     elif cat == 'vmem_wr': vm_pend[i].append(issue_cycle + _VMEM_LATENCY)
 
-    # Track last VALU issue cycle for DS/VMEM forwarding stall
-    if cat == 'valu':
+    # Track last VALU issue cycle for DS/VMEM forwarding stall (skip VOPC — writes VCC not VGPR)
+    if cat == 'valu' and not extra:
       valu_forward_deadline[i] = issue_cycle + _VALU_DS_FORWARD
 
     # Update wave state
@@ -349,6 +349,7 @@ def _init_sqtt_encoder(entry_pc: int):
   _VALU = (ir3.VOP1, ir3.VOP2, ir3.VOP3, ir3.VOP3P, ir3.VOPC, ir3.VOPD, ir3.VOP3SD, ir3.VOP3_SDST, ir3.VOP1_SDST,
            ir4.VOP1, ir4.VOP2, ir4.VOP3, ir4.VOP3P, ir4.VOPC, ir4.VOPD, ir4.VOP3SD, ir4.VOP3_SDST, ir4.VOP1_SDST,
            irc.VOP1, irc.VOP2, irc.VOP3, irc.VOP3P, irc.VOPC, irc.VOP3SD, irc.VOP3_SDST)
+  _VOPC = (ir3.VOPC, ir4.VOPC, irc.VOPC)  # comparison ops write VCC, not VGPR — no DS forwarding stall
   _DS = (ir3.DS, ir4.DS, irc.DS)
   _GLOBAL = (ir3.GLOBAL, ir4.VGLOBAL, irc.GLOBAL)
   _FLAT = (ir3.FLAT, ir4.VFLAT, irc.FLAT)
@@ -446,9 +447,10 @@ def _init_sqtt_encoder(entry_pc: int):
       return
 
     if issubclass(inst_type, _VALU):
+      is_vopc = issubclass(inst_type, _VOPC)
       op = _valu_op(op_name)
-      if op is None: events.append((VALUINST, {'wave': w}, 'valu', None))
-      else: events.append((INST, {'wave': w, 'op': op}, 'valu', None))
+      if op is None: events.append((VALUINST, {'wave': w}, 'valu', is_vopc))
+      else: events.append((INST, {'wave': w, 'op': op}, 'valu', is_vopc))
       return
 
     if issubclass(inst_type, _SMEM):
