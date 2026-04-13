@@ -4,7 +4,7 @@
 > — geohot, April 10 2026
 
 **Fork:** https://github.com/2187Nick/tinygrad  
-**CI Status:** ✅ Both timing tests PASSING (as of 2026-04-11)
+**CI Status:** ✅ All timing tests PASSING — 11/11 deltas within ±2 of real HW (as of 2026-04-11)
 
 ---
 
@@ -50,19 +50,43 @@ Global memory (DRAM/VRAM) has unpredictable latency (100–400+ cycles, cache-de
 | WAVESTART tokens | ✅ | 1-cycle gap between waves confirmed |
 | Round-robin wave scheduler | ✅ | Multi-wave kernels scheduled correctly |
 | LDS latency | ✅ | `_LDS_LATENCY = 32` cycles (matches GFX1100) |
-| Barrier overhead | ✅ | `_BARRIER_FROM_LAST = 18` cycles from last arrival (GFX1100) |
+| Barrier overhead | ✅ | `_BARRIER_FROM_LAST = 10` cycles from last arrival (GFX1100, 4-wave corrected) |
 | VALU→DS/VMEM forwarding stall | ✅ | `_VALU_DS_WR_FORWARD = 26` / `_VALU_DS_RD_FORWARD = 22` cycles (GFX1100) |
 | WAVEALLOC/DATA_LOST handling | ✅ | Blob structure bugs fixed |
 | test_plus_timing_consistent | ✅ PASSING | Plus kernel self-consistency |
 | test_sync_timing_consistent | ✅ PASSING | LDS+barrier kernel self-consistency |
 
-### 🔄 IN PROGRESS / REMAINING
+| LDS contention model | ✅ | `_LDS_SERVICE_COST = 5` cycles per DS write (shared CU resource) |
+| VOPC forwarding skip | ✅ | v_cmp (VOPC) doesn't reset VALU→DS forwarding deadline |
+| Real hardware comparison | ✅ | `test_sync_hw_match` — all 11 deltas match GFX1100 within ±2 |
+| test_plus_timing_consistent | ✅ PASSING | Plus kernel self-consistency |
+| test_sync_timing_consistent | ✅ PASSING | LDS+barrier kernel self-consistency |
+| test_sync_hw_match | ✅ PASSING | All 11 inter-instruction deltas match real GFX1100 within ±2 |
+
+### HW Comparison Results (GFX1100, `profile_sync_run_0.pkl`, wave 0)
+
+```
+Instruction       HW  EMU  Status
+v_lshlrev          0    0  ✓ exact
+ds_store          26   26  ✓ exact
+s_waitcnt         33   32  ✓ diff=1
+s_barrier          1    1  ✓ exact
+v_add             25   25  ✓ EXACT (was 33, fixed with 4-wave barrier model)
+v_cmp              1    1  ✓ exact
+ds_load           21   21  ✓ EXACT (VOPC skip + split forwarding)
+s_waitcnt         32   32  ✓ exact
+v_mov              1    1  ✓ exact
+v_cndmask          1    1  ✓ exact
+v_lshlrev          1    2  ✓ diff=1
+```
+
+### 🔄 REMAINING FOR BOUNTY
 
 | Work Item | Priority | Notes |
 |-----------|----------|-------|
-| Real hardware comparison test | HIGH | Compare emulator timestamps directly to pkl data |
-| VALU→DS accuracy for 2-VALU-before-DS pattern | MEDIUM | ~5 cycle error when 2 VALUs precede a DS |
+| Test with more kernels | MEDIUM | Validate constants generalize beyond `custom_lds_sync` |
 | SMEM latency model | LOW | Non-DRAM kernels rarely use SMEM; 200-cycle placeholder OK |
+| Submit PR to upstream | FINAL | User review first, then open PR to `tinygrad/tinygrad` |
 
 ---
 
@@ -97,7 +121,7 @@ All constants are in `test/mockgpu/amd/emu.py`, calibrated against real GFX1100 
 _LDS_LATENCY       = 32   # LDS read/write: data ready 32 cycles after issue
 _SMEM_LATENCY      = 200  # Scalar memory: variable (non-deterministic, not bounty target)
 _VMEM_LATENCY      = 300  # Vector memory: variable (non-deterministic, not bounty target)
-_BARRIER_FROM_LAST = 18   # Cycles from last wave's barrier issue to release (with 2-cycle RR stagger)
+_BARRIER_FROM_LAST = 10   # Cycles from last wave's barrier issue to release (GFX1100, 4-wave corrected)
 _LDS_SERVICE_COST  = 5    # Cycles the LDS unit is busy servicing one DS write (contention window)
 _VALU_DS_WR_FORWARD = 26  # Min cycles from VALU to DS_WR/VMEM_WR issue (address + data forwarding)
 _VALU_DS_RD_FORWARD = 22  # Min cycles from VALU to DS_RD/VMEM_RD issue (address-only, shorter pipeline)
@@ -114,7 +138,7 @@ _FIRST_INST_GAP    = 2    # Cycles from WAVESTART to first instruction
 +922   ds_store_b32      ← 26-cycle gap after VALU = _VALU_DS_WR_FORWARD ✓
 +955   s_waitcnt         ← LDS stall (33 cycles ≈ _LDS_LATENCY=32 ✓)
 +956   s_barrier
-+981   v_add_nc_u32      ← 25-cycle barrier overhead (18 from last arrival + 7 inter-wave gap) ✓
++981   v_add_nc_u32      ← 25-cycle barrier overhead (10 from last arrival + 15 inter-wave gap across 4 waves) ✓
 +982   v_cmp_gt_u32
 +1003  ds_load_b32       ← 22 cycles from v_add (dep VALU) = _VALU_DS_RD_FORWARD ✓, 21 from v_cmp (VOPC, skipped)
 +1035  s_waitcnt         ← LDS stall (32 cycles = _LDS_LATENCY ✓)
@@ -210,27 +234,22 @@ DEV=AMD MOCKGPU=1 PYTHON_REMU=1 PROFILE=1 SQTT=1 \
 
 ## Next Steps Toward Bounty Completion
 
-### 1. Real Hardware Comparison Test (High Priority)
+### 1. ✅ Real Hardware Comparison Test (DONE)
 
-Add `test_hw_timing_match` to `test/amd/test_emulator_timing.py`:
-- Load `extra/sqtt/examples/gfx1100/profile_sync_run_0.pkl`
-- Extract wave 0 relative timestamps (first instruction = 0)
-- Run same kernel through emulator (MOCKGPU=1)
-- Assert each emulated timestamp matches real HW within ±2 cycles
+`test_sync_hw_match` in `test/amd/test_emulator_timing.py`:
+- Loads `extra/sqtt/examples/gfx1100/profile_sync_run_0.pkl`
+- Extracts wave 0 inter-instruction deltas from real HW trace
+- Runs same kernel through emulator (MOCKGPU=1)
+- Asserts each delta matches real HW within ±2 cycles
+- **ALL 11 deltas pass** ✅
 
-This is the definitive bounty validation — it proves the emulator matches hardware, not just itself.
+### 2. Test with Additional Kernels (Next)
 
-### 2. Refine VALU→DS for Sequential VALU Patterns
-
-Current model uses `last_valu + 26`. The real hardware uses the specific DEP VALU + a skip-count reduction:
-- 0 instructions between dep VALU and DS: 26 cycles (✓ matches)
-- 1 instruction between (v_cmp which doesn't write the dep register): 22 cycles (model gives ~26, ~4 off)
-
-The fix requires tracking the "anchor VALU" (first VALU after last DS/VMEM), not the "last VALU", plus counting VALUs issued since the anchor.
+Validate that timing constants generalize beyond the `custom_lds_sync` kernel. Need to capture more GFX1100 traces with different instruction mixes.
 
 ### 3. Submit to Tinygrad (When Ready)
 
-Once the real hardware comparison test passes:
+Once additional validation passes:
 1. Review final diff with user
 2. Open PR to `tinygrad/tinygrad` (NOT done yet — only pushing to fork)
 3. Claim bounty 🏆
