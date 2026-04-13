@@ -6,7 +6,7 @@
 #   arg=3: lds - local data share
 #   arg=4: scratch - per-lane scratch memory
 from __future__ import annotations
-import ctypes, functools, re, platform, subprocess, tempfile
+import ctypes, functools, os, re, platform, subprocess, tempfile
 from typing import Callable
 
 # Set/restore DAZ+FTZ (denormals-are-zero + flush-to-zero) to match RDNA3 default float mode
@@ -277,6 +277,8 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
       if non_done_non_barrier: break  # deadlock prevention
       # Release barrier: resume after fixed latency from last wave's barrier issue
       release_cycle = max(barrier_issue[i] for i in barrier_waves) + _BARRIER_FROM_LAST
+      if os.environ.get("SQTT_DEBUG"):
+        print(f"  BARRIER RELEASE: barrier_issues={[barrier_issue[i] for i in barrier_waves]} max={max(barrier_issue[i] for i in barrier_waves)} release={release_cycle}")
       for idx, i in enumerate(sorted(barrier_waves)):
         at_barrier[i] = False
         ready[i] = release_cycle + idx * 2  # 2-cycle RR stagger observed on GFX1100
@@ -307,6 +309,10 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
 
     timed.append((issue_cycle, wid, pkt_cls, kwargs))
     issue_cost = _get_issue_cost(pkt_cls, kwargs)
+
+    # DEBUG: print detailed wave scheduling for the first 2 waves
+    if n <= 2 and os.environ.get("SQTT_DEBUG"):
+      print(f"  w{i} pc={pc[i]:2d} cat={cat:8s} issue={issue_cycle:5d} cost={issue_cost} ready_was={ready[i]:5d} clock={clock:5d} extra={extra}")
 
     # Track memory operation completion times
     if cat == 'smem': lgkm_pend[i].append(issue_cycle + _SMEM_LATENCY)
