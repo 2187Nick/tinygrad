@@ -204,7 +204,7 @@ class TestEmulatorTiming(unittest.TestCase):
           failures.append(f"wave {wave_idx} PC=0x{pc:03x}: HW={hw_d} EMU={emu_d} diff={diff}")
 
       print(f"  max delta diff = {max_diff} cycles (tolerance = ±2)")
-      self.assertEqual(failures, [], f"Timing mismatches (tolerance=±2):\n" + "\n".join(failures))
+      self.assertEqual(failures, [], "Timing mismatches (tolerance=±2):\n" + "\n".join(failures))
 
       # record barrier times for cross-wave check (s_barrier at PC 0x11c)
       for pc, t, typ in emu_window:
