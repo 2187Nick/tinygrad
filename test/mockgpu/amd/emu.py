@@ -119,7 +119,8 @@ def _nibbles_to_bytes(nibbles: list[int]) -> bytes:
 # ═══════════════════════════════════════════════════════════════════════════════
 
 # Latency constants (in SQ clock cycles) — tuned against GFX1100 SQTT traces
-_LDS_LATENCY = 32        # LDS read/write completion latency
+_LDS_RD_LATENCY = 31     # LDS read completion latency (data-ready on read bus)
+_LDS_WR_LATENCY = 33     # LDS write completion latency (includes write-commit acknowledgement)
 _SMEM_LATENCY = 200      # Scalar memory read latency (DRAM, approximate — variable on real HW)
 _VMEM_LATENCY = 300      # Vector memory read/write latency (DRAM, approximate — variable on real HW)
 _BARRIER_FROM_LAST = 10  # Cycles from last wave's barrier issue to first post-barrier instruction (derived from GFX1100 SQTT traces)
@@ -277,9 +278,9 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
       if non_done_non_barrier: break  # deadlock prevention
       # Release barrier: resume after fixed latency from last wave's barrier issue
       release_cycle = max(barrier_issue[i] for i in barrier_waves) + _BARRIER_FROM_LAST
-      for idx, i in enumerate(sorted(barrier_waves)):
+      for i in barrier_waves:
         at_barrier[i] = False
-        ready[i] = release_cycle + idx * 2  # 2-cycle RR stagger observed on GFX1100
+        ready[i] = release_cycle  # all waves ready at same cycle; round-robin naturally staggers issue
       continue
 
     i = best
@@ -314,10 +315,10 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
       # LDS contention: DS writes are serialized through the shared LDS unit; reads are not contention-limited
       if cat == 'ds_wr':
         lds_start = max(issue_cycle, cu_lds_available)
-        lgkm_pend[i].append(lds_start + _LDS_LATENCY)
+        lgkm_pend[i].append(lds_start + _LDS_WR_LATENCY)
         cu_lds_available = lds_start + _LDS_SERVICE_COST
       else:
-        lgkm_pend[i].append(issue_cycle + _LDS_LATENCY)
+        lgkm_pend[i].append(issue_cycle + _LDS_RD_LATENCY)
     elif cat == 'vmem_rd': vm_pend[i].append(issue_cycle + _VMEM_LATENCY)
     elif cat == 'vmem_wr': vm_pend[i].append(issue_cycle + _VMEM_LATENCY)
 
