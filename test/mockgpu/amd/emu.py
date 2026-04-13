@@ -122,7 +122,8 @@ def _nibbles_to_bytes(nibbles: list[int]) -> bytes:
 _LDS_LATENCY = 32        # LDS read/write completion latency
 _SMEM_LATENCY = 200      # Scalar memory read latency (DRAM, approximate — variable on real HW)
 _VMEM_LATENCY = 300      # Vector memory read/write latency (DRAM, approximate — variable on real HW)
-_BARRIER_RESUME = 25     # Cycles from last wave arriving at barrier to first instruction after barrier (confirmed GFX1100)
+_BARRIER_FROM_LAST = 18  # Cycles from last wave's barrier issue to first post-barrier instruction (derived from GFX1100 SQTT traces)
+_LDS_SERVICE_COST = 5    # Cycles the LDS unit is busy servicing one DS op (contention window for subsequent waves)
 _VALU_DS_FORWARD = 26   # Cycles from last VALU issue before DS/VMEM can issue (RDNA3 forwarding path latency)
 _WAVESTART_GAP = 1       # Cycles between consecutive WAVESTART allocations (confirmed from GFX1100 SQTT traces)
 _FIRST_INST_GAP = 2      # Cycles from WAVESTART to first instruction issue
@@ -169,12 +170,15 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
   lgkm_pend: list[list[int]] = [[] for _ in range(n)]  # pending lgkm op completion cycles
   vm_pend: list[list[int]] = [[] for _ in range(n)]    # pending vm op completion cycles
   at_barrier = [False] * n
+  barrier_issue = [0] * n                             # cycle at which each wave issued s_barrier
   wave_done = [False] * n
   # S_DELAY_ALU: [packet_count, dep0_target, dep0_stall, dep1_target, dep1_stall]
   dly: list[list[int]] = [[0, -1, 0, -1, 0] for _ in range(n)]
   # VALU→DS/VMEM forwarding stall: track earliest cycle at which this wave's next DS/VMEM can issue.
   # Integrated into wave selection so only the stalled wave defers; other waves fill the gap normally.
   valu_forward_deadline = [0] * n
+  # Shared LDS unit availability (models contention when multiple waves access LDS concurrently)
+  cu_lds_available = 0
 
   timed: list[tuple[int, int, type, dict]] = []
 
@@ -267,11 +271,11 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
       # Check that all non-done waves are at barrier (no straggling active waves)
       non_done_non_barrier = any(not wave_done[i] and not at_barrier[i] and pc[i] < len(wave_events[wave_ids[i]]) for i in range(n))
       if non_done_non_barrier: break  # deadlock prevention
-      # Release barrier: all non-done waves resume after latency from last arrival
-      release_cycle = max(ready[i] for i in barrier_waves) + _BARRIER_RESUME
-      for i in barrier_waves:
+      # Release barrier: resume after fixed latency from last wave's barrier issue
+      release_cycle = max(barrier_issue[i] for i in barrier_waves) + _BARRIER_FROM_LAST
+      for idx, i in enumerate(sorted(barrier_waves)):
         at_barrier[i] = False
-        ready[i] = release_cycle
+        ready[i] = release_cycle + idx * 2  # 2-cycle RR stagger observed on GFX1100
       continue
 
     i = best
@@ -300,7 +304,11 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
 
     # Track memory operation completion times
     if cat == 'smem': lgkm_pend[i].append(issue_cycle + _SMEM_LATENCY)
-    elif cat in ('ds_rd', 'ds_wr'): lgkm_pend[i].append(issue_cycle + _LDS_LATENCY)
+    elif cat in ('ds_rd', 'ds_wr'):
+      # LDS contention: DS ops are serialized through the shared LDS unit
+      lds_start = max(issue_cycle, cu_lds_available)
+      lgkm_pend[i].append(lds_start + _LDS_LATENCY)
+      cu_lds_available = lds_start + _LDS_SERVICE_COST
     elif cat == 'vmem_rd': vm_pend[i].append(issue_cycle + _VMEM_LATENCY)
     elif cat == 'vmem_wr': vm_pend[i].append(issue_cycle + _VMEM_LATENCY)
 
@@ -311,6 +319,7 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
     # Update wave state
     if cat == 'barrier':
       at_barrier[i] = True
+      barrier_issue[i] = issue_cycle
       ready[i] = issue_cycle + issue_cost
     elif cat == 'waveend':
       wave_done[i] = True
