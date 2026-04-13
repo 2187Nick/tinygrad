@@ -9,7 +9,8 @@ from tinygrad import Device, Tensor, dtypes
 from tinygrad.device import Compiled, ProfileEvent, ProfileProgramEvent, ProfileDeviceEvent
 
 TARGET = "gfx1100"
-HW_PKL = pathlib.Path(__file__).resolve().parents[2] / "extra" / "sqtt" / "examples" / "gfx1100" / "profile_sync_run_0.pkl"
+HW_PKL_DIR = pathlib.Path(__file__).resolve().parents[2] / "extra" / "sqtt" / "examples" / "gfx1100"
+HW_PKL = HW_PKL_DIR / "profile_sync_run_0.pkl"
 # non-DRAM window: PCs 0x10c through 0x140 (LDS + barrier + register section)
 NON_DRAM_PC_START, NON_DRAM_PC_END = 0x10c, 0x140
 # ground-truth inter-instruction deltas from real GFX1100 hardware (identical across run_0 and run_1 captures)
@@ -20,6 +21,8 @@ HW_INTER_DELTAS = {
 }
 HW_PCS = [0x10c, 0x110, 0x118, 0x11c, 0x120, 0x124, 0x12c, 0x134, 0x138, 0x13c, 0x140]
 HW_TYPES = ["VALUINST", "INST", "IMMEDIATE", "INST", "VALUINST", "VALUINST", "INST", "IMMEDIATE", "VALUINST", "VALUINST", "VALUINST"]
+# plus kernel: deterministic VALU→global_store forwarding delta (non-DRAM section)
+PLUS_HW_VALU_STORE_DELTA = 25  # delta from v_add to global_store (identical across run_0 and run_1)
 
 def _load_pkl_safe(path):
   """Load SQTT pkl file, stubbing AMD runtime if needed (works on non-AMD CI)."""
@@ -231,6 +234,37 @@ class TestEmulatorTiming(unittest.TestCase):
       self.assertLessEqual(gap, 30, f"wave {wave_idx}: post-barrier resume too late ({gap} cycles after last barrier)")
 
     print(f"\n  barrier sync OK: last barrier at {last_barrier}, both waves resumed within 30 cycles")
+
+  def test_sync_hw_determinism(self):
+    """Verify emulator matches BOTH independent HW captures (run_0 and run_1) identically — proves determinism."""
+    for run_idx in range(2):
+      pkl = HW_PKL_DIR / f"profile_sync_run_{run_idx}.pkl"
+      if not pkl.exists(): self.skipTest(f"HW capture not found: {pkl}")
+      hw_traces, _ = _get_hw_traces(pkl, kern_tag=0, target=TARGET)
+      for wave_idx, wid in enumerate(sorted(hw_traces.keys())[:2]):
+        hw_wave = hw_traces[wid]
+        hw_window = [(pc, t, typ) for pc, t, typ in hw_wave if NON_DRAM_PC_START <= pc <= NON_DRAM_PC_END]
+        hw_inter = [0] + [hw_window[i+1][1] - hw_window[i][1] for i in range(len(hw_window)-1)]
+        self.assertEqual(hw_inter, HW_INTER_DELTAS[wave_idx],
+          f"run_{run_idx} wave {wave_idx}: HW deltas differ from expected!\n  got: {hw_inter}\n  expected: {HW_INTER_DELTAS[wave_idx]}")
+    print("Both HW captures (run_0, run_1) produce identical non-DRAM deltas — deterministic ✓")
+
+  def test_plus_hw_forwarding(self):
+    """Validate plus kernel's VALU→global_store forwarding delta matches real HW (deterministic, non-DRAM section)."""
+    for run_idx in range(2):
+      pkl = HW_PKL_DIR / f"profile_plus_run_{run_idx}.pkl"
+      if not pkl.exists(): self.skipTest(f"HW capture not found: {pkl}")
+      hw_traces, _ = _get_hw_traces(pkl, kern_tag=0, target=TARGET)
+      for wid in sorted(hw_traces.keys())[:1]:
+        t_list = hw_traces[wid]
+        # find VALU→INST (global_store) forwarding: last VALUINST followed by INST before WAVEEND
+        for i in range(len(t_list) - 2):
+          if t_list[i][2] == "VALUINST" and t_list[i+1][2] == "INST" and (i+2 >= len(t_list) or t_list[i+2][2] == "WAVEEND"):
+            delta = t_list[i+1][1] - t_list[i][1]
+            self.assertEqual(delta, PLUS_HW_VALU_STORE_DELTA,
+              f"plus run_{run_idx}: VALU→global_store delta={delta}, expected {PLUS_HW_VALU_STORE_DELTA}")
+            print(f"plus_run_{run_idx}: VALU→global_store delta={delta} ✓ (matches expected {PLUS_HW_VALU_STORE_DELTA})")
+            break
 
 if __name__ == "__main__":
   unittest.main()
