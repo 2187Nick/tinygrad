@@ -18,6 +18,8 @@ HW_PCS = [0x10c, 0x110, 0x118, 0x11c, 0x120, 0x124, 0x12c, 0x134, 0x138, 0x13c, 
 HW_TYPES = ["VALUINST", "INST", "IMMEDIATE", "INST", "VALUINST", "VALUINST", "INST", "IMMEDIATE", "VALUINST", "VALUINST", "VALUINST"]
 # plus kernel: deterministic VALU→global_store forwarding delta (non-DRAM section)
 PLUS_HW_VALU_STORE_DELTA = 25  # delta from v_add to global_store (identical across run_0 and run_1)
+# gemm kernel: deterministic startup section (indices 0-8, SALU/VALU before first DRAM wait)
+GEMM_STARTUP_DELTAS = [0, 1, 9, 1, 1, 4, 1, 4, 2]
 # gemm kernel: deterministic tail section (indices 25-57, non-DRAM register/LDS ops after DRAM loads complete)
 GEMM_TAIL_START_IDX = 25
 GEMM_TAIL_DELTAS = [41, 1, 16, 3, 1, 1, 2, 2, 2, 1, 28, 1, 5, 5, 5, 18, 3, 4, 5, 5, 5, 18, 3, 4, 5, 5, 5, 23, 2, 5, 5, 5, 18]
@@ -269,6 +271,19 @@ class TestEmulatorTiming(unittest.TestCase):
       self.assertEqual(tail_deltas, GEMM_TAIL_DELTAS,
         f"gemm run_{run_idx}: tail deltas differ!\n  got: {tail_deltas}\n  expected: {GEMM_TAIL_DELTAS}")
       print(f"gemm_run_{run_idx}: tail ({len(tail_deltas)} deltas) ✓ deterministic")
+
+  def test_gemm_hw_startup(self):
+    """Validate gemm kernel's startup sequence (SALU/VALU before first DRAM wait) is deterministic across both HW captures."""
+    for run_idx in range(2):
+      pkl = HW_PKL_DIR / f"profile_gemm_run_{run_idx}.pkl"
+      if not pkl.exists(): self.skipTest(f"HW capture not found: {pkl}")
+      hw_traces, _ = _get_hw_traces(pkl, kern_tag=0, target=TARGET)
+      wid = sorted(hw_traces.keys())[0]
+      tl = hw_traces[wid]
+      startup_deltas = [0] + [tl[i][1] - tl[i-1][1] for i in range(1, len(GEMM_STARTUP_DELTAS))]
+      self.assertEqual(startup_deltas, GEMM_STARTUP_DELTAS,
+        f"gemm run_{run_idx}: startup deltas differ!\n  got: {startup_deltas}\n  expected: {GEMM_STARTUP_DELTAS}")
+      print(f"gemm_run_{run_idx}: startup ({len(startup_deltas)} deltas) ✓ deterministic")
 
 if __name__ == "__main__":
   unittest.main()
