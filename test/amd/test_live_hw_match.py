@@ -22,18 +22,17 @@ import os, sys, subprocess, pickle, textwrap, functools, unittest
 # ---------------------------------------------------------------------------
 # Environment checks
 # ---------------------------------------------------------------------------
-def _check_env():
-  if os.environ.get("MOCKGPU", "0") != "0":
-    print("ERROR: test_live_hw_match.py must run on REAL hardware (MOCKGPU must be unset or 0)")
-    sys.exit(1)
-  if os.environ.get("PROFILE", "0") == "0" or os.environ.get("SQTT", "0") == "0":
-    print("ERROR: profiling not enabled. Run with: PROFILE=1 SQTT=1 python test/amd/test_live_hw_match.py")
-    sys.exit(1)
+_SKIP_REASON = None
+if os.environ.get("MOCKGPU", "0") != "0":
+  _SKIP_REASON = "test_live_hw_match.py requires REAL hardware (MOCKGPU must be unset or 0)"
+elif os.environ.get("PROFILE", "0") == "0" or os.environ.get("SQTT", "0") == "0":
+  _SKIP_REASON = "profiling not enabled — run with: PROFILE=1 SQTT=1 python test/amd/test_live_hw_match.py"
 
-_check_env()
+if _SKIP_REASON is None:
 
-from tinygrad import Device, Tensor, dtypes
-from tinygrad.device import Compiled, ProfileProgramEvent, ProfileDeviceEvent
+if _SKIP_REASON is None:
+  from tinygrad import Device, Tensor, dtypes
+  from tinygrad.device import Compiled, ProfileProgramEvent, ProfileDeviceEvent
 
 TARGET = "gfx1100"
 # non-DRAM window PCs for custom_lds_sync (LDS + barrier + register section)
@@ -202,6 +201,7 @@ def _print_comparison(label, hw_data, emu_data, tolerance=TOLERANCE):
 # ---------------------------------------------------------------------------
 # Test cases
 # ---------------------------------------------------------------------------
+@unittest.skipIf(_SKIP_REASON is not None, _SKIP_REASON or "")
 class TestLiveHWMatch(unittest.TestCase):
   """Live HW vs emulator SQTT validation — requires real AMD 7900 XTX."""
 
