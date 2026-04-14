@@ -1,13 +1,17 @@
 #!/usr/bin/env python3
 """Validate emulator SQTT timing against real hardware captures.
-Run on the same machine after hw_capture.py:
-  DEV=AMD MOCKGPU=1 PYTHON_REMU=1 PROFILE=1 SQTT=1 python extra/sqtt/hw_validate.py extra/sqtt/captures/<timestamp>
+Run from repo root after hw_capture.py:
+  DEV=AMD MOCKGPU=1 PYTHON_REMU=1 PROFILE=1 SQTT=1 PYTHONPATH=. python3 extra/sqtt/hw_validate.py extra/sqtt/captures/<timestamp>
 
-Or just analyze existing captures without emulator (works anywhere):
-  python extra/sqtt/hw_validate.py extra/sqtt/captures/<timestamp> --analyze-only
+Or just analyze captures without emulator (works anywhere):
+  PYTHONPATH=. python3 extra/sqtt/hw_validate.py extra/sqtt/captures/<timestamp> --analyze-only
 """
 import sys, json, pickle, pathlib, argparse
 from collections import defaultdict
+
+# ensure repo root is on path when run directly
+_repo_root = pathlib.Path(__file__).resolve().parents[2]
+if str(_repo_root) not in sys.path: sys.path.insert(0, str(_repo_root))
 
 TARGET = "gfx1100"
 

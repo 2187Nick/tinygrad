@@ -1,10 +1,14 @@
 #!/usr/bin/env python3
 """Capture SQTT traces from real GFX1100 hardware for all non-DRAM custom kernels.
-Run on a machine with AMD 7900 XTX:  DEV=AMD AM_RESET=1 VIZ=-2 python extra/sqtt/hw_capture.py
+Run from repo root: DEV=AMD AM_RESET=1 VIZ=-2 PYTHONPATH=. python3 extra/sqtt/hw_capture.py
 """
 import os, subprocess, sys, shlex, shutil, json
 from pathlib import Path
 from datetime import datetime
+
+# ensure repo root is on path when run directly
+_repo_root = Path(__file__).resolve().parents[2]
+if str(_repo_root) not in sys.path: sys.path.insert(0, str(_repo_root))
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 REPO_ROOT = SCRIPT_DIR.parent.parent
