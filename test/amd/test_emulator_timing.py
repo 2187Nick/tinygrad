@@ -1,9 +1,4 @@
-"""
-Self-consistency test: validates that the emulator's SQTT blob is correctly decodable by rocprof
-and that pkt._time == rocprof.time + rocprof.stall for every instruction.
-
-Run with: DEV=AMD MOCKGPU=1 PYTHON_REMU=1 PROFILE=1 SQTT=1 python -m pytest test/amd/test_emulator_timing.py
-"""
+# validates emulator SQTT timing: self-consistency via rocprof + exact match against real GFX1100 hardware captures
 import unittest, functools, sys, types, pickle, dataclasses, pathlib
 from tinygrad import Device, Tensor, dtypes
 from tinygrad.device import Compiled, ProfileEvent, ProfileProgramEvent, ProfileDeviceEvent
@@ -28,7 +23,6 @@ GEMM_TAIL_START_IDX = 25
 GEMM_TAIL_DELTAS = [41, 1, 16, 3, 1, 1, 2, 2, 2, 1, 28, 1, 5, 5, 5, 18, 3, 4, 5, 5, 5, 18, 3, 4, 5, 5, 5, 23, 2, 5, 5, 5, 18]
 
 def _load_pkl_safe(path):
-  """Load SQTT pkl file, stubbing AMD runtime if needed (works on non-AMD CI)."""
   if 'tinygrad.runtime.ops_amd' not in sys.modules:
     try:
       import tinygrad.runtime.ops_amd  # noqa: F401 # works on Linux with AMD
@@ -62,7 +56,6 @@ def _load_pkl_safe(path):
     return pickle.load(f)
 
 def _extract_wave_traces(blob, lib, target):
-  """Extract per-wave instruction traces from SQTT blob. Returns {wave_id: [(pc, time, pkt_type), ...]}"""
   from tinygrad.renderer.amd.sqtt import map_insts
   traces = {}
   for pkt, info in map_insts(blob, lib, target):
@@ -73,8 +66,6 @@ def _extract_wave_traces(blob, lib, target):
   return traces
 
 def _get_hw_traces(pkl_path, kern_tag, target):
-  """Load HW capture pkl and return (wave_traces, lib) for the given kernel tag.
-  Iterates through all itrace SQTT events for the kernel to find one with decoded waves (may differ by SE)."""
   data = _load_pkl_safe(pkl_path)
   sqtt_events = [e for e in data if type(e).__name__ == "ProfileSQTTEvent"]
   kern_events = {e.tag: e for e in data if type(e).__name__ == "ProfileProgramEvent"}
@@ -88,7 +79,6 @@ def _get_hw_traces(pkl_path, kern_tag, target):
 
 @unittest.skipUnless(Device.DEFAULT == "AMD", "only runs on AMD")
 class TestEmulatorTiming(unittest.TestCase):
-  """Validate emulator SQTT self-consistency: pkt._time == rocprof.time + stall for all instructions."""
 
   @classmethod
   def setUpClass(cls):
@@ -100,7 +90,6 @@ class TestEmulatorTiming(unittest.TestCase):
     Compiled.profile_events[:] = [e for e in Compiled.profile_events if isinstance(e, (ProfileProgramEvent, ProfileDeviceEvent))]
 
   def _capture(self):
-    """Finalize profiling and extract the first SQTT event with its program event."""
     Device[Device.DEFAULT].synchronize()
     Device[Device.DEFAULT]._at_profile_finalize()
     sqtt_events = [e for e in Compiled.profile_events if type(e).__name__ == "ProfileSQTTEvent"]
@@ -111,15 +100,14 @@ class TestEmulatorTiming(unittest.TestCase):
     return None, None
 
   def _validate_timing(self, label, run_kernel, must_match=True):
-    """Run kernel, capture emulator SQTT, validate via rocprof_inst_traces_match."""
     from test.amd.test_sqttmap import rocprof_inst_traces_match
     run_kernel()
     sqtt_ev, prg_ev = self._capture()
     self.assertIsNotNone(sqtt_ev, f"{label}: no emulator SQTT event with itrace captured")
     passed_insts, n_waves, n_units = rocprof_inst_traces_match(sqtt_ev, prg_ev, TARGET)
-    # rocprof must be able to decode the emulator's blob — 0 waves means the SQTT format is broken
-    self.assertGreater(n_waves, 0, f"{label}: rocprof returned 0 waves — emulator SQTT blob format is broken")
-    self.assertGreater(passed_insts, 0, f"{label}: 0 instructions validated — emulator SQTT blob has no instruction trace data")
+    # rocprof must decode the emulator's blob
+    self.assertGreater(n_waves, 0, f"{label}: rocprof returned 0 waves")
+    self.assertGreater(passed_insts, 0, f"{label}: 0 instructions validated")
     print(f"{label}: {passed_insts} instructions validated across {n_waves} waves on {n_units} units "
           f"(pkt._time == rocprof.time + stall for all)")
 

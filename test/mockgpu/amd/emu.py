@@ -95,9 +95,7 @@ def _emit_nibbles(nibbles: list[int], pkt_cls, **kwargs):
   for i in range(nc): nibbles.append((raw >> (i * 4)) & 0xF)
 
 def _emit_with_delta(nibbles: list[int], pkt_cls, delta: int, **kwargs):
-  """Emit packet with delta, prefixing TS_DELTA packets when delta exceeds packet capacity.
-  WAVESTART has 2-bit delta (max 3), all others have 3-bit delta (max 7).
-  TS_DELTA_SHORT adds field+8 (8-23 cycles), TS_DELTA_S5_W3 adds field (0-7 cycles)."""
+  # WAVESTART has 2-bit delta (max 3), all others have 3-bit delta (max 7)
   max_d = 3 if pkt_cls is WAVESTART else 7
   if delta > max_d:
     excess = delta - max_d
@@ -119,24 +117,21 @@ def _nibbles_to_bytes(nibbles: list[int]) -> bytes:
 # ═══════════════════════════════════════════════════════════════════════════════
 
 # Latency constants (in SQ clock cycles) — tuned against GFX1100 SQTT traces
-_LDS_RD_LATENCY = 31     # LDS read completion latency (data-ready on read bus)
-_LDS_WR_LATENCY = 33     # LDS write completion latency (includes write-commit acknowledgement)
-_SMEM_LATENCY = 200      # Scalar memory read latency (DRAM, approximate — variable on real HW)
-_VMEM_LATENCY = 300      # Vector memory read/write latency (DRAM, approximate — variable on real HW)
-_BARRIER_FROM_LAST = 6   # Cycles from last wave's barrier issue to first post-barrier instruction (derived from GFX1100 SQTT traces)
-_LDS_SERVICE_COST = 6    # Cycles the LDS unit is busy servicing one DS op (contention window for subsequent waves)
-_VALU_DS_WR_FORWARD = 26 # Cycles from last VALU to DS_WR/VMEM_WR issue (address + data forwarding)
-_VALU_DS_RD_FORWARD = 22 # Cycles from last VALU to DS_RD/VMEM_RD issue (address-only forwarding, shorter pipeline)
-_WAVESTART_GAP = 1       # Cycles between consecutive WAVESTART allocations (confirmed from GFX1100 SQTT traces)
-_FIRST_INST_GAP = 2      # Cycles from WAVESTART to first instruction issue
-# S_DELAY_ALU INSTID → stall cycles mapping (indexed 0-11):
-# 0=NO_DEP, 1-4=VALU_DEP_1..4 (latency 4: stall=4-N), 5-7=TRANS32_DEP_1..3 (latency 10: stall=10-N),
-# 8=FMA_ACCUM_CYCLE_1, 9-11=SALU_CYCLE_1..3
+_LDS_RD_LATENCY = 31
+_LDS_WR_LATENCY = 33
+_SMEM_LATENCY = 200
+_VMEM_LATENCY = 300
+_BARRIER_FROM_LAST = 6    # cycles from last wave's barrier issue to release
+_LDS_SERVICE_COST = 6     # cycles LDS unit is busy per DS op
+_VALU_DS_WR_FORWARD = 26  # VALU→DS_WR/VMEM_WR forwarding stall
+_VALU_DS_RD_FORWARD = 22  # VALU→DS_RD/VMEM_RD forwarding stall
+_WAVESTART_GAP = 1
+_FIRST_INST_GAP = 2
+# S_DELAY_ALU INSTID → stall cycles (0=NO_DEP, 1-4=VALU_DEP, 5-7=TRANS32_DEP, 8=FMA_ACCUM, 9-11=SALU_CYCLE)
 _INSTID_STALLS = (0, 3, 2, 1, 0, 9, 8, 7, 1, 1, 2, 3)
 
-# Per-instruction SQ issue cost: multi-cycle ops occupy the execution unit for N cycles,
-# preventing the same wave from issuing again until the unit is free. Other waves can still
-# issue on the next global clock tick. Suffix number in InstOp name = issue cost.
+# Per-instruction SQ issue cost: multi-cycle ops occupy the execution unit for N cycles.
+# Suffix number in InstOp name = issue cost.
 _INSTOP_ISSUE_COST: dict[InstOp, int] = {}
 for _op in InstOp:
   _parts = _op.name.rsplit('_', 1)
@@ -144,46 +139,29 @@ for _op in InstOp:
 del _op, _parts
 
 def _get_issue_cost(pkt_cls, kwargs) -> int:
-  """Get the SQ issue cost for an instruction packet (default 1 cycle)."""
   if pkt_cls is INST and 'op' in kwargs: return _INSTOP_ISSUE_COST.get(kwargs['op'], 1)
   return 1
 
 def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, type, dict]]:
-  """Simulate RDNA3 SQ round-robin scheduling to assign cycle-accurate timestamps.
-
-  Takes per-wave event lists (populated by emit/finish) and returns a flat list of
-  (timestamp, wave_id, pkt_cls, kwargs) tuples ready for delta encoding.
-
-  Scheduling model (derived from GFX1100 SQTT trace analysis):
-  - One non-zero-cost instruction issued per SQ clock cycle per SIMD
-  - IMMEDIATE-type SOPP (s_waitcnt, s_nop, s_clause): zero issue cost, processed inline
-  - S_DELAY_ALU: zero cost, updates stall hints for subsequent instructions
-  - Barrier: 1-cycle issue cost, wave stalls until all waves arrive + _BARRIER_FROM_LAST cycles
-  - VALU→DS/VMEM: _VALU_DS_WR_FORWARD/_VALU_DS_RD_FORWARD cycle stall on the dep wave only; other waves fill the gap
-  - Round-robin among ready waves; stalled waves are skipped
-  """
+  # RDNA3 SQ round-robin scheduling: one non-zero-cost instruction per cycle per SIMD
   wave_ids = sorted(wave_events.keys())
   n = len(wave_ids)
   if not n: return []
 
-  # Per-wave state (indexed by position in wave_ids list)
-  pc = [0] * n                                      # next event index per wave
-  ready = [0] * n                                    # earliest cycle wave can issue
-  lgkm_pend: list[list[int]] = [[] for _ in range(n)]  # pending lgkm op completion cycles
-  vm_pend: list[list[int]] = [[] for _ in range(n)]    # pending vm op completion cycles
+  # Per-wave state
+  pc = [0] * n
+  ready = [0] * n
+  lgkm_pend: list[list[int]] = [[] for _ in range(n)]
+  vm_pend: list[list[int]] = [[] for _ in range(n)]
   at_barrier = [False] * n
-  barrier_issue = [0] * n                             # cycle at which each wave issued s_barrier
+  barrier_issue = [0] * n
   wave_done = [False] * n
-  # S_DELAY_ALU: [packet_count, dep0_target, dep0_stall, dep1_target, dep1_stall]
-  dly: list[list[int]] = [[0, -1, 0, -1, 0] for _ in range(n)]
-  # VALU→DS/VMEM forwarding stall: separate deadlines for writes (address+data) vs reads (address-only).
-  # Integrated into wave selection so only the stalled wave defers; other waves fill the gap normally.
-  valu_wr_deadline = [0] * n   # earliest cycle DS_WR/VMEM_WR can issue
-  valu_rd_deadline = [0] * n   # earliest cycle DS_RD/VMEM_RD can issue
-  # Shared LDS unit availability (models contention when multiple waves access LDS concurrently)
-  cu_lds_available = 0
-  cu_lds_last_was_write = False   # LDS write→read mode-switch: first read after writes incurs +1 cycle
-  burst_wave = -1                 # VALU burst: wave index currently in consecutive VALU sequence (-1 = none)
+  dly: list[list[int]] = [[0, -1, 0, -1, 0] for _ in range(n)]  # S_DELAY_ALU state
+  valu_wr_deadline = [0] * n  # VALU→DS_WR/VMEM_WR forwarding
+  valu_rd_deadline = [0] * n  # VALU→DS_RD/VMEM_RD forwarding
+  cu_lds_available = 0        # shared LDS unit contention
+  cu_lds_last_was_write = False
+  burst_wave = -1             # VALU burst: wave in consecutive VALU sequence
 
   timed: list[tuple[int, int, type, dict]] = []
 
@@ -200,7 +178,6 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
       ready[i] = 1
 
   def _drain_zero_cost(i: int):
-    """Process leading zero-cost events (delay_alu, waitcnt, immediate) for wave i."""
     wid = wave_ids[i]
     events = wave_events[wid]
     while pc[i] < len(events):
@@ -253,8 +230,7 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
     for i in range(n):
       if not wave_done[i] and not at_barrier[i]: _drain_zero_cost(i)
 
-    # Find next wave to issue a non-zero-cost instruction
-    # VALU burst: consecutive VALU/VOPC from the same wave get priority if ready now (HW avoids preemption mid-burst)
+    # VALU burst: consecutive VALU from same wave get priority if ready
     best, best_cycle = -1, 1 << 62
     if burst_wave >= 0 and not wave_done[burst_wave] and not at_barrier[burst_wave] \
         and pc[burst_wave] < len(wave_events[wave_ids[burst_wave]]) and ready[burst_wave] <= clock:
@@ -264,13 +240,13 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
         best_cycle = ready[burst_wave]
     if best == -1:
       burst_wave = -1
-    # Fallback: earliest effective-ready cycle (accounting for VALU→DS/VMEM forwarding), round-robin tiebreak
+    # Fallback: earliest effective-ready cycle, round-robin tiebreak
     if best == -1:
       for offset in range(n):
         i = (rr + offset) % n
         if wave_done[i] or at_barrier[i]: continue
         if pc[i] >= len(wave_events[wave_ids[i]]): continue
-        # Account for VALU forwarding stall: DS/VMEM can't issue until forwarding deadline
+        # VALU forwarding stall
         eff_ready = ready[i]
         _, _, next_cat, _ = wave_events[wave_ids[i]][pc[i]]
         if next_cat in ('ds_wr', 'vmem_wr'):
@@ -285,10 +261,8 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
       # All waves blocked — check barrier release
       barrier_waves = [i for i in range(n) if at_barrier[i]]
       if not barrier_waves: break
-      # Check that all non-done waves are at barrier (no straggling active waves)
       non_done_non_barrier = any(not wave_done[i] and not at_barrier[i] and pc[i] < len(wave_events[wave_ids[i]]) for i in range(n))
-      if non_done_non_barrier: break  # deadlock prevention
-      # Release barrier: resume after fixed latency from last wave's barrier issue
+      if non_done_non_barrier: break
       release_cycle = max(barrier_issue[i] for i in barrier_waves) + _BARRIER_FROM_LAST
       for idx, i in enumerate(sorted(barrier_waves)):
         at_barrier[i] = False
@@ -318,7 +292,7 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
     elif cat in ('ds_rd', 'vmem_rd'):
       issue_cycle = max(issue_cycle, valu_rd_deadline[i])
 
-    # Barrier arrival penalty: when other waves are already waiting, arriving wave incurs +1 cycle (HW barrier-state check)
+    # Barrier arrival penalty: non-first waves incur +1 cycle
     if cat == 'barrier' and any(at_barrier):
       issue_cycle += 1
 
@@ -328,32 +302,29 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
     # Track memory operation completion times
     if cat == 'smem': lgkm_pend[i].append(issue_cycle + _SMEM_LATENCY)
     elif cat in ('ds_rd', 'ds_wr'):
-      # LDS contention: DS writes are serialized through the shared LDS unit; reads are not contention-limited
-      if cat == 'ds_wr':
+      if cat == 'ds_wr':  # LDS writes serialize through shared unit
         lds_start = max(issue_cycle, cu_lds_available)
         lgkm_pend[i].append(lds_start + _LDS_WR_LATENCY)
         cu_lds_available = lds_start + _LDS_SERVICE_COST
         cu_lds_last_was_write = True
       else:
-        # LDS write→read mode-switch: first read after a write sequence incurs +1 cycle pipeline penalty
-        mode_switch_penalty = 1 if cu_lds_last_was_write else 0
+        mode_switch_penalty = 1 if cu_lds_last_was_write else 0  # write→read direction switch
         lgkm_pend[i].append(issue_cycle + _LDS_RD_LATENCY + mode_switch_penalty)
         if cu_lds_last_was_write: cu_lds_last_was_write = False
     elif cat == 'vmem_rd': vm_pend[i].append(issue_cycle + _VMEM_LATENCY)
     elif cat == 'vmem_wr': vm_pend[i].append(issue_cycle + _VMEM_LATENCY)
 
-    # Track last VALU issue cycle for DS/VMEM forwarding stall (skip VOPC — writes VCC not VGPR)
+    # Track last VALU for DS/VMEM forwarding stall (skip VOPC — writes VCC not VGPR)
     if cat == 'valu' and not extra:
       valu_wr_deadline[i] = issue_cycle + _VALU_DS_WR_FORWARD
       valu_rd_deadline[i] = issue_cycle + _VALU_DS_RD_FORWARD
 
-    # Track VALU burst: consecutive VALU instructions from the same wave execute without preemption
+    # Track VALU burst
     if cat == 'valu':
       burst_wave = i
     else:
       burst_wave = -1
 
-    # Update wave state
     if cat == 'barrier':
       at_barrier[i] = True
       barrier_issue[i] = issue_cycle
@@ -372,11 +343,6 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def _init_sqtt_encoder(entry_pc: int):
-  """Initialize and return SQTT encoder with cycle-accurate timing model.
-
-  Uses deferred emission: emit() collects per-wave events, finalize() runs the SQ timing
-  simulation to assign cycle-accurate timestamps, then encodes the interleaved SQTT stream.
-  """
   from tinygrad.runtime.autogen.amd.rdna3.enum import SOPPOp as SOPPOp3, SOPKOp as SOPKOp3
   from tinygrad.runtime.autogen.amd.rdna4.enum import SOPPOp as SOPPOp4
   import re
