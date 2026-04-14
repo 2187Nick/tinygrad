@@ -123,8 +123,8 @@ _LDS_RD_LATENCY = 31     # LDS read completion latency (data-ready on read bus)
 _LDS_WR_LATENCY = 33     # LDS write completion latency (includes write-commit acknowledgement)
 _SMEM_LATENCY = 200      # Scalar memory read latency (DRAM, approximate — variable on real HW)
 _VMEM_LATENCY = 300      # Vector memory read/write latency (DRAM, approximate — variable on real HW)
-_BARRIER_FROM_LAST = 10  # Cycles from last wave's barrier issue to first post-barrier instruction (derived from GFX1100 SQTT traces)
-_LDS_SERVICE_COST = 5    # Cycles the LDS unit is busy servicing one DS op (contention window for subsequent waves)
+_BARRIER_FROM_LAST = 6   # Cycles from last wave's barrier issue to first post-barrier instruction (derived from GFX1100 SQTT traces)
+_LDS_SERVICE_COST = 6    # Cycles the LDS unit is busy servicing one DS op (contention window for subsequent waves)
 _VALU_DS_WR_FORWARD = 26 # Cycles from last VALU to DS_WR/VMEM_WR issue (address + data forwarding)
 _VALU_DS_RD_FORWARD = 22 # Cycles from last VALU to DS_RD/VMEM_RD issue (address-only forwarding, shorter pipeline)
 _WAVESTART_GAP = 1       # Cycles between consecutive WAVESTART allocations (confirmed from GFX1100 SQTT traces)
@@ -182,6 +182,8 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
   valu_rd_deadline = [0] * n   # earliest cycle DS_RD/VMEM_RD can issue
   # Shared LDS unit availability (models contention when multiple waves access LDS concurrently)
   cu_lds_available = 0
+  cu_lds_last_was_write = False   # LDS write→read mode-switch: first read after writes incurs +1 cycle
+  burst_wave = -1                 # VALU burst: wave index currently in consecutive VALU sequence (-1 = none)
 
   timed: list[tuple[int, int, type, dict]] = []
 
@@ -252,22 +254,32 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
       if not wave_done[i] and not at_barrier[i]: _drain_zero_cost(i)
 
     # Find next wave to issue a non-zero-cost instruction
-    # Priority: earliest effective-ready cycle (accounting for VALU→DS/VMEM forwarding), round-robin tiebreak
+    # VALU burst: consecutive VALU/VOPC from the same wave get priority if ready now (HW avoids preemption mid-burst)
     best, best_cycle = -1, 1 << 62
-    for offset in range(n):
-      i = (rr + offset) % n
-      if wave_done[i] or at_barrier[i]: continue
-      if pc[i] >= len(wave_events[wave_ids[i]]): continue
-      # Account for VALU forwarding stall: DS/VMEM can't issue until forwarding deadline
-      eff_ready = ready[i]
-      _, _, next_cat, _ = wave_events[wave_ids[i]][pc[i]]
-      if next_cat in ('ds_wr', 'vmem_wr'):
-        eff_ready = max(eff_ready, valu_wr_deadline[i])
-      elif next_cat in ('ds_rd', 'vmem_rd'):
-        eff_ready = max(eff_ready, valu_rd_deadline[i])
-      if eff_ready < best_cycle:
-        best_cycle = eff_ready
-        best = i
+    if burst_wave >= 0 and not wave_done[burst_wave] and not at_barrier[burst_wave] \
+        and pc[burst_wave] < len(wave_events[wave_ids[burst_wave]]) and ready[burst_wave] <= clock:
+      _, _, bcat, _ = wave_events[wave_ids[burst_wave]][pc[burst_wave]]
+      if bcat == 'valu':
+        best = burst_wave
+        best_cycle = ready[burst_wave]
+    if best == -1:
+      burst_wave = -1
+    # Fallback: earliest effective-ready cycle (accounting for VALU→DS/VMEM forwarding), round-robin tiebreak
+    if best == -1:
+      for offset in range(n):
+        i = (rr + offset) % n
+        if wave_done[i] or at_barrier[i]: continue
+        if pc[i] >= len(wave_events[wave_ids[i]]): continue
+        # Account for VALU forwarding stall: DS/VMEM can't issue until forwarding deadline
+        eff_ready = ready[i]
+        _, _, next_cat, _ = wave_events[wave_ids[i]][pc[i]]
+        if next_cat in ('ds_wr', 'vmem_wr'):
+          eff_ready = max(eff_ready, valu_wr_deadline[i])
+        elif next_cat in ('ds_rd', 'vmem_rd'):
+          eff_ready = max(eff_ready, valu_rd_deadline[i])
+        if eff_ready < best_cycle:
+          best_cycle = eff_ready
+          best = i
 
     if best == -1:
       # All waves blocked — check barrier release
@@ -306,6 +318,10 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
     elif cat in ('ds_rd', 'vmem_rd'):
       issue_cycle = max(issue_cycle, valu_rd_deadline[i])
 
+    # Barrier arrival penalty: when other waves are already waiting, arriving wave incurs +1 cycle (HW barrier-state check)
+    if cat == 'barrier' and any(at_barrier):
+      issue_cycle += 1
+
     timed.append((issue_cycle, wid, pkt_cls, kwargs))
     issue_cost = _get_issue_cost(pkt_cls, kwargs)
 
@@ -317,8 +333,12 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
         lds_start = max(issue_cycle, cu_lds_available)
         lgkm_pend[i].append(lds_start + _LDS_WR_LATENCY)
         cu_lds_available = lds_start + _LDS_SERVICE_COST
+        cu_lds_last_was_write = True
       else:
-        lgkm_pend[i].append(issue_cycle + _LDS_RD_LATENCY)
+        # LDS write→read mode-switch: first read after a write sequence incurs +1 cycle pipeline penalty
+        mode_switch_penalty = 1 if cu_lds_last_was_write else 0
+        lgkm_pend[i].append(issue_cycle + _LDS_RD_LATENCY + mode_switch_penalty)
+        if cu_lds_last_was_write: cu_lds_last_was_write = False
     elif cat == 'vmem_rd': vm_pend[i].append(issue_cycle + _VMEM_LATENCY)
     elif cat == 'vmem_wr': vm_pend[i].append(issue_cycle + _VMEM_LATENCY)
 
@@ -326,6 +346,12 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
     if cat == 'valu' and not extra:
       valu_wr_deadline[i] = issue_cycle + _VALU_DS_WR_FORWARD
       valu_rd_deadline[i] = issue_cycle + _VALU_DS_RD_FORWARD
+
+    # Track VALU burst: consecutive VALU instructions from the same wave execute without preemption
+    if cat == 'valu':
+      burst_wave = i
+    else:
+      burst_wave = -1
 
     # Update wave state
     if cat == 'barrier':

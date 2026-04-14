@@ -204,13 +204,13 @@ class TestEmulatorTiming(unittest.TestCase):
       for i, (pc, hw_d, emu_d) in enumerate(zip(HW_PCS, expected, emu_inter)):
         diff = abs(hw_d - emu_d)
         max_diff = max(max_diff, diff)
-        ok = "✓" if diff <= 2 else "✗"
+        ok = "✓" if diff == 0 else "✗"
         print(f"  PC=0x{pc:03x}  HW_delta={hw_d:4d}  EMU_delta={emu_d:4d}  diff={diff:3d}  {ok}")
-        if diff > 2:
+        if diff > 0:
           failures.append(f"wave {wave_idx} PC=0x{pc:03x}: HW={hw_d} EMU={emu_d} diff={diff}")
 
-      print(f"  max delta diff = {max_diff} cycles (tolerance = ±2)")
-      self.assertEqual(failures, [], "Timing mismatches (tolerance=±2):\n" + "\n".join(failures))
+      print(f"  max delta diff = {max_diff} cycles (tolerance = ±0, exact match required)")
+      self.assertEqual(failures, [], "Timing mismatches (exact match required):\n" + "\n".join(failures))
 
       # record barrier times for cross-wave check (s_barrier at PC 0x11c)
       for pc, t, typ in emu_window:
