@@ -29,8 +29,6 @@ elif os.environ.get("PROFILE", "0") == "0" or os.environ.get("SQTT", "0") == "0"
   _SKIP_REASON = "profiling not enabled — run with: PROFILE=1 SQTT=1 python test/amd/test_live_hw_match.py"
 
 if _SKIP_REASON is None:
-
-if _SKIP_REASON is None:
   from tinygrad import Device, Tensor, dtypes
   from tinygrad.device import Compiled, ProfileProgramEvent, ProfileDeviceEvent
 
