@@ -278,9 +278,9 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
       if non_done_non_barrier: break  # deadlock prevention
       # Release barrier: resume after fixed latency from last wave's barrier issue
       release_cycle = max(barrier_issue[i] for i in barrier_waves) + _BARRIER_FROM_LAST
-      for i in barrier_waves:
+      for idx, i in enumerate(sorted(barrier_waves)):
         at_barrier[i] = False
-        ready[i] = release_cycle  # all waves ready at same cycle; round-robin naturally staggers issue
+        ready[i] = release_cycle + idx * 2  # 2-cycle RR stagger observed on GFX1100
       continue
 
     i = best
