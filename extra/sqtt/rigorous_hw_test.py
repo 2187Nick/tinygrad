@@ -44,18 +44,24 @@ def extract_traces():
 def run_capture(name, run_fn, max_attempts=30):
   """Run kernel on real GPU, retry until INST packets captured."""
   for attempt in range(max_attempts):
-    _clear()
-    run_fn()
-    Device[Device.DEFAULT].synchronize()
-    Device[Device.DEFAULT]._at_profile_finalize()
-    traces, lib = extract_traces()
-    for wid in traces:
-      inst_count = sum(1 for _, _, t, _ in traces[wid] if t in ("INST", "VALUINST", "IMMEDIATE"))
-      if inst_count >= 3:
-        print(f"  {name}[{attempt}]: {len(traces)} wave(s), wave {wid}={inst_count} insts")
-        return traces
-    if attempt % 10 == 0 and attempt > 0:
-      print(f"  {name}[{attempt}]: retrying...")
+    try:
+      _clear()
+      run_fn()
+      Device[Device.DEFAULT].synchronize()
+      Device[Device.DEFAULT]._at_profile_finalize()
+      traces, lib = extract_traces()
+      for wid in traces:
+        inst_count = sum(1 for _, _, t, _ in traces[wid] if t in ("INST", "VALUINST", "IMMEDIATE"))
+        if inst_count >= 3:
+          print(f"  {name}[{attempt}]: {len(traces)} wave(s), wave {wid}={inst_count} insts")
+          return traces
+      if attempt % 10 == 0 and attempt > 0:
+        print(f"  {name}[{attempt}]: retrying...")
+    except Exception as e:
+      if attempt == 0: print(f"  {name}: error on attempt {attempt}: {e}")
+      if attempt >= 3:
+        print(f"  {name}: persistent error after {attempt+1} attempts, skipping")
+        return None
   print(f"  {name}: FAILED after {max_attempts} attempts")
   return None
 
@@ -92,12 +98,83 @@ def _run_elementwise():
 def _run_plus():
   return (Tensor([1., 2, 3, 4]) + Tensor([5., 6, 7, 8])).realize()
 
+def _run_wave_sync():
+  """Wave sync exercises s_sleep + s_barrier. Use small input to limit wave count."""
+  from test.amd.test_custom_kernel import custom_wave_sync
+  from test.amd.helpers import TARGET_TO_ARCH
+  arch = TARGET_TO_ARCH[Device["AMD"].arch]
+  a = Tensor.empty(128, dtype=dtypes.int32).contiguous().realize()
+  Device[Device.DEFAULT].synchronize()
+  _clear()
+  return Tensor.custom_kernel(a, fxn=functools.partial(custom_wave_sync, arch=arch))[0].realize()
+
+def _run_softmax():
+  Tensor.manual_seed(42)
+  x = Tensor.randn(64).realize()
+  Device[Device.DEFAULT].synchronize()
+  _clear()
+  return x.softmax().realize()
+
+def _run_layernorm():
+  Tensor.manual_seed(42)
+  x = Tensor.randn(64).realize()
+  Device[Device.DEFAULT].synchronize()
+  _clear()
+  return x.layernorm().realize()
+
+def _run_exp_chain():
+  """Multiple transcendental ops back-to-back (4-cycle VALUT pipeline)."""
+  x = Tensor([1., 2., 3., 4.]).realize()
+  Device[Device.DEFAULT].synchronize()
+  _clear()
+  return x.exp().log().sqrt().realize()
+
+def _run_matmul_medium():
+  """32x32 matmul — more compute-bound than 4x4."""
+  Tensor.manual_seed(42)
+  a = Tensor.randn(32, 32).realize()
+  b = Tensor.randn(32, 32).realize()
+  Device[Device.DEFAULT].synchronize()
+  _clear()
+  return (a @ b).realize()
+
+def _run_reduce_large():
+  """4096-element reduction — deep LDS tree."""
+  Tensor.manual_seed(42)
+  return Tensor.randn(4096).sum().realize()
+
+def _run_where():
+  """Conditional select: exercises VOPC (v_cmp) + v_cndmask."""
+  a = Tensor([1., 2., 3., 4.]).realize()
+  b = Tensor([5., 6., 7., 8.]).realize()
+  Device[Device.DEFAULT].synchronize()
+  _clear()
+  return (a > 2).where(a, b).realize()
+
+def _run_cast():
+  """Type cast: float32 → int32 → float32 exercises VALU format conversion."""
+  x = Tensor([1.5, 2.7, 3.1, 4.9]).realize()
+  Device[Device.DEFAULT].synchronize()
+  _clear()
+  return x.cast(dtypes.int32).cast(dtypes.float32).realize()
+
 KERNELS = {
-  "lds_sync":     (_run_lds_sync, 30),
-  "data_deps":    (_run_data_deps, 10),
-  "reduce256":    (_run_reduce256, 10),
-  "elementwise":  (_run_elementwise, 10),
-  "plus":         (_run_plus, 30),
+  # Non-DRAM dominated (best for emulator validation)
+  "lds_sync":       (_run_lds_sync, 30),
+  "data_deps":      (_run_data_deps, 10),
+  "wave_sync":      (_run_wave_sync, 30),
+  # Compute / LDS heavy
+  "softmax":        (_run_softmax, 15),
+  "layernorm":      (_run_layernorm, 15),
+  "exp_chain":      (_run_exp_chain, 20),
+  "reduce256":      (_run_reduce256, 10),
+  "reduce_large":   (_run_reduce_large, 10),
+  "matmul_medium":  (_run_matmul_medium, 10),
+  # DRAM dominated (test VMEM forwarding)
+  "elementwise":    (_run_elementwise, 10),
+  "plus":           (_run_plus, 30),
+  "where":          (_run_where, 20),
+  "cast":           (_run_cast, 20),
 }
 
 # ─── Capture mode ─────────────────────────────────────────────────────────────

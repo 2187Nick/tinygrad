@@ -127,13 +127,15 @@ _BARRIER_FROM_LAST = 6    # cycles from last wave's barrier issue to release
 _LDS_SERVICE_COST = 6     # cycles LDS unit is busy per DS op
 _VALU_DS_WR_FORWARD = 26  # VALU→DS_WR forwarding stall (from reference PKL; our HW shows 22 — card variance)
 _VALU_DS_RD_FORWARD = 22  # VALU→DS_RD forwarding stall
-_VALU_VMEM_WR_FORWARD = 26 # VALU→VMEM_WR forwarding stall (same pipeline as DS; HW varies 21-27)
+_VALU_VMEM_WR_FORWARD = 21 # VALU→VMEM_WR forwarding stall (validated: data_deps=21, cast_b128=20)
 _VALU_VMEM_RD_FORWARD = 22 # VALU→VMEM_RD forwarding stall
+_TRANS_PIPELINE_LATENCY = 32 # transcendental unit result latency (v_exp, v_log, v_rcp, etc.) — depctr waits for this
 _WAVESTART_GAP = 1
 _FIRST_INST_GAP = 2
 # S_DELAY_ALU INSTID → base stall cycles for single-wave (0=NO_DEP, 1-4=VALU_DEP, 5-7=TRANS32_DEP, 8=FMA_ACCUM, 9-11=SALU_CYCLE)
 # VALU deps (1-4): RDNA3 VALU pipeline = 5 cycles. With N waves round-robin hides (N-1) cycles, so stall = max(0, base - (N-1)).
-_INSTID_BASE_STALLS = (0, 4, 3, 2, 1, 9, 8, 7, 1, 1, 2, 3)
+# TRANS32 deps (5-7): issue-side contention only (4-cycle trans ALU occupancy). Result latency (24cy) handled by s_waitcnt_depctr.
+_INSTID_BASE_STALLS = (0, 4, 3, 2, 1, 3, 2, 1, 1, 1, 2, 3)
 def _instid_stall(instid: int, n_waves: int) -> int:
   base = _INSTID_BASE_STALLS[min(instid, 11)]
   return max(0, base - (n_waves - 1)) if 1 <= instid <= 4 else base
@@ -161,6 +163,7 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
   ready = [0] * n
   lgkm_pend: list[list[int]] = [[] for _ in range(n)]
   vm_pend: list[list[int]] = [[] for _ in range(n)]
+  valu_pend: list[list[int]] = [[] for _ in range(n)]  # pending multi-cycle VALU (transcendental) completion times
   at_barrier = [False] * n
   barrier_issue = [0] * n
   wave_done = [False] * n
@@ -221,6 +224,23 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
         # Prune completed ops
         lgkm_pend[i] = [c for c in lgkm_pend[i] if c > stall_until]
         vm_pend[i] = [c for c in vm_pend[i] if c > stall_until]
+        continue
+      if cat == 'depctr':
+        # s_waitcnt_depctr: stall until pending multi-cycle VALU (transcendental) ops complete
+        stall_until = ready[i]
+        if valu_pend[i]:
+          stall_until = max(stall_until, max(valu_pend[i]))
+        timed.append((stall_until, wid, pkt_cls, kwargs))
+        ready[i] = stall_until + 1
+        pc[i] += 1
+        valu_pend[i] = [c for c in valu_pend[i] if c > stall_until]
+        continue
+      if cat == 'nop':
+        # s_nop(N): stall for N+1 cycles
+        nop_cycles = (extra + 1) if extra is not None else 1
+        timed.append((ready[i], wid, pkt_cls, kwargs))
+        ready[i] += nop_cycles
+        pc[i] += 1
         continue
       if cat == 'immediate':
         timed.append((ready[i], wid, pkt_cls, kwargs))
@@ -325,6 +345,10 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
         if cu_lds_last_was_write: cu_lds_last_was_write = False
     elif cat == 'vmem_rd': vm_pend[i].append(issue_cycle + _VMEM_LATENCY)
     elif cat == 'vmem_wr': vm_pend[i].append(issue_cycle + _VMEM_LATENCY)
+
+    # Track multi-cycle VALU (transcendental) completion for s_waitcnt_depctr
+    if cat == 'valu' and issue_cost > 1:
+      valu_pend[i].append(issue_cycle + _TRANS_PIPELINE_LATENCY)
 
     # Track last VALU for DS/VMEM forwarding stall (skip VOPC — writes VCC not VGPR)
     if cat == 'valu' and not extra:
@@ -438,8 +462,14 @@ def _init_sqtt_encoder(entry_pc: int):
         events.append((None, {}, 'delay_alu', inst.simm16))
         return
       if inst_op in _SOPP_IMMEDIATE:
-        cat = 'waitcnt' if inst_op == SOPPOp3.S_WAITCNT.value else 'immediate'
-        events.append((IMMEDIATE, {'wave': w}, cat, inst.simm16 if cat == 'waitcnt' else None))
+        if inst_op == SOPPOp3.S_WAITCNT.value:
+          events.append((IMMEDIATE, {'wave': w}, 'waitcnt', inst.simm16))
+        elif inst_op == SOPPOp3.S_WAITCNT_DEPCTR.value:
+          events.append((IMMEDIATE, {'wave': w}, 'depctr', inst.simm16))
+        elif inst_op == SOPPOp3.S_NOP.value:
+          events.append((IMMEDIATE, {'wave': w}, 'nop', inst.simm16))
+        else:
+          events.append((IMMEDIATE, {'wave': w}, 'immediate', None))
         return
       if inst_op in _SOPP_BARRIER:
         events.append((INST, {'wave': w, 'op': InstOp.BARRIER}, 'barrier', None))
