@@ -17,7 +17,7 @@ Cloud setup (vast.ai / runpod):
   - Install: pip install -e '.[amd]'
   - No rocprof-trace-decoder needed (tinygrad decodes SQTT natively)
 """
-import os, sys, subprocess, pickle, textwrap, pathlib, functools, tempfile, unittest, dataclasses, types
+import os, sys, subprocess, pickle, textwrap, functools, unittest
 
 # ---------------------------------------------------------------------------
 # Environment checks
@@ -33,7 +33,7 @@ def _check_env():
 _check_env()
 
 from tinygrad import Device, Tensor, dtypes
-from tinygrad.device import Compiled, ProfileEvent, ProfileProgramEvent, ProfileDeviceEvent
+from tinygrad.device import Compiled, ProfileProgramEvent, ProfileDeviceEvent
 
 TARGET = "gfx1100"
 # non-DRAM window PCs for custom_lds_sync (LDS + barrier + register section)
@@ -190,7 +190,9 @@ def _print_comparison(label, hw_data, emu_data, tolerance=TOLERANCE):
       status = "✓ PASS" if ok else "✗ FAIL"
       typ = hw_w["types"][i] if i < len(hw_w["types"]) else "?"
       if ok: total_pass += 1
-      else: total_fail += 1; wave_fail = True
+      else:
+        total_fail += 1
+        wave_fail = True
       print(f"  0x{pc:05x}  {hw_d:6d}  {emu_d:6d}  {diff:5d}  {status}  {typ}")
     wave_status = "PASS" if not wave_fail else "FAIL"
     print(f"  wave {wave_idx}: {wave_status} (max_diff={max_diff})")
