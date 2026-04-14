@@ -129,13 +129,15 @@ _VALU_DS_WR_FORWARD = 26  # VALU→DS_WR forwarding stall (from reference PKL; o
 _VALU_DS_RD_FORWARD = 22  # VALU→DS_RD forwarding stall
 _VALU_VMEM_WR_FORWARD = 21 # VALU→VMEM_WR forwarding stall (validated: data_deps=21, cast_b128=20)
 _VALU_VMEM_RD_FORWARD = 22 # VALU→VMEM_RD forwarding stall
-_TRANS_PIPELINE_LATENCY = 32 # transcendental unit result latency (v_exp, v_log, v_rcp, etc.) — depctr waits for this
+_VMEM_DRAIN_CYCLES = 14    # VMEM pipeline drain: SQ holds s_nop/s_endpgm until VMEM op accepted (HW=15, minus 1 for nop cost)
+_TRANS_PIPELINE_LATENCY = 27 # transcendental unit result latency (v_exp, v_log, v_rcp, etc.) — depctr waits for this
 _WAVESTART_GAP = 1
 _FIRST_INST_GAP = 2
 # S_DELAY_ALU INSTID → base stall cycles for single-wave (0=NO_DEP, 1-4=VALU_DEP, 5-7=TRANS32_DEP, 8=FMA_ACCUM, 9-11=SALU_CYCLE)
 # VALU deps (1-4): RDNA3 VALU pipeline = 5 cycles. With N waves round-robin hides (N-1) cycles, so stall = max(0, base - (N-1)).
-# TRANS32 deps (5-7): issue-side contention only (4-cycle trans ALU occupancy). Result latency (24cy) handled by s_waitcnt_depctr.
-_INSTID_BASE_STALLS = (0, 4, 3, 2, 1, 3, 2, 1, 1, 1, 2, 3)
+# TRANS32 deps (5-7): 0 — trans ALU runs in parallel with VALU. Pipeline occupancy enforced by trans_pipe_avail. Register deps by s_waitcnt_depctr.
+_INSTID_BASE_STALLS = (0, 4, 3, 2, 1, 0, 0, 0, 1, 1, 2, 3)
+_TRANS_PIPE_CYCLES = 4  # trans ALU pipeline occupancy: trans→trans must wait 4 cycles; trans→VALU = 1 cycle (parallel)
 def _instid_stall(instid: int, n_waves: int) -> int:
   base = _INSTID_BASE_STALLS[min(instid, 11)]
   return max(0, base - (n_waves - 1)) if 1 <= instid <= 4 else base
@@ -149,7 +151,11 @@ for _op in InstOp:
 del _op, _parts
 
 def _get_issue_cost(pkt_cls, kwargs) -> int:
-  if pkt_cls is INST and 'op' in kwargs: return _INSTOP_ISSUE_COST.get(kwargs['op'], 1)
+  if pkt_cls is INST and 'op' in kwargs:
+    op = kwargs['op']
+    # Trans instructions (VALUT_4) have 1-cycle SQ issue cost — the 4-cycle pipeline is enforced by trans_pipe_avail
+    if op == InstOp.VALUT_4: return 1
+    return _INSTOP_ISSUE_COST.get(op, 1)
   return 1
 
 def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, type, dict]]:
@@ -172,6 +178,9 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
   valu_ds_rd_deadline = [0] * n   # VALU→DS_RD forwarding
   valu_vmem_wr_deadline = [0] * n # VALU→VMEM_WR forwarding
   valu_vmem_rd_deadline = [0] * n # VALU→VMEM_RD forwarding
+  vmem_drain_deadline = [0] * n   # VMEM pipeline drain: blocks s_nop/s_endpgm until VMEM accepted
+  trans_pipe_avail = [0] * n      # trans ALU pipeline: when trans unit is free for next trans instruction
+  valu_issue_hist: list[list[int]] = [[] for _ in range(n)]  # last 4 non-trans VALU issue times (for time-based delay_alu)
   cu_lds_available = 0        # shared LDS unit contention
   cu_lds_last_was_write = False
   burst_wave = -1             # VALU burst: wave in consecutive VALU sequence
@@ -199,10 +208,10 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
         simm16 = extra
         ds = dly[i]
         ds[1] = ds[0] + 1
-        ds[2] = _instid_stall(simm16 & 0xF, n)
+        ds[2] = simm16 & 0xF  # raw instid0 (resolved to stall at application time)
         instid1 = (simm16 >> 7) & 0xF
         ds[3] = ds[0] + ((simm16 >> 4) & 0x7) + 1 if instid1 else -1
-        ds[4] = _instid_stall(instid1, n) if instid1 else 0
+        ds[4] = instid1  # raw instid1
         pc[i] += 1
         continue
       if cat == 'waitcnt':
@@ -236,10 +245,11 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
         valu_pend[i] = [c for c in valu_pend[i] if c > stall_until]
         continue
       if cat == 'nop':
-        # s_nop(N): stall for N+1 cycles
+        # s_nop(N): stall for N+1 cycles, but also wait for VMEM pipeline drain
         nop_cycles = (extra + 1) if extra is not None else 1
-        timed.append((ready[i], wid, pkt_cls, kwargs))
-        ready[i] += nop_cycles
+        nop_time = max(ready[i], vmem_drain_deadline[i])
+        timed.append((nop_time, wid, pkt_cls, kwargs))
+        ready[i] = nop_time + nop_cycles
         pc[i] += 1
         continue
       if cat == 'immediate':
@@ -278,10 +288,12 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
         if pc[i] >= len(wave_events[wave_ids[i]]): continue
         # VALU forwarding stall
         eff_ready = ready[i]
-        _, _, next_cat, _ = wave_events[wave_ids[i]][pc[i]]
+        _, _, next_cat, next_extra = wave_events[wave_ids[i]][pc[i]]
         if next_cat == 'ds_wr': eff_ready = max(eff_ready, valu_ds_wr_deadline[i])
         elif next_cat == 'ds_rd': eff_ready = max(eff_ready, valu_ds_rd_deadline[i])
-        elif next_cat == 'vmem_wr': eff_ready = max(eff_ready, valu_vmem_wr_deadline[i])
+        elif next_cat == 'vmem_wr':
+          width_extra = max(0, (next_extra or 4) // 4 - 1) if next_extra else 0
+          eff_ready = max(eff_ready, valu_vmem_wr_deadline[i] + width_extra)
         elif next_cat == 'vmem_rd': eff_ready = max(eff_ready, valu_vmem_rd_deadline[i])
         if eff_ready < best_cycle:
           best_cycle = eff_ready
@@ -304,23 +316,38 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
     pkt_cls, kwargs, cat, extra = wave_events[wid][pc[i]]
     issue_cycle = max(clock, ready[i])
 
-    # Apply S_DELAY_ALU stall
+    # Apply S_DELAY_ALU stall (time-based for VALU_DEP, fixed for TRANS32_DEP/SALU)
     ds = dly[i]
     ds[0] += 1  # count packet-emitting instructions for INSTSKIP tracking
+    def _resolve_delay(instid):
+      # VALU_DEP (1-4): time-based stall using actual VALU issue history
+      if 1 <= instid <= 4:
+        vh = valu_issue_hist[i]
+        if instid <= len(vh): return max(0, vh[-instid] + 5 - issue_cycle)
+        return 0  # not enough history — no real dependency
+      # All other deps (TRANS32_DEP, SALU_CYCLE): use calibrated fixed stalls
+      return _instid_stall(instid, n)
     stall = 0
     if ds[1] == ds[0]:
-      stall = max(stall, ds[2])
+      stall = max(stall, _resolve_delay(ds[2]))
       ds[1] = -1
     if ds[3] == ds[0]:
-      stall = max(stall, ds[4])
+      stall = max(stall, _resolve_delay(ds[4]))
       ds[3] = -1
     issue_cycle += stall
+
+    # Enforce trans ALU pipeline occupancy: trans instructions wait for the trans unit to be free
+    _is_trans = cat == 'valu' and pkt_cls is INST and kwargs.get('op') == InstOp.VALUT_4
+    if _is_trans:
+      issue_cycle = max(issue_cycle, trans_pipe_avail[i])
 
     # Apply VALU→DS/VMEM forwarding stall (wave selection already deferred this wave; just clamp)
     if cat == 'ds_wr': issue_cycle = max(issue_cycle, valu_ds_wr_deadline[i])
     elif cat == 'ds_rd': issue_cycle = max(issue_cycle, valu_ds_rd_deadline[i])
     elif cat == 'vmem_wr':
-      issue_cycle = max(issue_cycle, valu_vmem_wr_deadline[i])
+      # Width-dependent forwarding: wider stores need extra cycles for VGPR reads (b32=0, b128=+3)
+      width_extra = max(0, (extra or 4) // 4 - 1) if extra else 0
+      issue_cycle = max(issue_cycle, valu_vmem_wr_deadline[i] + width_extra)
     elif cat == 'vmem_rd':
       issue_cycle = max(issue_cycle, valu_vmem_rd_deadline[i])
 
@@ -343,12 +370,17 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
         mode_switch_penalty = 1 if cu_lds_last_was_write else 0  # write→read direction switch
         lgkm_pend[i].append(issue_cycle + _LDS_RD_LATENCY + mode_switch_penalty)
         if cu_lds_last_was_write: cu_lds_last_was_write = False
-    elif cat == 'vmem_rd': vm_pend[i].append(issue_cycle + _VMEM_LATENCY)
-    elif cat == 'vmem_wr': vm_pend[i].append(issue_cycle + _VMEM_LATENCY)
+    elif cat == 'vmem_rd':
+      vm_pend[i].append(issue_cycle + _VMEM_LATENCY)
+      vmem_drain_deadline[i] = issue_cycle + _VMEM_DRAIN_CYCLES
+    elif cat == 'vmem_wr':
+      vm_pend[i].append(issue_cycle + _VMEM_LATENCY)
+      vmem_drain_deadline[i] = issue_cycle + _VMEM_DRAIN_CYCLES
 
-    # Track multi-cycle VALU (transcendental) completion for s_waitcnt_depctr
-    if cat == 'valu' and issue_cost > 1:
+    # Track multi-cycle VALU (transcendental) completion for s_waitcnt_depctr, and trans pipeline occupancy
+    if _is_trans:
       valu_pend[i].append(issue_cycle + _TRANS_PIPELINE_LATENCY)
+      trans_pipe_avail[i] = issue_cycle + _TRANS_PIPE_CYCLES
 
     # Track last VALU for DS/VMEM forwarding stall (skip VOPC — writes VCC not VGPR)
     if cat == 'valu' and not extra:
@@ -356,6 +388,12 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
       valu_ds_rd_deadline[i] = issue_cycle + _VALU_DS_RD_FORWARD
       valu_vmem_wr_deadline[i] = issue_cycle + _VALU_VMEM_WR_FORWARD
       valu_vmem_rd_deadline[i] = issue_cycle + _VALU_VMEM_RD_FORWARD
+
+    # Track VALU issue times for time-based delay_alu (non-trans only)
+    if cat == 'valu' and not _is_trans:
+      vh = valu_issue_hist[i]
+      vh.append(issue_cycle)
+      if len(vh) > 4: vh.pop(0)
 
     # Track VALU burst
     if cat == 'valu':
@@ -511,7 +549,12 @@ def _init_sqtt_encoder(entry_pc: int):
     if issubclass(inst_type, _DS): cat = 'ds_wr' if is_store else 'ds_rd'
     elif issubclass(inst_type, (*_GLOBAL, *_FLAT, *_SCRATCH)): cat = 'vmem_wr' if is_store else 'vmem_rd'
     else: cat = 'salu'
-    events.append((INST, {'wave': w, 'op': mem_op_val}, cat, None))
+    # For VMEM stores, extract data width (in bytes) from op_name for width-dependent forwarding
+    vmem_bytes = None
+    if cat == 'vmem_wr':
+      m = re.search(r'_B(\d+)', op_name)
+      if m: vmem_bytes = int(m.group(1)) // 8
+    events.append((INST, {'wave': w, 'op': mem_op_val}, cat, vmem_bytes))
 
   def finish(wave_id: int):
     """Record wave completion for deferred encoding."""

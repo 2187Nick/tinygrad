@@ -288,8 +288,9 @@ class TestEmulatorTiming(unittest.TestCase):
   def test_wave_count_stalls(self):
     """Validate wave-count-dependent VALU stalls: 1-wave kernels get higher stalls than 2-wave."""
     from test.mockgpu.amd.emu import _instid_stall, _INSTID_BASE_STALLS
-    # 2-wave stalls match the calibrated table (TRANS32_DEP = issue-side contention only, not result latency)
-    original_2wave = (0, 3, 2, 1, 0, 3, 2, 1, 1, 1, 2, 3)
+    # 2-wave stalls match the calibrated table
+    # TRANS32_DEP (5-7) = 0: trans ALU runs in parallel with VALU; pipeline occupancy enforced by trans_pipe_avail
+    original_2wave = (0, 3, 2, 1, 0, 0, 0, 0, 1, 1, 2, 3)
     two_wave = tuple(_instid_stall(i, 2) for i in range(12))
     self.assertEqual(two_wave, original_2wave, "2-wave stalls must match calibrated table")
     # 1-wave VALU deps (instid 1-4) are +1 vs 2-wave (RDNA3 VALU pipeline = 5 cycles)
