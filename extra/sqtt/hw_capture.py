@@ -18,7 +18,7 @@ CAPTURE_DIR = SCRIPT_DIR / "captures" / datetime.now().strftime("%Y%m%d_%H%M%S")
 KERNELS = {
   "sync": "test/amd/test_custom_kernel.py TestCustomKernel.test_lds_sync",
   "data_deps": "test/amd/test_custom_kernel.py TestCustomKernel.test_data_deps",
-  "wave_sync": "test/amd/test_custom_kernel.py TestCustomKernel.test_wave_sync",
+  "wave_sync": "test/amd/test_sqttmap.py TestSQTTMapRDNA3.test_wave_sync",
   "plus": "test/test_tiny.py TestTiny.test_plus",
   "gemm": '-c "from tinygrad import Tensor; (Tensor.empty(N:=32, N)@Tensor.empty(N, N)).realize()"',
   "empty": "test/backend/test_custom_kernel.py TestCustomKernel.test_empty",

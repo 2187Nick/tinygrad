@@ -647,8 +647,15 @@ def map_insts(data:bytes, lib:bytes, target:str) -> Iterator[tuple[PacketType, I
   from tinygrad.viz.serve import amd_decode
   pc_map = amd_decode(lib, target)
   wave_pc:dict[int, int] = {}
-  # only processing packets on one [CU, SIMD] unit
-  def simd_select(p) -> bool: return getattr(p, "cu", 0) == 0 and getattr(p, "simd", 0) == 0
+  # only processing packets on one [CU, SIMD] unit — auto-detect traced CU from first WAVESTART (supports any wgp_sel)
+  traced_cu:int|None = None
+  def simd_select(p) -> bool:
+    nonlocal traced_cu
+    cu, simd = getattr(p, "cu", None), getattr(p, "simd", None)
+    if cu is None: return True  # packets without cu/simd fields pass through
+    if traced_cu is None:
+      if isinstance(p, (WAVESTART, WAVESTART_RDNA4, CDNA_WAVESTART)) and simd == 0: traced_cu = cu
+    return cu == (traced_cu if traced_cu is not None else 0) and simd == 0
   for p in decode(data):
     if not simd_select(p): continue
     if isinstance(p, (WAVESTART, WAVESTART_RDNA4, CDNA_WAVESTART)):

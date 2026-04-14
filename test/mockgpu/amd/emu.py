@@ -359,7 +359,8 @@ def _init_sqtt_encoder(entry_pc: int):
   _SCRATCH = (ir3.SCRATCH, ir4.VSCRATCH, irc.SCRATCH)
 
   # SOPP classification sets
-  _SOPP_SKIP = {SOPPOp3.S_ENDPGM.value, SOPPOp3.S_ENDPGM_SAVED.value, SOPPOp3.S_ENDPGM_ORDERED_PS_DONE.value}
+  _SOPP_SKIP = {SOPPOp3.S_ENDPGM.value, SOPPOp3.S_ENDPGM_SAVED.value, SOPPOp3.S_ENDPGM_ORDERED_PS_DONE.value,
+                SOPPOp3.S_SENDMSG.value, SOPPOp3.S_SENDMSGHALT.value}
   _SOPP_IMMEDIATE = {SOPPOp3.S_NOP.value, SOPPOp3.S_CLAUSE.value, SOPPOp3.S_WAITCNT.value, SOPPOp3.S_WAITCNT_DEPCTR.value,
                      SOPPOp3.S_WAIT_IDLE.value, SOPPOp3.S_WAIT_EVENT.value, SOPPOp3.S_SLEEP.value,
                      SOPPOp3.S_SET_INST_PREFETCH_DISTANCE.value}

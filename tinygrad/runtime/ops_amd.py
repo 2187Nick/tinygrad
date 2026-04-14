@@ -21,8 +21,9 @@ from tinygrad.runtime.support.memory import AddrSpace
 if getenv("IOCTL"): import extra.hip_gpu_driver.hip_ioctl  # noqa: F401 # pylint: disable=unused-import
 
 SQTT = ContextVar("SQTT", abs(VIZ.value)>=2)
-SQTT_ITRACE_SE_MASK, SQTT_LIMIT_SE, SQTT_SIMD_SEL, SQTT_TOKEN_EXCLUDE = \
-  ContextVar("SQTT_ITRACE_SE_MASK", 0b11), ContextVar("SQTT_LIMIT_SE", 0), ContextVar("SQTT_SIMD_SEL", 0), ContextVar("SQTT_TOKEN_EXCLUDE", 0)
+SQTT_ITRACE_SE_MASK, SQTT_LIMIT_SE, SQTT_SIMD_SEL, SQTT_WGP_SEL, SQTT_SA_SEL, SQTT_TOKEN_EXCLUDE = \
+  ContextVar("SQTT_ITRACE_SE_MASK", 0x3f), ContextVar("SQTT_LIMIT_SE", 0), ContextVar("SQTT_SIMD_SEL", 0), ContextVar("SQTT_WGP_SEL", -1), \
+  ContextVar("SQTT_SA_SEL", 0), ContextVar("SQTT_TOKEN_EXCLUDE", 0)
 PMC = ContextVar("PMC", abs(VIZ.value)>=2)
 EVENT_INDEX_PARTIAL_FLUSH = 4 # based on a comment in nvd.h
 WAIT_REG_MEM_FUNCTION_EQ  = 3 # ==
@@ -203,10 +204,15 @@ class AMDComputeQueue(HWQueue):
     if SQTT_LIMIT_SE:
       # Calculate number of CUs per SE to enable based on blocks count. 4 is maximum simd per CU, but on rdna we can trace only 1.
       cu_per_se = prod([x if isinstance(x, int) else 1 for x in global_size]) // ((self.dev.cu_cnt // self.dev.se_cnt) * 4)
+      wgp_sel = SQTT_WGP_SEL.value if SQTT_WGP_SEL.value >= 0 else (self.dev.iface.props['cu_per_simd_array'] - 1) // 2
       for xcc in range(self.dev.xccs):
         with self.pred_exec(xcc_mask=1 << xcc):
           for i in range(8 if prg.dev.target >= (11,0,0) else 4):
-            if SQTT_LIMIT_SE > 1: mask = 1 if SQTT_ITRACE_SE_MASK.value & (1 << i) else 0 # only run unmasked shader engines
+            if SQTT_LIMIT_SE > 1:
+              # Enable ONLY the traced WGP's CUs in both SAs on all SEs. Writing 0 may mean "no restriction" on GFX11,
+              # so we must set a non-zero mask everywhere to actually constrain wave placement.
+              cu_bits = 0b11 << (wgp_sel * 2)
+              mask = cu_bits | (cu_bits << 16)
             else:
               sa_mask = (1 << (self.dev.iface.props['cu_per_simd_array'] // 2)) - 1
               cu_mask = (1 << (cu_per_se + (1 if i == 0 else 0))) - 1
@@ -220,7 +226,7 @@ class AMDComputeQueue(HWQueue):
 
   def sqtt_config(self, tracing:bool):
     trace_ctrl = {'rt_freq': self.soc.SQ_TT_RT_FREQ_4096_CLK} if self.dev.target < (12,0,0) else {}
-    self.wreg(self.gc.regSQ_THREAD_TRACE_CTRL, draw_event_en=1, spi_stall_en=1, sq_stall_en=1, reg_at_hwm=2, hiwater=1, util_timer=1,
+    self.wreg(self.gc.regSQ_THREAD_TRACE_CTRL, draw_event_en=1, spi_stall_en=1, sq_stall_en=1, reg_at_hwm=2, hiwater=5, util_timer=1,
       mode=int(tracing), **trace_ctrl)
 
   def sqtt_start(self, buf0s:list[HCQBuffer]):
@@ -263,8 +269,10 @@ class AMDComputeQueue(HWQueue):
         # be dispatched on something else and not be seen in instruction tracing tab. You can force the wavefronts of a kernel to be dispatched on the
         # CUs you want to by disabling other CUs via bits in regCOMPUTE_STATIC_THREAD_MGMT_SE<x> and trace even kernels that only have one wavefront.
         # Use SQTT_SIMD_SEL to select which SIMD to trace (0-3). Memory ops show different InstOp values (0x2x vs 0x5x) based on SIMD.
+        # Use SQTT_WGP_SEL to select which WGP to trace (-1 = auto: last active WGP per Mesa's ac_sqtt.c behavior for GFX11+).
         cs_wtype = (1 << 6) if self.dev.target >= (12,0,0) else self.soc.SQ_TT_WTYPE_INCLUDE_CS_BIT
-        self.wreg(self.gc.regSQ_THREAD_TRACE_MASK, wtype_include=cs_wtype, simd_sel=SQTT_SIMD_SEL.value, wgp_sel=0, sa_sel=0)
+        wgp_sel = SQTT_WGP_SEL.value if SQTT_WGP_SEL.value >= 0 else (self.dev.iface.props['cu_per_simd_array'] - 1) // 2
+        self.wreg(self.gc.regSQ_THREAD_TRACE_MASK, wtype_include=cs_wtype, simd_sel=SQTT_SIMD_SEL.value, wgp_sel=wgp_sel, sa_sel=SQTT_SA_SEL.value)
         reg_include = self.soc.SQ_TT_TOKEN_MASK_SQDEC_BIT | self.soc.SQ_TT_TOKEN_MASK_SHDEC_BIT | self.soc.SQ_TT_TOKEN_MASK_GFXUDEC_BIT | \
                       self.soc.SQ_TT_TOKEN_MASK_COMP_BIT | self.soc.SQ_TT_TOKEN_MASK_CONTEXT_BIT
         token_exclude = SQTT_TOKEN_EXCLUDE.value | ((1 << self.soc.SQ_TT_TOKEN_EXCLUDE_PERF_SHIFT) if self.dev.target < (12,0,0) else 0)
@@ -276,8 +284,11 @@ class AMDComputeQueue(HWQueue):
                             1 << self.soc.SQ_TT_TOKEN_EXCLUDE_VALUINST_SHIFT | 1 << self.soc.SQ_TT_TOKEN_EXCLUDE_IMMEDIATE_SHIFT | \
                             1 << self.soc.SQ_TT_TOKEN_EXCLUDE_INST_SHIFT) if self.dev.target < (12,0,0) else 0x927
 
+        # Mask token_exclude to field width (11 bits) to prevent overflow into the adjacent ttrace_exec bit.
+        token_exclude &= (1 << (self.gc.regSQ_THREAD_TRACE_TOKEN_MASK.fields['token_exclude'][1] + 1)) - 1
+
         self.wreg(self.gc.regSQ_THREAD_TRACE_TOKEN_MASK, reg_include=reg_include, token_exclude=token_exclude, bop_events_token_include=1,
-                  **({} if self.dev.target < (12,0,0) else {'exclude_barrier_wait': 1}))
+                  ttrace_exec=1, **({} if self.dev.target < (12,0,0) else {'exclude_barrier_wait': 1}))
         self.sqtt_config(tracing=True)
 
     self.set_grbm()
@@ -851,7 +862,20 @@ class PCIIface(PCIIfaceBase):
   def p2p_paddrs(self, paddrs:list[tuple[int,int]]) -> tuple[list[tuple[int,int]], AddrSpace]:
     return ([(self.dev_impl.paddr2xgmi(p), sz) for p, sz in paddrs], AddrSpace.PEER) if self.dev_impl.is_hive() else super().p2p_paddrs(paddrs)
 
-  def require_profile_mode(self): return True
+  def require_profile_mode(self):
+    # AM driver unbinds the amdgpu kernel driver during init, so the sysfs power attribute is typically gone.
+    # Try to set profile_standard via DRM sysfs. If not available (driver already unbound), the user must set it before running.
+    import glob
+    for card in sorted(glob.glob('/sys/class/drm/card*/device')):
+      try:
+        if open(f'{card}/vendor').read().strip() != '0x1002': continue
+        fn = f'{card}/power_dpm_force_performance_level'
+        if os.path.exists(fn) and open(fn).read().strip() != 'profile_standard':
+          with open(fn, 'w') as f: f.write('profile_standard\n')
+        return
+      except Exception: pass
+    # If no DRM path found, hardware power state may already be set (persists at firmware level after unbind).
+
   def is_wgp_active(self, xcc, se, sa, wgp) -> bool: return True # TODO: account for WGP disablement on some asics.
 
   def _compute_props(self):
