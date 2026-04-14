@@ -674,6 +674,7 @@ jobs:
       - name: Run SQTT profiling tests
         run: PROFILE=1 SQTT=1 python3 -m pytest -n=auto test/amd/test_sqtt_profiler.py
       - name: Run emulator timing validation
+        if: always()
         run: PROFILE=1 SQTT=1 DEBUG=1 python3 -m pytest -n0 test/amd/test_emulator_timing.py -s --no-header -p no:warnings
       - name: Run AMD emulated tests on NULL backend
         env:
