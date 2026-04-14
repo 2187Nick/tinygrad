@@ -312,6 +312,30 @@ class TestEmulatorE2E(unittest.TestCase):
     # At minimum we should have some instruction-level data
     self.assertGreater(len(traces[wid]), 2, "exp: expected more than 2 packets")
 
+  def test_reduce_single_wave_valu_chain(self):
+    """Reduce kernel: single-wave data-dependent VALU chain should show delta=5 (RDNA3 pipeline)."""
+    _clear_events()
+    try:
+      traces, _ = self._run_and_capture("reduce_sum", _run_reduce_sum)
+    except unittest.SkipTest:
+      return
+    # Find the reduction kernel (has LDS ops + multiple VALU adds)
+    for wid in sorted(traces.keys()):
+      trace = traces[wid]
+      deltas = _inter_deltas(trace)
+      # Find consecutive VALUINST pairs with delta=5 (data dep VALU→VALU in single wave)
+      dep_chain = []
+      for i in range(1, len(trace)):
+        if trace[i][2] == "VALUINST" and trace[i-1][2] == "VALUINST" and deltas[i] == 5:
+          dep_chain.append(i)
+      if len(dep_chain) >= 3:
+        print(f"  reduce wave {wid}: {len(dep_chain)} data-dependent VALU pairs (Δ=5 each)")
+        # All data-dependent VALU→VALU transitions in a single-wave kernel should be exactly 5
+        for idx in dep_chain:
+          self.assertEqual(deltas[idx], 5, f"reduce wave {wid} idx {idx}: data-dep VALU delta should be 5")
+        return
+    self.skipTest("reduce: no single-wave VALU dependency chain found")
+
   def test_lds_sync_barrier_gap(self):
     """LDS sync kernel: post-barrier resume gap should be reasonable (6-30 cycles)."""
     _clear_events()

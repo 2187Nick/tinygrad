@@ -77,6 +77,8 @@ MASK32 = 0xFFFFFFFF
 
 # Global trace storage: populated by run_asm as raw SQTT blobs, consumed by amdgpu.py
 sqtt_traces: list[bytes] = []
+# Cycle counts per kernel: populated alongside sqtt_traces, consumed by beam search POC
+sqtt_cycle_counts: list[int] = []
 
 # Encoder primitives
 from tinygrad.renderer.amd.sqtt import (
@@ -127,8 +129,12 @@ _VALU_DS_WR_FORWARD = 26  # VALU→DS_WR/VMEM_WR forwarding stall
 _VALU_DS_RD_FORWARD = 22  # VALU→DS_RD/VMEM_RD forwarding stall
 _WAVESTART_GAP = 1
 _FIRST_INST_GAP = 2
-# S_DELAY_ALU INSTID → stall cycles (0=NO_DEP, 1-4=VALU_DEP, 5-7=TRANS32_DEP, 8=FMA_ACCUM, 9-11=SALU_CYCLE)
-_INSTID_STALLS = (0, 3, 2, 1, 0, 9, 8, 7, 1, 1, 2, 3)
+# S_DELAY_ALU INSTID → base stall cycles for single-wave (0=NO_DEP, 1-4=VALU_DEP, 5-7=TRANS32_DEP, 8=FMA_ACCUM, 9-11=SALU_CYCLE)
+# VALU deps (1-4): RDNA3 VALU pipeline = 5 cycles. With N waves round-robin hides (N-1) cycles, so stall = max(0, base - (N-1)).
+_INSTID_BASE_STALLS = (0, 4, 3, 2, 1, 9, 8, 7, 1, 1, 2, 3)
+def _instid_stall(instid: int, n_waves: int) -> int:
+  base = _INSTID_BASE_STALLS[min(instid, 11)]
+  return max(0, base - (n_waves - 1)) if 1 <= instid <= 4 else base
 
 # Per-instruction SQ issue cost: multi-cycle ops occupy the execution unit for N cycles.
 # Suffix number in InstOp name = issue cost.
@@ -186,10 +192,10 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
         simm16 = extra
         ds = dly[i]
         ds[1] = ds[0] + 1
-        ds[2] = _INSTID_STALLS[min(simm16 & 0xF, 11)]
+        ds[2] = _instid_stall(simm16 & 0xF, n)
         instid1 = (simm16 >> 7) & 0xF
         ds[3] = ds[0] + ((simm16 >> 4) & 0x7) + 1 if instid1 else -1
-        ds[4] = _INSTID_STALLS[min(instid1, 11)] if instid1 else 0
+        ds[4] = _instid_stall(instid1, n) if instid1 else 0
         pc[i] += 1
         continue
       if cat == 'waitcnt':
@@ -474,9 +480,10 @@ def _init_sqtt_encoder(entry_pc: int):
     if wave_id in started:
       wave_events.setdefault(wave_id, []).append((WAVEEND, {'simd': 0, 'cu_lo': 0, 'wave': wave_id & 0x1F}, 'waveend', None))
 
-  def finalize() -> bytes:
-    """Run timing simulation, encode interleaved SQTT stream with cycle-accurate deltas."""
+  def finalize() -> tuple[bytes, int]:
+    """Run timing simulation, encode interleaved SQTT stream with cycle-accurate deltas. Returns (blob, total_cycles)."""
     timed = _simulate_sq_timing(wave_events)
+    total_cycles = max((ts for ts, _, _, _ in timed), default=0)
     # Sort: all WAVESTARTs first as a preamble (matching real hardware where all wave allocations
     # appear consecutively before any instructions), then remaining packets ordered by timestamp.
     timed.sort(key=lambda x: (0 if x[2] is WAVESTART else 1, x[0]))
@@ -500,7 +507,7 @@ def _init_sqtt_encoder(entry_pc: int):
     while len(nibbles) % 2 != 0: nibbles.append(0)
     nibbles.extend([0] * 32)
     while len(nibbles) % 64 != 0: nibbles.append(0)
-    return _nibbles_to_bytes(nibbles)
+    return _nibbles_to_bytes(nibbles), total_cycles
 
   return emit, finish, finalize
 
@@ -2491,5 +2498,8 @@ def run_asm(lib: int, lib_sz: int, gx: int, gy: int, gz: int, lx: int, ly: int, 
           # Reset LDS for next workgroup
           if lds_size > 0: ctypes.memset(lds_buf._buf.va_addr, 0, max(lds_size, 4))
 
-  if PROFILE: sqtt_traces.append(sqtt_finalize())
+  if PROFILE:
+    blob, cycles = sqtt_finalize()
+    sqtt_traces.append(blob)
+    sqtt_cycle_counts.append(cycles)
   return 0

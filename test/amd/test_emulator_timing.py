@@ -285,5 +285,26 @@ class TestEmulatorTiming(unittest.TestCase):
         f"gemm run_{run_idx}: startup deltas differ!\n  got: {startup_deltas}\n  expected: {GEMM_STARTUP_DELTAS}")
       print(f"gemm_run_{run_idx}: startup ({len(startup_deltas)} deltas) ✓ deterministic")
 
+  def test_wave_count_stalls(self):
+    """Validate wave-count-dependent VALU stalls: 1-wave kernels get higher stalls than 2-wave."""
+    from test.mockgpu.amd.emu import _instid_stall, _INSTID_BASE_STALLS
+    # 2-wave stalls match the original calibrated table
+    original_2wave = (0, 3, 2, 1, 0, 9, 8, 7, 1, 1, 2, 3)
+    two_wave = tuple(_instid_stall(i, 2) for i in range(12))
+    self.assertEqual(two_wave, original_2wave, "2-wave stalls must match original table")
+    # 1-wave VALU deps (instid 1-4) are +1 vs 2-wave (RDNA3 VALU pipeline = 5 cycles)
+    for instid in range(1, 5):
+      self.assertEqual(_instid_stall(instid, 1), _instid_stall(instid, 2) + 1,
+        f"instid={instid}: 1-wave stall must be +1 vs 2-wave")
+    # Non-VALU deps (TRANS32, FMA, SALU) unchanged across wave counts
+    for instid in range(5, 12):
+      for n in [1, 2, 3, 5]:
+        self.assertEqual(_instid_stall(instid, n), _INSTID_BASE_STALLS[instid],
+          f"instid={instid} n={n}: non-VALU stalls must be wave-count-independent")
+    # With enough waves, VALU stalls drop to 0
+    for instid in range(1, 5):
+      self.assertEqual(_instid_stall(instid, 5), 0,
+        f"instid={instid}: 5-wave stall should be 0 (pipeline fully hidden)")
+
 if __name__ == "__main__":
   unittest.main()
