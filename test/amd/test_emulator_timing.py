@@ -47,10 +47,10 @@ def _load_pkl_safe(path):
       class PMCSample:
         ts: int = 0
         values: dict = dataclasses.field(default_factory=dict)
-      stub.ProfileSQTTEvent = ProfileSQTTEvent
-      stub.ProfilePMCEvent = ProfilePMCEvent
-      stub.PMCSample = PMCSample
-      stub.AMDDevice = type('AMDDevice', (), {})
+      setattr(stub, 'ProfileSQTTEvent', ProfileSQTTEvent)
+      setattr(stub, 'ProfilePMCEvent', ProfilePMCEvent)
+      setattr(stub, 'PMCSample', PMCSample)
+      setattr(stub, 'AMDDevice', type('AMDDevice', (), {}))
       sys.modules['tinygrad.runtime.ops_amd'] = stub
   with open(path, 'rb') as f:
     return pickle.load(f)

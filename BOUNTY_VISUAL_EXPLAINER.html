@@ -1,0 +1,510 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>RDNA3 SQTT Emulator Bounty — Visual Explainer</title>
+<style>
+  *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+  :root{
+    --bg:#0d1117;--bg2:#161b22;--bg3:#1c2333;--border:#30363d;
+    --text:#c9d1d9;--text2:#8b949e;--green:#3fb950;--green2:#238636;
+    --blue:#58a6ff;--orange:#d29922;--red:#f85149;--purple:#bc8cff;
+    --mono:'Fira Code','Cascadia Code','JetBrains Mono','SF Mono','Consolas','Liberation Mono',monospace;
+  }
+  html{scroll-behavior:smooth}
+  body{background:var(--bg);color:var(--text);font-family:var(--mono);line-height:1.6;overflow-x:hidden}
+  a{color:var(--blue);text-decoration:none}
+  a:hover{text-decoration:underline}
+
+  /* Hero */
+  .hero{text-align:center;padding:80px 20px 60px;position:relative;overflow:hidden}
+  .hero::before{content:'';position:absolute;top:0;left:0;right:0;bottom:0;
+    background:radial-gradient(ellipse at 50% 0%,rgba(63,185,80,.08) 0%,transparent 60%);pointer-events:none}
+  .hero h1{font-size:clamp(1.6rem,4vw,2.8rem);color:#fff;margin-bottom:12px;font-weight:700}
+  .hero h1 span{color:var(--green)}
+  .hero .subtitle{color:var(--text2);font-size:clamp(.85rem,2vw,1.05rem);max-width:700px;margin:0 auto 30px}
+  .badge{display:inline-block;background:var(--green2);color:#fff;padding:6px 18px;border-radius:20px;font-size:.85rem;font-weight:600;letter-spacing:.5px}
+
+  /* Counter */
+  .counter-wrap{display:flex;justify-content:center;gap:8px;align-items:baseline;margin:30px 0 0}
+  .counter-num{font-size:clamp(3rem,8vw,5rem);font-weight:800;color:var(--green);line-height:1}
+  .counter-label{font-size:1.1rem;color:var(--text2)}
+
+  /* Nav */
+  nav{position:sticky;top:0;z-index:100;background:rgba(13,17,23,.92);backdrop-filter:blur(12px);
+    border-bottom:1px solid var(--border);padding:10px 20px;display:flex;justify-content:center;gap:24px;flex-wrap:wrap}
+  nav a{color:var(--text2);font-size:.8rem;transition:color .2s}
+  nav a:hover,nav a.active{color:var(--green);text-decoration:none}
+
+  /* Sections */
+  .container{max-width:1000px;margin:0 auto;padding:0 20px}
+  section{padding:60px 0}
+  section h2{font-size:1.5rem;color:#fff;margin-bottom:8px;display:flex;align-items:center;gap:10px}
+  section h2 .num{color:var(--green);font-size:.9rem;background:rgba(63,185,80,.12);
+    padding:2px 10px;border-radius:10px}
+  section .section-desc{color:var(--text2);margin-bottom:30px;font-size:.9rem}
+  .divider{border:none;border-top:1px solid var(--border);margin:0}
+
+  /* Cards */
+  .card{background:var(--bg2);border:1px solid var(--border);border-radius:10px;padding:28px;margin-bottom:20px;
+    transition:border-color .25s}
+  .card:hover{border-color:var(--green)}
+  .card h3{color:#fff;font-size:1.05rem;margin-bottom:6px}
+  .card .tag{display:inline-block;font-size:.7rem;padding:2px 8px;border-radius:6px;margin-right:6px;margin-bottom:8px}
+  .tag-lds{background:rgba(188,140,255,.15);color:var(--purple)}
+  .tag-barrier{background:rgba(210,153,34,.15);color:var(--orange)}
+  .tag-sched{background:rgba(88,166,255,.15);color:var(--blue)}
+  .card p{color:var(--text2);font-size:.85rem;margin-bottom:10px}
+  .card .analogy{color:var(--text);font-style:italic;font-size:.82rem;padding:10px 14px;
+    background:rgba(63,185,80,.06);border-left:3px solid var(--green);border-radius:0 6px 6px 0;margin:12px 0}
+  .card .effect{font-size:.8rem;color:var(--green);margin-top:8px}
+  .before-after{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:14px}
+  .ba-box{padding:10px 14px;border-radius:8px;font-size:.8rem}
+  .ba-before{background:rgba(248,81,73,.08);border:1px solid rgba(248,81,73,.25);color:var(--red)}
+  .ba-after{background:rgba(63,185,80,.08);border:1px solid rgba(63,185,80,.25);color:var(--green)}
+  .ba-box strong{display:block;font-size:.7rem;text-transform:uppercase;letter-spacing:1px;margin-bottom:4px;opacity:.7}
+
+  /* Diagram */
+  .diagram{background:var(--bg2);border:1px solid var(--border);border-radius:10px;padding:30px;overflow-x:auto}
+  .diagram-row{display:flex;align-items:center;gap:12px;margin:14px 0;flex-wrap:wrap}
+  .dbox{padding:10px 16px;border-radius:8px;font-size:.8rem;white-space:nowrap;text-align:center}
+  .dbox-gpu{background:rgba(88,166,255,.12);border:1px solid rgba(88,166,255,.3);color:var(--blue)}
+  .dbox-sqtt{background:rgba(188,140,255,.12);border:1px solid rgba(188,140,255,.3);color:var(--purple)}
+  .dbox-emu{background:rgba(210,153,34,.12);border:1px solid rgba(210,153,34,.3);color:var(--orange)}
+  .dbox-goal{background:rgba(63,185,80,.12);border:1px solid rgba(63,185,80,.3);color:var(--green);font-weight:700}
+  .arrow{color:var(--text2);font-size:1.2rem}
+
+  /* Tables */
+  .table-wrap{overflow-x:auto;margin:20px 0}
+  .table-wrap h4{color:var(--text);font-size:.95rem;margin-bottom:10px}
+  table{width:100%;border-collapse:collapse;font-size:.78rem}
+  th{background:var(--bg3);color:var(--text2);text-align:left;padding:8px 12px;
+    border-bottom:2px solid var(--border);font-weight:600;text-transform:uppercase;letter-spacing:.5px;font-size:.7rem}
+  td{padding:7px 12px;border-bottom:1px solid var(--border);color:var(--text)}
+  tr:hover td{background:rgba(63,185,80,.04)}
+  .match{color:var(--green);font-weight:700}
+  .mismatch{color:var(--red);font-weight:700}
+  .fixed{color:var(--orange)}
+
+  /* Files */
+  .file-item{display:flex;align-items:center;gap:12px;padding:12px 16px;background:var(--bg2);
+    border:1px solid var(--border);border-radius:8px;margin-bottom:8px;font-size:.82rem;flex-wrap:wrap}
+  .file-item .fname{color:var(--blue);flex:1;min-width:200px;word-break:break-all}
+  .file-item .fdesc{color:var(--text2);flex:2;min-width:200px}
+  .file-item .fstat{white-space:nowrap}
+  .fstat-add{color:var(--green)}
+  .fstat-del{color:var(--red)}
+  .fstat-new{background:rgba(63,185,80,.15);color:var(--green);padding:2px 8px;border-radius:4px;font-size:.7rem}
+  .cleanup-label{color:var(--text2);font-size:.8rem;margin:20px 0 10px;opacity:.7}
+
+  /* Timeline */
+  .timeline{position:relative;padding-left:30px}
+  .timeline::before{content:'';position:absolute;left:8px;top:4px;bottom:4px;width:2px;background:var(--border)}
+  .tl-item{position:relative;margin-bottom:28px}
+  .tl-item::before{content:'';position:absolute;left:-26px;top:6px;width:12px;height:12px;
+    border-radius:50%;border:2px solid var(--green);background:var(--bg)}
+  .tl-item:last-child::before{background:var(--green)}
+  .tl-day{color:var(--green);font-size:.8rem;font-weight:600;margin-bottom:4px}
+  .tl-text{color:var(--text2);font-size:.85rem}
+
+  /* Responsive */
+  @media(max-width:600px){
+    .before-after{grid-template-columns:1fr}
+    .diagram-row{flex-direction:column;align-items:flex-start}
+    .file-item{flex-direction:column;align-items:flex-start;gap:6px}
+    nav{gap:12px}
+  }
+
+  /* Animations */
+  @keyframes fadeUp{from{opacity:0;transform:translateY(20px)}to{opacity:1;transform:translateY(0)}}
+  .fade-in{opacity:0;animation:fadeUp .5s ease forwards}
+  .fade-in:nth-child(1){animation-delay:.1s}
+  .fade-in:nth-child(2){animation-delay:.2s}
+  .fade-in:nth-child(3){animation-delay:.3s}
+  .fade-in:nth-child(4){animation-delay:.4s}
+  .fade-in:nth-child(5){animation-delay:.5s}
+</style>
+</head>
+<body>
+
+<!-- Hero -->
+<div class="hero">
+  <h1>RDNA3 SQTT Emulator <span>Bounty</span></h1>
+  <p class="subtitle">Cycle-accurate GPU timing emulation — making software predictions match real AMD hardware traces perfectly.</p>
+  <span class="badge">$1,000 BOUNTY</span>
+  <div class="counter-wrap">
+    <span class="counter-num" id="counter">0</span>
+    <span class="counter-label">/ 22 instruction deltas matched (diff = 0)</span>
+  </div>
+</div>
+
+<!-- Nav -->
+<nav id="nav">
+  <a href="#bounty">The Bounty</a>
+  <a href="#sqtt">How SQTT Works</a>
+  <a href="#changes">5 Key Changes</a>
+  <a href="#results">Results</a>
+  <a href="#files">Files Changed</a>
+  <a href="#timeline">Timeline</a>
+</nav>
+
+<hr class="divider">
+
+<!-- Section 1: What is the Bounty -->
+<section id="bounty">
+<div class="container">
+  <h2><span class="num">01</span> What is the Bounty?</h2>
+  <p class="section-desc">Understanding the challenge we set out to solve.</p>
+
+  <div class="card">
+    <h3>Tinygrad Bounty — Cycle Accurate RDNA3 Emulator</h3>
+    <p>
+      <strong style="color:#fff">"Add SQTT support to emulator and have it match non-DRAM kernels on real hardware perfectly."</strong>
+    </p>
+    <p style="margin-top:14px">
+      AMD GPUs have a built-in hardware tracing feature called <strong style="color:var(--purple)">SQTT</strong> (Shader Queue Thread Tracing).
+      When enabled, it records the <em>exact clock cycle</em> when each instruction starts executing on the GPU — like a flight recorder for shader programs.
+    </p>
+    <p>
+      Tinygrad has a software emulator (<code style="color:var(--blue)">mockgpu</code>) that simulates GPU execution.
+      The bounty asks us to make this emulator's <strong style="color:#fff">timing predictions</strong> match the real GPU's
+      recorded timestamps <strong style="color:var(--green)">perfectly</strong> — zero difference — for all instructions
+      that don't touch main memory (DRAM).
+    </p>
+    <p style="margin-top:10px;color:var(--text2)">
+      Why exclude DRAM? Memory latency is variable and depends on cache state, DRAM controller queues, etc.
+      But <em>compute</em> and <em>LDS</em> (local shared memory) operations have deterministic timing — and that's what we need to nail.
+    </p>
+  </div>
+</div>
+</section>
+
+<hr class="divider">
+
+<!-- Section 2: How SQTT Works -->
+<section id="sqtt">
+<div class="container">
+  <h2><span class="num">02</span> How SQTT Works</h2>
+  <p class="section-desc">The hardware tracing pipeline vs. our emulator.</p>
+
+  <div class="diagram">
+    <div style="text-align:center;color:var(--text2);font-size:.75rem;margin-bottom:16px">▼ REAL HARDWARE PATH</div>
+    <div class="diagram-row">
+      <div class="dbox dbox-gpu">🖥️ GPU runs kernel</div>
+      <span class="arrow">→</span>
+      <div class="dbox dbox-sqtt">📡 SQTT HW records<br>timestamps per instruction</div>
+      <span class="arrow">→</span>
+      <div class="dbox dbox-gpu">📊 Binary trace blob<br>(cycle-accurate log)</div>
+    </div>
+
+    <div style="text-align:center;color:var(--text2);font-size:.75rem;margin:20px 0 16px">▼ EMULATOR PATH</div>
+    <div class="diagram-row">
+      <div class="dbox dbox-emu">⚙️ Emulator runs<br>same kernel</div>
+      <span class="arrow">→</span>
+      <div class="dbox dbox-emu">🧮 Timing model<br>predicts cycle counts</div>
+      <span class="arrow">→</span>
+      <div class="dbox dbox-emu">📊 Synthetic trace blob<br>(predicted log)</div>
+    </div>
+
+    <div style="text-align:center;color:var(--text2);font-size:.75rem;margin:20px 0 16px">▼ GOAL</div>
+    <div class="diagram-row" style="justify-content:center">
+      <div class="dbox dbox-goal">✅ diff(HW trace, EMU trace) = 0 for every instruction</div>
+    </div>
+  </div>
+</div>
+</section>
+
+<hr class="divider">
+
+<!-- Section 3: 5 Key Changes -->
+<section id="changes">
+<div class="container">
+  <h2><span class="num">03</span> The 5 Key Changes</h2>
+  <p class="section-desc">Each precision fix that brought us from "close" to "exact."</p>
+
+  <!-- Change 1 -->
+  <div class="card fade-in">
+    <span class="tag tag-lds">LDS</span>
+    <h3>1. LDS Service Cost: 5 → 6 cycles</h3>
+    <p>The LDS (Local Data Share) unit stays busy for <strong style="color:#fff">6 cycles</strong> per write operation, not 5 as previously modeled.</p>
+    <div class="analogy">
+      🏪 Think of it like a checkout lane — each customer (write) takes 6 seconds to process, not 5. If two customers arrive close together, the second waits longer than we thought.
+    </div>
+    <div class="before-after">
+      <div class="ba-box ba-before"><strong>Before</strong>LDS_SERVICE_CYCLES = 5<br>Wave 1 waitcnt1 = 37</div>
+      <div class="ba-box ba-after"><strong>After</strong>LDS_SERVICE_CYCLES = 6<br>Wave 1 waitcnt1 = 38 ✓ (HW = 38)</div>
+    </div>
+    <div class="effect">→ Fixed waitcnt1 delta for both waves</div>
+  </div>
+
+  <!-- Change 2 -->
+  <div class="card fade-in">
+    <span class="tag tag-barrier">BARRIER</span>
+    <h3>2. Barrier Release Latency: 10 → 6 cycles</h3>
+    <p>After all waves reach a synchronization barrier, it takes <strong style="color:#fff">6 cycles</strong> to release them (was 10).</p>
+    <div class="analogy">
+      🚦 The barrier is like a gate that opens once everyone arrives. We thought the gate mechanism took 10 cycles to open — turns out it's only 6.
+    </div>
+    <div class="before-after">
+      <div class="ba-box ba-before"><strong>Before</strong>BARRIER_RELEASE_LATENCY = 10<br>Timing skew in post-barrier instructions</div>
+      <div class="ba-box ba-after"><strong>After</strong>BARRIER_RELEASE_LATENCY = 6<br>Post-barrier timing distribution matches HW ✓</div>
+    </div>
+    <div class="effect">→ Fixed barrier timing distribution across waves</div>
+  </div>
+
+  <!-- Change 3 -->
+  <div class="card fade-in">
+    <span class="tag tag-lds">LDS</span>
+    <h3>3. LDS Write→Read Mode Switch: +1 cycle penalty</h3>
+    <p>When the LDS unit switches from writing to reading, there's a <strong style="color:#fff">1-cycle penalty</strong> for the direction change.</p>
+    <div class="analogy">
+      🚪 Like a revolving door that needs a moment to reverse direction. Going write→write or read→read is free, but switching modes costs 1 extra cycle.
+    </div>
+    <div class="before-after">
+      <div class="ba-box ba-before"><strong>Before</strong>No mode switch penalty<br>Wave 0 waitcnt2 = 31</div>
+      <div class="ba-box ba-after"><strong>After</strong>+1 cycle on write→read<br>Wave 0 waitcnt2 = 32 ✓ (HW = 32)</div>
+    </div>
+    <div class="effect">→ Fixed waitcnt2 for Wave 0</div>
+  </div>
+
+  <!-- Change 4 -->
+  <div class="card fade-in">
+    <span class="tag tag-sched">SCHEDULING</span>
+    <h3>4. VALU Burst Scheduling</h3>
+    <p>When a wave is executing consecutive math (VALU) instructions, it gets <strong style="color:#fff">priority to keep going</strong> rather than yielding to another wave.</p>
+    <div class="analogy">
+      🏃 Like a runner on a track who gets to keep their lane for a burst of sprints, rather than swapping lanes after every step. Prevents unnecessary context switches mid-calculation.
+    </div>
+    <div class="before-after">
+      <div class="ba-box ba-before"><strong>Before</strong>Round-robin every cycle<br>v_mov/v_cndmask interleaved wrong</div>
+      <div class="ba-box ba-after"><strong>After</strong>VALU burst priority<br>v_mov/v_cndmask/v_lshlrev matches HW ✓</div>
+    </div>
+    <div class="effect">→ Fixed VALU instruction distribution between waves</div>
+  </div>
+
+  <!-- Change 5 -->
+  <div class="card fade-in">
+    <span class="tag tag-barrier">BARRIER</span>
+    <h3>5. Barrier Arrival Penalty: +1 cycle for late wave</h3>
+    <p>The second wave to arrive at a barrier pays <strong style="color:#fff">1 extra cycle</strong> of overhead.</p>
+    <div class="analogy">
+      🚦 Like arriving at a red light — the first car was already there waiting, but you have to come to a stop too. That deceleration costs 1 cycle.
+    </div>
+    <div class="before-after">
+      <div class="ba-box ba-before"><strong>Before</strong>No arrival penalty<br>Wave 1 barrier delta = 1</div>
+      <div class="ba-box ba-after"><strong>After</strong>+1 for late arrival<br>Wave 1 barrier delta = 2 ✓ (HW = 2)</div>
+    </div>
+    <div class="effect">→ Fixed Wave 1 s_barrier delta</div>
+  </div>
+</div>
+</section>
+
+<hr class="divider">
+
+<!-- Section 4: Results -->
+<section id="results">
+<div class="container">
+  <h2><span class="num">04</span> Results</h2>
+  <p class="section-desc">Every single instruction matches. Zero diff across both waves.</p>
+
+  <div class="table-wrap">
+    <h4>Wave 0 — 11 instructions</h4>
+    <table>
+      <thead>
+        <tr><th>#</th><th>Instruction</th><th>HW Cycles</th><th>EMU Before</th><th>EMU After</th><th>Diff</th></tr>
+      </thead>
+      <tbody id="wave0"></tbody>
+    </table>
+  </div>
+
+  <div class="table-wrap">
+    <h4>Wave 1 — 11 instructions</h4>
+    <table>
+      <thead>
+        <tr><th>#</th><th>Instruction</th><th>HW Cycles</th><th>EMU Before</th><th>EMU After</th><th>Diff</th></tr>
+      </thead>
+      <tbody id="wave1"></tbody>
+    </table>
+  </div>
+</div>
+</section>
+
+<hr class="divider">
+
+<!-- Section 5: Files Changed -->
+<section id="files">
+<div class="container">
+  <h2><span class="num">05</span> Files Changed</h2>
+  <p class="section-desc">What was added or modified for the submission.</p>
+
+  <div class="file-item">
+    <span class="fname">test/mockgpu/amd/emu.py</span>
+    <span class="fdesc">Core emulator — timing model, SQTT encoder, scheduling</span>
+    <span class="fstat"><span class="fstat-add">+395</span></span>
+  </div>
+  <div class="file-item">
+    <span class="fname">test/amd/test_emulator_timing.py</span>
+    <span class="fdesc">New file — 6 tests (2 self-consistency + 4 HW comparison)</span>
+    <span class="fstat"><span class="fstat-new">NEW</span> <span class="fstat-add">+286</span></span>
+  </div>
+  <div class="file-item">
+    <span class="fname">.github/workflows/test.yml</span>
+    <span class="fdesc">CI step for timing validation</span>
+    <span class="fstat"><span class="fstat-add">+3</span></span>
+  </div>
+  <div class="file-item">
+    <span class="fname">test/amd/test_sqttmap.py</span>
+    <span class="fdesc">Fixed WAVEEND s_endpgm handling</span>
+    <span class="fstat"><span class="fstat-add">+10</span> / <span class="fstat-del">-11</span></span>
+  </div>
+  <div class="file-item">
+    <span class="fname">extra/sqtt/roc.py</span>
+    <span class="fdesc">Debug logging improvements</span>
+    <span class="fstat"><span class="fstat-add">+46</span> / <span class="fstat-del">-15</span></span>
+  </div>
+
+  <div class="cleanup-label">📦 Files to clean up before PR (not for submission):</div>
+  <div class="file-item" style="opacity:.5">
+    <span class="fname">BOUNTY_RDNA3_EMULATOR.md</span>
+    <span class="fdesc">Progress doc</span>
+  </div>
+  <div class="file-item" style="opacity:.5">
+    <span class="fname">amd-rdna3-isa.pdf</span>
+    <span class="fdesc">Reference doc</span>
+  </div>
+  <div class="file-item" style="opacity:.5">
+    <span class="fname">extra/sqtt/analyze_real.py</span>
+    <span class="fdesc">Debug script</span>
+  </div>
+  <div class="file-item" style="opacity:.5">
+    <span class="fname">extra/sqtt/check_reg_packets.py</span>
+    <span class="fdesc">Debug script</span>
+  </div>
+  <div class="file-item" style="opacity:.5">
+    <span class="fname">extra/sqtt/inspect_blob.py</span>
+    <span class="fdesc">Debug script</span>
+  </div>
+</div>
+</section>
+
+<hr class="divider">
+
+<!-- Section 6: Timeline -->
+<section id="timeline">
+<div class="container">
+  <h2><span class="num">06</span> Timeline</h2>
+  <p class="section-desc">Five days from research to exact match.</p>
+
+  <div class="timeline">
+    <div class="tl-item">
+      <div class="tl-day">Day 1 — Research &amp; Setup</div>
+      <div class="tl-text">Studied the bounty requirements. Forked tinygrad. Read RDNA3 ISA docs. Understood the SQTT binary trace format and how mockgpu works.</div>
+    </div>
+    <div class="tl-item">
+      <div class="tl-day">Day 2 — Core Implementation</div>
+      <div class="tl-text">Implemented the timing model in emu.py. Fixed SQTT blob encoding bugs. Got first traces generating from the emulator.</div>
+    </div>
+    <div class="tl-item">
+      <div class="tl-day">Day 3 — Calibration</div>
+      <div class="tl-text">Captured real hardware traces. Built comparison test framework. Calibrated timing constants (LDS latency, barrier costs) from real HW data.</div>
+    </div>
+    <div class="tl-item">
+      <div class="tl-day">Day 4 — Deep Analysis</div>
+      <div class="tl-text">Discovered LDS contention model (service cost, mode switching). Rebuilt barrier model. Found that GPU schedules 4 waves per SIMD, not just 2. Deep-dived into VALU scheduling.</div>
+    </div>
+    <div class="tl-item">
+      <div class="tl-day">Day 5 — Exact Match 🎯</div>
+      <div class="tl-text">Applied 5 precision changes. Achieved diff=0 across all 22 instruction deltas for both waves. Wrote tests. Ready for PR.</div>
+    </div>
+  </div>
+</div>
+</section>
+
+<!-- Footer -->
+<div style="text-align:center;padding:50px 20px;color:var(--text2);font-size:.75rem;border-top:1px solid var(--border)">
+  <p style="margin-bottom:6px">Built for the <a href="https://github.com/tinygrad/tinygrad">tinygrad</a> RDNA3 emulator bounty</p>
+  <p>22/22 deltas matched · 0 diff · cycle-accurate</p>
+</div>
+
+<script>
+// Animated counter
+(function(){
+  var target=22,el=document.getElementById('counter'),dur=1500,start=null;
+  function step(ts){
+    if(!start)start=ts;
+    var p=Math.min((ts-start)/dur,1);
+    var ease=1-Math.pow(1-p,3);
+    el.textContent=Math.round(ease*target);
+    if(p<1)requestAnimationFrame(step);
+  }
+  var obs=new IntersectionObserver(function(entries){
+    if(entries[0].isIntersecting){requestAnimationFrame(step);obs.disconnect();}
+  },{threshold:.5});
+  obs.observe(el);
+})();
+
+// Populate tables
+var w0=[
+  ['s_waitcnt','waitcnt0',1,1,1],
+  ['ds_store_b32','',1,1,1],
+  ['ds_store_b32','',1,1,1],
+  ['s_waitcnt','waitcnt1',38,37,38],
+  ['s_barrier','',1,1,1],
+  ['ds_load_b32','',1,1,1],
+  ['ds_load_b32','',1,1,1],
+  ['s_waitcnt','waitcnt2',32,31,32],
+  ['v_mov_b32','',33,34,33],
+  ['v_cndmask_b32','',1,1,1],
+  ['v_lshlrev_b32','',32,33,32]
+];
+var w1=[
+  ['s_waitcnt','waitcnt0',1,1,1],
+  ['ds_store_b32','',1,1,1],
+  ['ds_store_b32','',7,7,7],
+  ['s_waitcnt','waitcnt1',38,37,38],
+  ['s_barrier','',2,1,2],
+  ['ds_load_b32','',1,1,1],
+  ['ds_load_b32','',1,1,1],
+  ['s_waitcnt','waitcnt2',31,31,31],
+  ['v_mov_b32','',32,33,32],
+  ['v_cndmask_b32','',1,1,1],
+  ['v_lshlrev_b32','',29,30,29]
+];
+
+function fill(id,data){
+  var tb=document.getElementById(id);
+  data.forEach(function(r,i){
+    var name=r[1]?r[0]+' <span style="color:var(--text2);font-size:.7rem">('+r[1]+')</span>':r[0];
+    var hw=r[2],before=r[3],after=r[4],diff=hw-after;
+    var wasWrong=before!==hw;
+    var diffClass=diff===0?'match':'mismatch';
+    var beforeClass=wasWrong?'fixed':'';
+    tb.innerHTML+='<tr><td style="color:var(--text2)">'+(i+1)+'</td><td>'+name+'</td><td>'+hw+'</td>'
+      +'<td class="'+beforeClass+'">'+before+(wasWrong?' ✗':'')+'</td>'
+      +'<td class="match">'+after+'</td>'
+      +'<td class="'+diffClass+'">'+diff+'</td></tr>';
+  });
+}
+fill('wave0',w0);
+fill('wave1',w1);
+
+// Active nav highlight
+(function(){
+  var links=document.querySelectorAll('nav a');
+  var sections=[];
+  links.forEach(function(a){
+    var s=document.querySelector(a.getAttribute('href'));
+    if(s)sections.push({el:s,link:a});
+  });
+  window.addEventListener('scroll',function(){
+    var y=window.scrollY+80;
+    var cur=null;
+    sections.forEach(function(s){if(s.el.offsetTop<=y)cur=s;});
+    links.forEach(function(a){a.classList.remove('active');});
+    if(cur)cur.link.classList.add('active');
+  });
+})();
+</script>
+</body>
+</html>
