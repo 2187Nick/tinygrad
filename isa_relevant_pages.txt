@@ -1,0 +1,152 @@
+=== PAGE 15 ===
+"RDNA3" Instruction Set Architecture
+The RDNA3 device includes a data-parallel processor array, a command processor, a memory controller, and
+other logic (not shown). The command processor reads commands that the host has written to memory-
+mapped registers in the system-memory address space. The command processor sends hardware-generated
+interrupts to the host when the command is completed. The memory controller has direct access to all device
+memory and the host-specified areas of system memory. To satisfy read and write requests, the memory
+controller performs the functions of a direct-memory access (DMA) controller, including computing memory-
+address offsets based on the format of the requested data in memory.
+In the RDNA3 environment, a complete application includes two parts:
+ò a program running on the host processor, and
+ò programs, called shader programs or kernels, running on the RDNA3 processor.
+The RDNA3 programs are controlled by a driver running on the host that:
+ò sets internal base-address and other configuration registers,
+ò specifies the data domain on which the GPU is to operate,
+ò invalidates and flushes caches on the GPU, and
+ò causes the GPU to begin execution of a program.
+1.2.1. Work-group Processor (WGP)
+The processor array is the heart of the GPU. The array is organized as a set of work-group processor (WGP)
+pipelines, each independent from the others, that operate in parallel on streams of floating-point or integer
+data. The work-group processor pipelines can process data or, through the memory controller, transfer data to,
+or from, memory. Computation in a work-group processor pipeline can be made conditional. Outputs written
+to memory can also be made conditional.
+When it receives a request, the work-group processor pipeline loads instructions and data from memory,
+begins execution, and continues until the end of the kernel. As kernels are running, the GPU hardware
+automatically fetches instructions from memory into on-chip caches; software plays no role in this. Kernels
+can load data from off-chip memory into on-chip general-purpose registers (GPRs) and caches.
+The GPU devices can detect floating point exceptions and can generate interrupts to the host. In particular,
+they detect IEEE-754 floating-point exceptions in hardware; these can be recorded for post-execution analysis.
+The GPU hides memory latency by keeping track of potentially hundreds of work-items in various stages of
+execution, and by overlapping compute operations with memory-access operations.
+1.2.2. Data Sharing
+The processors may share data between different work-items. Data sharing can boost performance. The figure
+below shows the memory hierarchy that is available to each work-item. The actual number of GPRs may differ
+from what is shown in the image below.
+1.2. Hardware Overview 6 of 597
+
+=== PAGE 16 ===
+"RDNA3" Instruction Set Architecture
+Figure 2. Shared Memory Hierarchy
+1.2.2.1. Local Data Share (LDS)
+Each work-group processor (WGP) has a 128kB memory space that enables low-latency communication
+between work-items within a work-group, or the work-items within a wave; this is the local data share (LDS).
+This memory is configured with 64 banks, each with 512 entries of 4 bytes. The shared memory contains 64
+integer atomic units to enable fast, unordered atomic operations. This memory can be used as a software cache
+for predictable re-use of data, a data exchange machine for the work-items of a work-group, or as a cooperative
+way to enable efficient access to off-chip memory. A single work-group may allocate up to 64kB of LDS space.
+1.2.2.2. Global Data Share (GDS)
+The AMD RDNA3 devices use a 4kB global data share (GDS) memory that can be used by waves of a kernel on
+all WGPs. This memory provides 128 bytes per cycle of memory access to all the processing elements. It
+provides full access to any location for any processor. The shared memory contains 2 integer atomic units to
+enable fast, unordered atomic operations. This memory can be used as a software cache to store important
+control data for compute kernels, reduction operations, or a small global shared surface. Data can be
+preloaded from memory prior to kernel launch and written to memory after kernel completion. The GDS block
+contains support logic for unordered append/consume and domain launch ordered append/consume
+operations to buffers in memory. These dedicated circuits enable fast compaction of data or the creation of
+complex data structures in memory.
+1.2.3. Device Memory
+The AMD RDNA3 devices offer several methods for access to off-chip memory from the processing elements
+1.2. Hardware Overview 7 of 597
+
+=== PAGE 36 ===
+"RDNA3" Instruction Set Architecture
+Field Bit Description
+Pos
+EXCP 8:0 Status bits of which exceptions have occurred. These bits are sticky and
+accumulate results until the shader program clears them. These bits are
+accumulated regardless of the setting of EXCP_EN. These can be read or
+written without shader privilege.
+Bit Exception
+0 invalid
+1 Input Denormal
+2 Divide by zero
+3 overflow
+4 underflow
+5 inexact
+6 integer divide by zero
+7 address watch
+8 memory violation
+SAVECTX 10 A bit set by the host command via GRBM (or context-save/restore unit)
+indicating that this wave must jump to its trap handler and save its context.
+This bit should be cleared by the trap handler using S_SETREG.
+ILLEGAL_INST 11 An illegal instruction has been detected. If a trap handler is present and the
+wave is not in the trap handler: jump to the trap handler; Otherwise, send an
+interrupt and halt.
+ADDR_WATCH1-3 14:12 Indicates that address watch 1, 2 or 3 have been hit. [12]=addr_watch1.
+Addr_watch0 is indicated by the existing bit TRAPSTS.EXCP[7].
+BUFFER_OOB 15 Buffer Out Of Bounds indicator.
+Set when a buffer (MUBUF, MTBUF) instruction requests an address that is
+out of bounds. Does not cause a trap. Status bit is sticky.
+HOST_TRAP 16 Trap handler has been called to service a host trap. Trap may simultaneously
+have been called to handle other traps as well
+WAVE_START 17 Trap handler has been called before the first instruction of a new wave.
+WAVE_END 18 Trap handler has been called after the last instruction of a wave.
+TRAP_AFTER_INST 20 Trap handler has been called due to "trap after instruction" mode
+3.4.10. Time
+There are two methods for measuring time in the shader:
+ò "TIME" - measure cycles in graphics core clocks (20 bit counter)
+ò "REALTIME" - measure time based on a fixed frequency, constantly running clock (typically 100MHz),
+providing a 64bit value.
+Shader programs have access to a free-running clock counter in order to measure the duration of portions of a
+waveÆs execution. This counter can be read via: "S_GETREG S0, SHADER_CYCLES" and returns a 20-bit cycle
+counter value. This counter is not synchronized across different SIMDs and should only be used to measure
+time-delta within one wave. Reading the counter is handled through the SALU which has a typical latency of
+around 8 cycles.
+For measuring time between different waves or SIMDs, or to reference a clock that does not stop counting
+when the chip is idle, use "REALTIME". Real-time is a clock counter that comes from the clock-generator and
+runs at a constant speed, regardless of the shader or memory clock speeds. This counter can be read by:
+3.4. Wave State Registers 27 of 597
+
+=== PAGE 49 ===
+"RDNA3" Instruction Set Architecture
+ò SMEM
+ò VALU
+May also be in a clause ("clause internal instructions"):
+ò S_DELAY_ALU is legal inside a clause (internal) but is pointless. ** S_DELAY_ALU must not occur within a
+VALU clause.
+ò S_NOP and S_SLEEP may be used inside a clause, but the first instruction of the clause must be the clause-
+type instruction (ALU, memory).
+Cannot be in a clause:
+ò Instructions of a different type those of the clause type are illegal
+ò S_CLAUSE
+ò S_ENDPGM
+ò SALU, Export, branch, message, GDS, lds_param_load, lds_direct_load
+ò S_WAITCNT, S_WAIT_IDLE, S_WAIT_DEPCTR
+S_CLAUSE defines both the total length of the clause, and how often it should be broken to allow other waves a
+chance to go. For instance, it could say: clause of 16 instructions, but break after every 4th to allow a higher
+priority wave to get access to the execution unit. "clause internal instructions" count against this clause size.
+If a clause defines regular clause breaks (e.g. a clause of 16 instructions, but break every 4th), the first
+instruction of each sub-clause (every 4 instructions) must be of the clause-type, not a "clause internal
+instruction". Each group of instructions must have at least two of the clause-type of instructions. E.g. a clause of
+12 VALU instructions broken up into 4 groups of 3 instructions - each group of 3 instructions must have at least two
+VALU instructions. Clause groups with only 1 VALU instruction per group make no sense - they are no longer a clause.
+If the first instruction in a VALU clause has EXEC==0, then the clause is ignored and instructions are issued as
+if there were no clause. If the VALU clause starts with EXEC!=0 but EXEC becomes zero in the middle of the
+clause, the clause continues until the last instruction of the specified clause.
+If an S_DELAY_ALU is needed before starting a clause, the order must be:
+S_DELAY_ALU // must not come immediately after S_CLAUSE - that inst declares clause type
+S_CLAUSE
+<first instruction in clause>
+If the first instruction after S_CLAUSE is skipped (e.g. due to EXEC==0, or VMEM-load skipped due to EXEC==0
+and VMcnt==0) then then a clause is not started. Subsequent instructions within what would have been the
+clause that are not skipped and are still executed but individually, not as part of a clause.
+5.2.1. Clause Breaks
+The following conditions can break a clause:
+1. VALU exception (trap) breaks a VALU clause
+2. Host commands to wave (halt, resume, single step, etc) breaks all active clauses.
+Context-save breaks clauses of affected waves.
+This allows the host to read and write SGPRs & VGPRs while debugging. If clauses were not broken by host
+5.2. Instruction Clauses 40 of 597
+
+=== PAGE 52 ===
