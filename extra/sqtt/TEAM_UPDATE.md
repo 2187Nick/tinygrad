@@ -1,5 +1,41 @@
 # Team Update — Research for RDNA3 Emulator Bounty
 *Generated 2026-04-15 by Windows Copilot session for the GPU server team*
+*Updated with latest code changes*
+
+---
+
+## 0. Latest Code Changes (since TEAM_UPDATE was first created)
+
+### Committed & Pushed:
+1. **Width-aware `_mem_op()` classification** — stores now get correct issue cost by data width:
+   - `GLOBAL_STORE_B128` with saddr=NULL → `SGMEM_WR_6` (6 cycles, was 2)
+   - `DS_STORE_B128` → `LDS_WR_5` (5 cycles, was 2)
+   - `FLAT_STORE_B128` → `FLAT_WR_6` (6 cycles, was 3)
+   - Handles M0 addressing, 2ADDR DS ops, CDNA DWORDX naming
+2. **SMEM SGPR readiness scoreboard** — VALU instructions that read SGPRs loaded by SMEM now stall until data arrives. Pruned on s_waitcnt completion.
+3. **Lint fixes** — unused variable, f-string, line length issues fixed
+
+### Key remaining mismatches to investigate:
+- **SMEM pipe spacing**: GEMM startup shows delta=9 for SMEM→next instruction. Could be cache-hit latency (~8cy) or SQ scheduling. Need to correlate with kernel assembly.
+- **4 skipped kernels** (softmax, layernorm, reduce256, reduce_large) due to PC mismatch — need name-based comparison fallback.
+- **Multi-wave VMEM contention**: port serialization not modeled yet.
+
+### Upstream changes to merge:
+- `359b1582` — **EMU DPP support** (Apr 14, geohot): adds DPP instruction handling to emulator. Important for correctness.
+- `2450c8cb` — **rename to callify + fix mypy** (Apr 14, geohot): touches emu.py, may cause merge conflicts.
+- `1f26584b` — **viz/cli: cleanups from linter** (Apr 15, qazal): linter cleanups, may affect our files.
+- **REMU removed** (`16f50a40`, Apr 13): remu/Rust emulator removed from tree — confirms Python emulator is the focus.
+
+### SMEM latency analysis (investigated, NOT yet implemented):
+- Considered adding `_SMEM_SGPR_LATENCY=8` (L0 cache hit) separate from `_SMEM_LATENCY=200` (cache miss)
+- GEMM startup delta=9 at index 2 could be s_waitcnt stalling on SMEM loads that hit L0 (~8-9cy)
+- **Problem**: current `_SMEM_LATENCY=200` would produce 199-cycle stall, HW shows 9
+- **Reverted** — needs more investigation with actual kernel disassembly to confirm hypothesis
+- Key question: is the SMEM→s_waitcnt section classified as DRAM or non-DRAM? If DRAM, it's excluded from comparison.
+
+### CI status:
+- Two runs queued: `24476432353` (width-aware mem_op), `24476619820` (lint fixes)
+- Both still queued as of last check — GitHub Actions can be slow for fork repos
 
 ---
 
