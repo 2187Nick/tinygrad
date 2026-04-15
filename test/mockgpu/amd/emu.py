@@ -353,7 +353,7 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
       is_vopc, sgpr_w_regs, sgpr_r_regs = extra
       vgpr_w_regs, vgpr_r_regs, is_vopd = (), (), False
     else:
-      is_vopc, sgpr_w_regs, sgpr_r_regs, vgpr_w_regs, vgpr_r_regs, is_vopd = extra, (), (), (), (), False
+      sgpr_w_regs, sgpr_r_regs, vgpr_w_regs, vgpr_r_regs, is_vopd = (), (), (), (), False
 
     # Apply S_DELAY_ALU stall (time-based for VALU_DEP, fixed for TRANS32_DEP/SALU)
     ds = dly[i]
@@ -532,8 +532,8 @@ def _init_sqtt_encoder(entry_pc: int):
            ir4.VOP1, ir4.VOP2, ir4.VOP3, ir4.VOP3P, ir4.VOPC, ir4.VOPD, ir4.VOP3SD, ir4.VOP3_SDST, ir4.VOP1_SDST,
            irc.VOP1, irc.VOP2, irc.VOP3, irc.VOP3P, irc.VOPC, irc.VOP3SD, irc.VOP3_SDST)
   _VOPC = (ir3.VOPC, ir4.VOPC, irc.VOPC)  # comparison ops write VCC, not VGPR — no DS forwarding stall
-  _VOP3_SDST = (ir3.VOP3_SDST, ir3.VOP3SD, ir4.VOP3_SDST, ir4.VOP3SD, irc.VOP3_SDST, irc.VOP3SD)  # compares writing named SGPR (2 sources; src2 is don't-care)
-  _VOPD = (ir3.VOPD, ir4.VOPD)  # dual-issue: two ops, two VGPR dests — delay_alu can't cover both deps
+  _VOP3_SDST = (ir3.VOP3_SDST, ir3.VOP3SD, ir4.VOP3_SDST, ir4.VOP3SD, irc.VOP3_SDST, irc.VOP3SD)  # compare → named SGPR
+  _VOPD = (ir3.VOPD, ir4.VOPD)  # dual-issue: two ops, two VGPR dests
   _DS = (ir3.DS, ir4.DS, irc.DS)
   _GLOBAL = (ir3.GLOBAL, ir4.VGLOBAL, irc.GLOBAL)
   _FLAT = (ir3.FLAT, ir4.VFLAT, irc.FLAT)

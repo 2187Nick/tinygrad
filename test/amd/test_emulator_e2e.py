@@ -240,7 +240,6 @@ class TestEmulatorE2E(unittest.TestCase):
 
     for wave_idx, (emu_wid, hw_wid) in enumerate(zip(emu_wids, hw_wids)):
       emu_window = [(pc, t, typ) for pc, t, typ in emu_traces[emu_wid] if NON_DRAM_PC_START <= pc <= NON_DRAM_PC_END]
-      hw_window = [(pc, t, typ) for pc, t, typ in hw_traces[hw_wid] if NON_DRAM_PC_START <= pc <= NON_DRAM_PC_END]
       emu_deltas = _inter_deltas(emu_window)
       expected = HW_INTER_DELTAS[wave_idx]
       self.assertEqual(emu_deltas, expected, f"wave {wave_idx}: EMU deltas {emu_deltas} != HW {expected}")
@@ -377,7 +376,7 @@ class TestEmulatorE2E(unittest.TestCase):
         print(f"  wave {wid}: barrier@{barrier_times[wid]} resume@{resume_times[wid]} gap_from_last={gap}")
         self.assertGreaterEqual(gap, 0, f"wave {wid}: resumed before last barrier")
         self.assertLessEqual(gap, 40, f"wave {wid}: post-barrier gap too large ({gap} cycles)")
-      print(f"  barrier sync OK ✓")
+      print("  barrier sync OK ✓")
     else:
       self.skipTest("could not identify barrier in trace")
 
