@@ -80,7 +80,7 @@ The latest commit added:
 ---
 
 ### 🟢 discover_ops.py — VERY USEFUL, resurrect it
-**Source:** tinygrad PR #14960 (merged Feb 2026, later removed in PR #15279)
+**Source:** upstream discover_ops.py (merged Feb 2026, later removed)
 
 **What it does:** Generates a "mega kernel" containing **every ALU and memory instruction** in the RDNA3 ISA. Uses the Kernel DSL to auto-assign registers, skip dangerous ops (barriers, atomics, PC mutations), and execute via `Tensor.custom_kernel()`.
 
@@ -105,8 +105,8 @@ The latest commit added:
 
 ---
 
-### 🟡 PR #15473 (sqtt: add cycle count to rdna3 enums) — ALREADY INTEGRATED
-**Source:** https://github.com/tinygrad/tinygrad/pull/15473
+### 🟡 InstOp cycle count enums (sqtt: add cycle count to rdna3 enums) — ALREADY INTEGRATED
+**Source:** upstream sqtt.py commit from qazal (March 2026)
 
 **What it does:** Renames `InstOp` enum values to embed cycle counts: `LDS_STORE` → `LDS_WR_2` (2 cycles), `GLOBAL_STORE_128` → `SGMEM_WR_6` (6 cycles), `VALU_TRANS` → `VALUT_4` (4 cycles), etc.
 
