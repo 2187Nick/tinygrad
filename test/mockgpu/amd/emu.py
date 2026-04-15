@@ -200,6 +200,7 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
   vopd_pipe_avail = [0] * n      # VOPD dual-issue: when VOPD unit is free for next VOPD instruction
   valu_issue_hist: list[list[int]] = [[] for _ in range(n)]  # last 4 non-trans VALU issue times (for time-based delay_alu)
   sgpr_write_time: list[dict[int, int]] = [{} for _ in range(n)]  # SGPR last VALU-write cycle (offset → cycle)
+  smem_sgpr_ready: list[dict[int, int]] = [{} for _ in range(n)]  # SGPR idx → cycle when SMEM result available
   vgpr_ready: list[dict[int, int]] = [{} for _ in range(n)]  # VGPR readiness scoreboard (reg_idx → cycle when result available)
   vgpr_write_time: list[dict[int, int]] = [{} for _ in range(n)]  # VGPR last VALU-write cycle (reg_idx → issue cycle) for VMEM addr forwarding
   has_delay_alu = [False] * n     # per-wave: has any s_delay_alu been seen (controls VGPR scoreboard activation)
@@ -259,6 +260,7 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
         # Prune completed ops
         lgkm_pend[i] = [c for c in lgkm_pend[i] if c > stall_until]
         vm_pend[i] = [c for c in vm_pend[i] if c > stall_until]
+        smem_sgpr_ready[i] = {r: c for r, c in smem_sgpr_ready[i].items() if c > stall_until}
         continue
       if cat == 'depctr':
         # s_waitcnt_depctr: stall until pending multi-cycle VALU (transcendental) ops complete
@@ -357,7 +359,7 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
       is_vopc, sgpr_w_regs, sgpr_r_regs = extra
       vgpr_w_regs, vgpr_r_regs, is_vopd = (), (), False
     else:
-      is_vopc, sgpr_w_regs, sgpr_r_regs, vgpr_w_regs, vgpr_r_regs, is_vopd = extra, (), (), (), (), False
+      sgpr_w_regs, sgpr_r_regs, vgpr_w_regs, vgpr_r_regs, is_vopd = (), (), (), (), False
 
     # Apply S_DELAY_ALU stall (time-based for VALU_DEP, fixed for TRANS32_DEP/SALU)
     ds = dly[i]
@@ -386,6 +388,8 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
       for r in sgpr_r_regs:
         if r in sgpr_write_time[i]:
           issue_cycle = max(issue_cycle, sgpr_write_time[i][r] + _SGPR_LATENCY)
+        if r in smem_sgpr_ready[i]:
+          issue_cycle = max(issue_cycle, smem_sgpr_ready[i][r])
 
     # EXEC write-to-read dependency: v_cmpx writes EXEC, s_cbranch_execz/nz must wait for EXEC propagation
     if cat == 'branch' and extra is True:  # extra=True means reads_exec
@@ -427,7 +431,10 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
     issue_cost = _get_issue_cost(pkt_cls, kwargs)
 
     # Track memory operation completion times
-    if cat == 'smem': lgkm_pend[i].append(issue_cycle + _SMEM_LATENCY)
+    if cat == 'smem':
+      lgkm_pend[i].append(issue_cycle + _SMEM_LATENCY)
+      if extra:
+        for r in extra: smem_sgpr_ready[i][r] = issue_cycle + _SMEM_LATENCY
     elif cat in ('ds_rd', 'ds_wr'):
       if cat == 'ds_wr':  # LDS writes serialize through shared unit
         lds_start = max(issue_cycle, cu_lds_available)
@@ -551,8 +558,8 @@ def _init_sqtt_encoder(entry_pc: int):
            ir4.VOP1, ir4.VOP2, ir4.VOP3, ir4.VOP3P, ir4.VOPC, ir4.VOPD, ir4.VOP3SD, ir4.VOP3_SDST, ir4.VOP1_SDST,
            irc.VOP1, irc.VOP2, irc.VOP3, irc.VOP3P, irc.VOPC, irc.VOP3SD, irc.VOP3_SDST)
   _VOPC = (ir3.VOPC, ir4.VOPC, irc.VOPC)  # comparison ops write VCC, not VGPR — no DS forwarding stall
-  _VOP3_SDST = (ir3.VOP3_SDST, ir3.VOP3SD, ir4.VOP3_SDST, ir4.VOP3SD, irc.VOP3_SDST, irc.VOP3SD)  # compares writing named SGPR (2 sources; src2 is don't-care)
-  _VOPD = (ir3.VOPD, ir4.VOPD)  # dual-issue: two ops, two VGPR dests — delay_alu can't cover both deps
+  _VOP3_SDST = (ir3.VOP3_SDST, ir3.VOP3SD, ir4.VOP3_SDST, ir4.VOP3SD, irc.VOP3_SDST, irc.VOP3SD)  # compare → named SGPR
+  _VOPD = (ir3.VOPD, ir4.VOPD)  # dual-issue: two ops, two VGPR dests
   _DS = (ir3.DS, ir4.DS, irc.DS)
   _GLOBAL = (ir3.GLOBAL, ir4.VGLOBAL, irc.GLOBAL)
   _FLAT = (ir3.FLAT, ir4.VFLAT, irc.FLAT)
@@ -595,12 +602,23 @@ def _init_sqtt_encoder(entry_pc: int):
     if _VALUT_4_RE.search(op_name): return InstOp.VALUT_4
     return None
 
-  def _mem_op(t, op_name: str) -> InstOp:
-    is_store = "STORE" in op_name
-    if issubclass(t, _DS): return InstOp.LDS_WR_2 if is_store else InstOp.LDS_RD
-    if issubclass(t, _GLOBAL): return InstOp.SGMEM_WR_2 if is_store else InstOp.SGMEM_RD_1
-    if issubclass(t, _FLAT): return InstOp.FLAT_WR_3 if is_store else InstOp.FLAT_RD_2
-    if issubclass(t, _SCRATCH): return InstOp.FLAT_WR_3 if is_store else InstOp.FLAT_RD_2
+  def _mem_op(t, op_name: str, inst=None) -> InstOp:
+    is_store = "STORE" in op_name or "WRITE" in op_name
+    m = re.search(r'_B(\d+)', op_name)
+    if m: dwords = max(1, int(m.group(1)) // 32)
+    elif 'DWORDX' in op_name: dwords = int(re.search(r'DWORDX(\d)', op_name).group(1))
+    elif 'BLOCK' in op_name: dwords = 4
+    else: dwords = 1
+    if issubclass(t, _DS):
+      if not is_store: return InstOp.LDS_RD
+      if any(x in op_name for x in ("APPEND", "CONSUME", "ADDTID")): return InstOp.LDS_WR_1
+      return InstOp[f"LDS_WR_{1 + dwords + (1 if '2ADDR' in op_name else 0)}"]
+    if issubclass(t, _GLOBAL):
+      saddr_null = inst is None or not hasattr(inst, 'saddr') or inst.saddr.offset in (124, 125)
+      if not is_store: return InstOp.SGMEM_RD_2 if saddr_null else InstOp.SGMEM_RD_1
+      return InstOp[f"SGMEM_WR_{1 + dwords + (1 if saddr_null else 0)}"]
+    if issubclass(t, _FLAT): return InstOp[f"FLAT_WR_{2 + dwords}"] if is_store else InstOp.FLAT_RD_2
+    if issubclass(t, _SCRATCH): return InstOp[f"FLAT_WR_{2 + dwords}"] if is_store else InstOp.FLAT_RD_2
     return InstOp.SALU
 
   # Deferred event storage: wave_id -> [(pkt_cls_or_None, kwargs, category, extra)]
@@ -702,11 +720,18 @@ def _init_sqtt_encoder(entry_pc: int):
       return
 
     if issubclass(inst_type, _SMEM):
-      events.append((INST, {'wave': w, 'op': InstOp.SMEM_RD}, 'smem', None))
+      smem_dst = ()
+      if hasattr(inst, 'sdata'):
+        o = getattr(inst.sdata, 'offset', -1)
+        if 0 <= o <= 106:
+          m = re.search(r'_B(\d+)', op_name)
+          n_sgprs = int(m.group(1)) // 32 if m else 1
+          smem_dst = tuple(range(o, o + n_sgprs))
+      events.append((INST, {'wave': w, 'op': InstOp.SMEM_RD}, 'smem', smem_dst or None))
       return
 
     # DS / GLOBAL / FLAT / SCRATCH memory operations
-    mem_op_val = _mem_op(inst_type, op_name)
+    mem_op_val = _mem_op(inst_type, op_name, inst)
     is_store = "STORE" in op_name
     if issubclass(inst_type, _DS): cat = 'ds_wr' if is_store else 'ds_rd'
     elif issubclass(inst_type, (*_GLOBAL, *_FLAT, *_SCRATCH)): cat = 'vmem_wr' if is_store else 'vmem_rd'
