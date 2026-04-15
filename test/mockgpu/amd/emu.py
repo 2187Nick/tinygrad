@@ -142,6 +142,7 @@ _FIRST_INST_GAP = 2
 _INSTID_BASE_STALLS = (0, 4, 3, 2, 1, 0, 0, 0, 1, 1, 2, 3)
 _TRANS_PIPE_CYCLES = 4  # trans ALU pipeline occupancy: trans→trans must wait 4 cycles; trans→VALU = 1 cycle (parallel)
 _VOPD_PIPE_CYCLES = 2  # VOPD dual-issue occupancy: consecutive VOPDs need 2 extra cycles (HW validated: exp_chain [16]/[17])
+_EXEC_WRITE_LATENCY = 24  # v_cmpx writes EXEC; s_cbranch_execz must wait for EXEC propagation (VALU→SQ path, HW validated: layernorm)
 def _instid_stall(instid: int, n_waves: int) -> int:
   base = _INSTID_BASE_STALLS[min(instid, 11)]
   return max(0, base - (n_waves - 1)) if 1 <= instid <= 4 else base
@@ -199,6 +200,7 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
   vgpr_ready: list[dict[int, int]] = [{} for _ in range(n)]  # VGPR readiness scoreboard (reg_idx → cycle when result available)
   vgpr_write_time: list[dict[int, int]] = [{} for _ in range(n)]  # VGPR last VALU-write cycle (reg_idx → issue cycle) for VMEM addr forwarding
   has_delay_alu = [False] * n     # per-wave: has any s_delay_alu been seen (controls VGPR scoreboard activation)
+  exec_write_time = [0] * n      # per-wave: last cycle when EXEC was written (by v_cmpx)
   consecutive_selffwd_vgprs = [0] * n  # count of VGPRs written by consecutive self-forwarding non-VOPC VALUs
   consecutive_vgprs_written = [0] * n  # count of VGPRs written by consecutive non-VOPC VALUs (any kind)
   cu_lds_available = 0        # shared LDS unit contention
@@ -381,6 +383,10 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
         if r in sgpr_write_time[i]:
           issue_cycle = max(issue_cycle, sgpr_write_time[i][r] + _SGPR_LATENCY)
 
+    # EXEC write-to-read dependency: v_cmpx writes EXEC, s_cbranch_execz/nz must wait for EXEC propagation
+    if cat == 'branch' and extra is True:  # extra=True means reads_exec
+      issue_cycle = max(issue_cycle, exec_write_time[i] + _EXEC_WRITE_LATENCY)
+
     # VGPR readiness: auto-apply VALU_DEP_1 when no delay_alu present (HW interlock handles RAW deps without hints)
     if not has_delay_alu[i] and cat == 'valu' and vgpr_r_regs:
       vh = valu_issue_hist[i]
@@ -479,6 +485,10 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
     if cat == 'valu' and not _is_trans and sgpr_w_regs:
       for r in sgpr_w_regs: sgpr_write_time[i][r] = issue_cycle
 
+    # Track EXEC write time for v_cmpx → s_cbranch_execz/nz dependency
+    if cat == 'valu' and kwargs.get('op') == InstOp.VALU1_WR_EXEC:
+      exec_write_time[i] = issue_cycle
+
     # Track VGPR write readiness: all VALU writes update scoreboard for RAW dependency tracking
     if cat == 'valu' and not _is_trans and vgpr_w_regs:
       vr = vgpr_ready[i]
@@ -548,6 +558,7 @@ def _init_sqtt_encoder(entry_pc: int):
   _SOPP_BRANCH = {SOPPOp3.S_BRANCH.value, SOPPOp3.S_CBRANCH_SCC0.value, SOPPOp3.S_CBRANCH_SCC1.value,
                   SOPPOp3.S_CBRANCH_VCCZ.value, SOPPOp3.S_CBRANCH_VCCNZ.value,
                   SOPPOp3.S_CBRANCH_EXECZ.value, SOPPOp3.S_CBRANCH_EXECNZ.value}
+  _SOPP_BRANCH_EXEC = {SOPPOp3.S_CBRANCH_EXECZ.value, SOPPOp3.S_CBRANCH_EXECNZ.value}
 
   # RDNA3-only SOPK waitcnt instructions (RDNA4 uses SOPP s_wait_* instead)
   _SOPK = (ir3.SOPK, ir4.SOPK, irc.SOPK)
@@ -611,7 +622,8 @@ def _init_sqtt_encoder(entry_pc: int):
         events.append((INST, {'wave': w, 'op': InstOp.BARRIER}, 'barrier', None))
         return
       if inst_op in _SOPP_BRANCH:
-        events.append((INST, {'wave': w, 'op': InstOp.JUMP if branch_taken else InstOp.JUMP_NO}, 'branch', None))
+        reads_exec = inst_op in _SOPP_BRANCH_EXEC
+        events.append((INST, {'wave': w, 'op': InstOp.JUMP if branch_taken else InstOp.JUMP_NO}, 'branch', reads_exec))
         return
       events.append((INST, {'wave': w, 'op': InstOp.SALU}, 'salu', None))
       return
