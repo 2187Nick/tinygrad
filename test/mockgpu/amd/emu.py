@@ -144,7 +144,7 @@ _TRANS_PIPE_CYCLES = 4  # trans ALU pipeline occupancy: trans→trans must wait 
 _VOPD_PIPE_CYCLES = 2  # VOPD dual-issue occupancy: consecutive VOPDs need 2 extra cycles (HW validated: exp_chain [16]/[17])
 _EXEC_WRITE_LATENCY = 24  # v_cmpx writes EXEC; s_cbranch_execz must wait for EXEC propagation (VALU→SQ path, HW validated: layernorm)
 _LDS_B128_EXTRA = 5       # extra LDS latency for b128 loads (4 VGPR dwords): HW validated layernorm [18] diff=-5
-_LDS_B128_VGPR_STAGGER = 4 # upper 2 VGPRs of b128 load available 4 cycles after lower 2 (HW validated: layernorm [26],[27] diff=-4)
+_LDS_B128_VGPR_STAGGER = 17 # upper 2 VGPRs of SERIALIZED b128 load available 17cy after lds_complete (HW validated: layernorm [26] v[6] delta=9)
 _LDS_B128_RD_SERVICE = 19  # b128 read LDS occupancy: consecutive b128 reads serialized (HW: 2nd load +18cy, validated layernorm pair1/pair2)
 def _instid_stall(instid: int, n_waves: int) -> int:
   base = _INSTID_BASE_STALLS[min(instid, 11)]
@@ -202,6 +202,7 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
   sgpr_write_time: list[dict[int, int]] = [{} for _ in range(n)]  # SGPR last VALU-write cycle (offset → cycle)
   smem_sgpr_ready: list[dict[int, int]] = [{} for _ in range(n)]  # SGPR idx → cycle when SMEM result available
   vgpr_ready: list[dict[int, int]] = [{} for _ in range(n)]  # VGPR readiness scoreboard (reg_idx → cycle when result available)
+  vgpr_b128_taint: list[set[int]] = [set() for _ in range(n)]  # VGPRs tainted by serialized b128 LDS read (upper VGPRs cause 9cy VALU latency cascade)
   vgpr_write_time: list[dict[int, int]] = [{} for _ in range(n)]  # VGPR last VALU-write cycle (reg_idx → issue cycle) for VMEM addr forwarding
   has_delay_alu = [False] * n     # per-wave: has any s_delay_alu been seen (controls VGPR scoreboard activation)
   exec_write_time = [0] * n      # per-wave: last cycle when EXEC was written (by v_cmpx)
@@ -450,14 +451,20 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
           lds_rd_start = max(issue_cycle, cu_lds_rd_available)
           lds_complete = lds_rd_start + _LDS_RD_LATENCY + mode_switch_penalty + width_extra
           cu_lds_rd_available = issue_cycle + _LDS_B128_RD_SERVICE
+          # b128 VGPR stagger: upper 2 VGPRs of SERIALIZED b128 loads have extended latency
+          # Only the 2nd+ b128 load in a consecutive pair gets stagger (HW validated: layernorm 1st load v[2],v[3] no stagger)
+          is_serialized = (lds_rd_start > issue_cycle)  # load was delayed waiting for LDS port
+          if ds_dest_base is not None:
+            if is_serialized:
+              vr = vgpr_ready[i]
+              for off in (2, 3):
+                vr[ds_dest_base + off] = max(vr.get(ds_dest_base + off, 0), lds_complete + _LDS_B128_VGPR_STAGGER)
+                vgpr_b128_taint[i].add(ds_dest_base + off)
+            else:
+              for off in range(4): vgpr_b128_taint[i].discard(ds_dest_base + off)  # clear taint on non-serialized b128 load
         else:
           lds_complete = issue_cycle + _LDS_RD_LATENCY + mode_switch_penalty + width_extra
         lgkm_pend[i].append(lds_complete)
-        # b128 VGPR stagger: upper 2 VGPRs available later than lower 2
-        if ds_bytes >= 16 and ds_dest_base is not None:
-          vr = vgpr_ready[i]
-          for off in (2, 3):
-            vr[ds_dest_base + off] = max(vr.get(ds_dest_base + off, 0), lds_complete + _LDS_B128_VGPR_STAGGER)
         if cu_lds_last_was_write: cu_lds_last_was_write = False
     elif cat == 'vmem_rd':
       vm_pend[i].append(issue_cycle + _VMEM_LATENCY)
@@ -517,7 +524,9 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
       vr = vgpr_ready[i]
       # VALU with no VGPR reads (e.g. v_mov with constant) has 1-cycle latency (no register file read needed)
       lat = 1 if not vgpr_r_regs else 5
-      for r in vgpr_w_regs: vr[r] = issue_cycle + lat
+      for r in vgpr_w_regs:
+        vr[r] = issue_cycle + lat
+        vgpr_b128_taint[i].discard(r)  # VALU overwrite clears b128 taint
 
     # Track per-VGPR write times for VMEM address forwarding (all non-trans VALU writes)
     if cat == 'valu' and not _is_trans and vgpr_w_regs:
