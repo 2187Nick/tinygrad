@@ -202,7 +202,7 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
   sgpr_write_time: list[dict[int, int]] = [{} for _ in range(n)]  # SGPR last VALU-write cycle (offset → cycle)
   smem_sgpr_ready: list[dict[int, int]] = [{} for _ in range(n)]  # SGPR idx → cycle when SMEM result available
   vgpr_ready: list[dict[int, int]] = [{} for _ in range(n)]  # VGPR readiness scoreboard (reg_idx → cycle when result available)
-  vgpr_b128_taint: list[set[int]] = [set() for _ in range(n)]  # VGPRs tainted by serialized b128 LDS read (upper VGPRs cause 9cy VALU latency cascade)
+  vgpr_slow_fresh_until: list[dict[int, int]] = [{} for _ in range(n)]  # VGPR slow-freshness: consuming before this cycle yields 9cy VALU latency
   vgpr_write_time: list[dict[int, int]] = [{} for _ in range(n)]  # VGPR last VALU-write cycle (reg_idx → issue cycle) for VMEM addr forwarding
   has_delay_alu = [False] * n     # per-wave: has any s_delay_alu been seen (controls VGPR scoreboard activation)
   exec_write_time = [0] * n      # per-wave: last cycle when EXEC was written (by v_cmpx)
@@ -455,13 +455,15 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
           # Only the 2nd+ b128 load in a consecutive pair gets stagger (HW validated: layernorm 1st load v[2],v[3] no stagger)
           is_serialized = (lds_rd_start > issue_cycle)  # load was delayed waiting for LDS port
           if ds_dest_base is not None:
+            sf = vgpr_slow_fresh_until[i]
             if is_serialized:
               vr = vgpr_ready[i]
               for off in (2, 3):
-                vr[ds_dest_base + off] = max(vr.get(ds_dest_base + off, 0), lds_complete + _LDS_B128_VGPR_STAGGER)
-                vgpr_b128_taint[i].add(ds_dest_base + off)
-            else:
-              for off in range(4): vgpr_b128_taint[i].discard(ds_dest_base + off)  # clear taint on non-serialized b128 load
+                stagger_ready = lds_complete + _LDS_B128_VGPR_STAGGER
+                vr[ds_dest_base + off] = max(vr.get(ds_dest_base + off, 0), stagger_ready)
+                sf[ds_dest_base + off] = stagger_ready + 4  # slow-freshness window: consuming within 4cy of ready yields 9cy VALU latency
+            # Clear slow-freshness on all b128 VGPRs (fresh data overwrites any prior slow state)
+            for off in range(4): sf.pop(ds_dest_base + off, None) if not is_serialized or off < 2 else None
         else:
           lds_complete = issue_cycle + _LDS_RD_LATENCY + mode_switch_penalty + width_extra
         lgkm_pend[i].append(lds_complete)
@@ -489,10 +491,14 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
 
     # Track last VALU for DS/VMEM forwarding stall (skip VOPC/VOP3_SDST — writes VCC/SGPR not VGPR)
     if cat == 'valu' and vgpr_w_regs:
-      valu_ds_wr_deadline[i] = issue_cycle + _VALU_DS_WR_FORWARD
-      valu_ds_rd_deadline[i] = issue_cycle + _VALU_DS_RD_FORWARD
-      valu_vmem_wr_deadline[i] = issue_cycle + _VALU_VMEM_WR_FORWARD
-      valu_vmem_rd_deadline[i] = issue_cycle + _VALU_VMEM_RD_FORWARD
+      # Slow-fresh VALU extends forwarding deadlines: result arrives later, shifting all forwarding paths
+      # The extension is 2×(lat-5) because the SQ pipeline detects both the issue stall AND the late write-back
+      _slow_consume = not _is_trans and vgpr_r_regs and any(issue_cycle <= vgpr_slow_fresh_until[i].get(r, 0) for r in vgpr_r_regs)
+      _slow_extra = 8 if _slow_consume else 0
+      valu_ds_wr_deadline[i] = issue_cycle + _VALU_DS_WR_FORWARD + _slow_extra
+      valu_ds_rd_deadline[i] = issue_cycle + _VALU_DS_RD_FORWARD + _slow_extra
+      valu_vmem_wr_deadline[i] = issue_cycle + _VALU_VMEM_WR_FORWARD + _slow_extra
+      valu_vmem_rd_deadline[i] = issue_cycle + _VALU_VMEM_RD_FORWARD + _slow_extra
       # Track consecutive VGPR write patterns for VMEM store forwarding optimization
       n_written = len(set(vgpr_w_regs))
       is_selffwd = bool(vgpr_r_regs and set(vgpr_w_regs) & set(vgpr_r_regs))
@@ -522,11 +528,18 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
     # Track VGPR write readiness: all VALU writes update scoreboard for RAW dependency tracking
     if cat == 'valu' and not _is_trans and vgpr_w_regs:
       vr = vgpr_ready[i]
+      sf = vgpr_slow_fresh_until[i]
+      # Check if any source VGPR is "slow-fresh" — consumed while register file data is still settling from b128 stagger
+      slow_consume = vgpr_r_regs and any(issue_cycle <= sf.get(r, 0) for r in vgpr_r_regs)
       # VALU with no VGPR reads (e.g. v_mov with constant) has 1-cycle latency (no register file read needed)
-      lat = 1 if not vgpr_r_regs else 5
+      if not vgpr_r_regs: lat = 1
+      elif slow_consume: lat = 9  # slow-fresh source: result write-back delayed (HW validated: layernorm [27],[39],[40])
+      else: lat = 5
       for r in vgpr_w_regs:
         vr[r] = issue_cycle + lat
-        vgpr_b128_taint[i].discard(r)  # VALU overwrite clears b128 taint
+        # Propagate slow-freshness: if this VALU is slow, its result is also slow-fresh for a window
+        if lat == 9: sf[r] = vr[r] + 4
+        else: sf.pop(r, None)  # clean VALU clears slow-freshness
 
     # Track per-VGPR write times for VMEM address forwarding (all non-trans VALU writes)
     if cat == 'valu' and not _is_trans and vgpr_w_regs:
