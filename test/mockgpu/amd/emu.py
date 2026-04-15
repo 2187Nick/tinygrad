@@ -144,6 +144,8 @@ _TRANS_PIPE_CYCLES = 4  # trans ALU pipeline occupancy: trans→trans must wait 
 _VOPD_PIPE_CYCLES = 2  # VOPD dual-issue occupancy: consecutive VOPDs need 2 extra cycles (HW validated: exp_chain [16]/[17])
 _EXEC_WRITE_LATENCY = 24  # v_cmpx writes EXEC; s_cbranch_execz must wait for EXEC propagation (VALU→SQ path, HW validated: layernorm)
 _LDS_B128_EXTRA = 5       # extra LDS latency for b128 loads (4 VGPR dwords): HW validated layernorm [18] diff=-5
+_LDS_B128_VGPR_STAGGER = 4 # upper 2 VGPRs of b128 load available 4 cycles after lower 2 (HW validated: layernorm [26],[27] diff=-4)
+_LDS_B128_RD_SERVICE = 19  # b128 read LDS occupancy: consecutive b128 reads serialized (HW: 2nd load +18cy, validated layernorm pair1/pair2)
 def _instid_stall(instid: int, n_waves: int) -> int:
   base = _INSTID_BASE_STALLS[min(instid, 11)]
   return max(0, base - (n_waves - 1)) if 1 <= instid <= 4 else base
@@ -206,6 +208,7 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
   consecutive_vgprs_written = [0] * n  # count of VGPRs written by consecutive non-VOPC VALUs (any kind)
   cu_lds_available = 0        # shared LDS unit contention
   cu_lds_last_was_write = False
+  cu_lds_rd_available = 0     # b128 read LDS serialization: next b128 read completion delayed
   burst_wave = -1             # VALU burst: wave in consecutive VALU sequence
 
   timed: list[tuple[int, int, type, dict]] = []
@@ -433,9 +436,21 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
         cu_lds_last_was_write = True
       else:
         mode_switch_penalty = 1 if cu_lds_last_was_write else 0  # write→read direction switch
-        ds_bytes = extra if extra is not None else 4
+        ds_bytes, ds_dest_base = (extra if extra is not None else (4, None))
         width_extra = _LDS_B128_EXTRA if ds_bytes >= 16 else 0
-        lgkm_pend[i].append(issue_cycle + _LDS_RD_LATENCY + mode_switch_penalty + width_extra)
+        # b128 reads serialize through LDS: 2nd consecutive b128 completion delayed
+        if ds_bytes >= 16:
+          lds_rd_start = max(issue_cycle, cu_lds_rd_available)
+          lds_complete = lds_rd_start + _LDS_RD_LATENCY + mode_switch_penalty + width_extra
+          cu_lds_rd_available = issue_cycle + _LDS_B128_RD_SERVICE
+        else:
+          lds_complete = issue_cycle + _LDS_RD_LATENCY + mode_switch_penalty + width_extra
+        lgkm_pend[i].append(lds_complete)
+        # b128 VGPR stagger: upper 2 VGPRs available later than lower 2
+        if ds_bytes >= 16 and ds_dest_base is not None:
+          vr = vgpr_ready[i]
+          for off in (2, 3):
+            vr[ds_dest_base + off] = max(vr.get(ds_dest_base + off, 0), lds_complete + _LDS_B128_VGPR_STAGGER)
         if cu_lds_last_was_write: cu_lds_last_was_write = False
     elif cat == 'vmem_rd':
       vm_pend[i].append(issue_cycle + _VMEM_LATENCY)
@@ -696,12 +711,17 @@ def _init_sqtt_encoder(entry_pc: int):
     if issubclass(inst_type, _DS): cat = 'ds_wr' if is_store else 'ds_rd'
     elif issubclass(inst_type, (*_GLOBAL, *_FLAT, *_SCRATCH)): cat = 'vmem_wr' if is_store else 'vmem_rd'
     else: cat = 'salu'
-    # For DS loads, extract width for b128-specific latency
+    # For DS loads, extract width and dest VGPR for b128-specific latency/stagger
     ds_extra = None
     if cat == 'ds_rd':
       m = re.search(r'_B(\d+)', op_name)
       ds_bytes = int(m.group(1)) // 8 if m else 4
-      ds_extra = ds_bytes
+      # Extract dest VGPR base index for per-VGPR stagger tracking
+      ds_dest_base = None
+      vdst_field = getattr(inst, 'vdst', None)
+      if vdst_field is not None and hasattr(vdst_field, 'offset') and vdst_field.offset >= 256:
+        ds_dest_base = vdst_field.offset - 256
+      ds_extra = (ds_bytes, ds_dest_base)
     # For VMEM stores, extract data width and address VGPR for per-operand forwarding
     vmem_extra = None
     if cat == 'vmem_wr':
