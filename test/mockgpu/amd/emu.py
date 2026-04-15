@@ -143,6 +143,7 @@ _INSTID_BASE_STALLS = (0, 4, 3, 2, 1, 0, 0, 0, 1, 1, 2, 3)
 _TRANS_PIPE_CYCLES = 4  # trans ALU pipeline occupancy: trans→trans must wait 4 cycles; trans→VALU = 1 cycle (parallel)
 _VOPD_PIPE_CYCLES = 2  # VOPD dual-issue occupancy: consecutive VOPDs need 2 extra cycles (HW validated: exp_chain [16]/[17])
 _EXEC_WRITE_LATENCY = 24  # v_cmpx writes EXEC; s_cbranch_execz must wait for EXEC propagation (VALU→SQ path, HW validated: layernorm)
+_LDS_B128_EXTRA = 5       # extra LDS latency for b128 loads (4 VGPR dwords): HW validated layernorm [18] diff=-5
 def _instid_stall(instid: int, n_waves: int) -> int:
   base = _INSTID_BASE_STALLS[min(instid, 11)]
   return max(0, base - (n_waves - 1)) if 1 <= instid <= 4 else base
@@ -432,7 +433,9 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
         cu_lds_last_was_write = True
       else:
         mode_switch_penalty = 1 if cu_lds_last_was_write else 0  # write→read direction switch
-        lgkm_pend[i].append(issue_cycle + _LDS_RD_LATENCY + mode_switch_penalty)
+        ds_bytes = extra if extra is not None else 4
+        width_extra = _LDS_B128_EXTRA if ds_bytes >= 16 else 0
+        lgkm_pend[i].append(issue_cycle + _LDS_RD_LATENCY + mode_switch_penalty + width_extra)
         if cu_lds_last_was_write: cu_lds_last_was_write = False
     elif cat == 'vmem_rd':
       vm_pend[i].append(issue_cycle + _VMEM_LATENCY)
@@ -693,6 +696,12 @@ def _init_sqtt_encoder(entry_pc: int):
     if issubclass(inst_type, _DS): cat = 'ds_wr' if is_store else 'ds_rd'
     elif issubclass(inst_type, (*_GLOBAL, *_FLAT, *_SCRATCH)): cat = 'vmem_wr' if is_store else 'vmem_rd'
     else: cat = 'salu'
+    # For DS loads, extract width for b128-specific latency
+    ds_extra = None
+    if cat == 'ds_rd':
+      m = re.search(r'_B(\d+)', op_name)
+      ds_bytes = int(m.group(1)) // 8 if m else 4
+      ds_extra = ds_bytes
     # For VMEM stores, extract data width and address VGPR for per-operand forwarding
     vmem_extra = None
     if cat == 'vmem_wr':
@@ -705,7 +714,8 @@ def _init_sqtt_encoder(entry_pc: int):
       if addr_field is not None and hasattr(addr_field, 'offset') and addr_field.offset >= 256:
         addr_vgpr = addr_field.offset - 256
       vmem_extra = (vmem_bytes, addr_vgpr)
-    events.append((INST, {'wave': w, 'op': mem_op_val}, cat, vmem_extra))
+    extra = ds_extra if cat == 'ds_rd' else vmem_extra
+    events.append((INST, {'wave': w, 'op': mem_op_val}, cat, extra))
 
   def finish(wave_id: int):
     """Record wave completion for deferred encoding."""
