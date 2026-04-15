@@ -1,0 +1,143 @@
+{
+  "arch": "gfx1100",
+  "capture_dir": "/home/admin653792/code/tinygrad/extra/sqtt/captures/20260414_130733",
+  "kernels": {
+    "sync": {
+      "runs": [
+        {
+          "run": 0,
+          "status": "ok",
+          "file": "/home/admin653792/code/tinygrad/extra/sqtt/captures/20260414_130733/profile_sync_run_0.pkl",
+          "size_kb": 493.4
+        },
+        {
+          "run": 1,
+          "status": "ok",
+          "file": "/home/admin653792/code/tinygrad/extra/sqtt/captures/20260414_130733/profile_sync_run_1.pkl",
+          "size_kb": 1105.5
+        },
+        {
+          "run": 2,
+          "status": "ok",
+          "file": "/home/admin653792/code/tinygrad/extra/sqtt/captures/20260414_130733/profile_sync_run_2.pkl",
+          "size_kb": 2104.4
+        }
+      ],
+      "status": "ok"
+    },
+    "data_deps": {
+      "runs": [
+        {
+          "run": 0,
+          "status": "ok",
+          "file": "/home/admin653792/code/tinygrad/extra/sqtt/captures/20260414_130733/profile_data_deps_run_0.pkl",
+          "size_kb": 428.9
+        },
+        {
+          "run": 1,
+          "status": "ok",
+          "file": "/home/admin653792/code/tinygrad/extra/sqtt/captures/20260414_130733/profile_data_deps_run_1.pkl",
+          "size_kb": 77.9
+        },
+        {
+          "run": 2,
+          "status": "ok",
+          "file": "/home/admin653792/code/tinygrad/extra/sqtt/captures/20260414_130733/profile_data_deps_run_2.pkl",
+          "size_kb": 427.0
+        }
+      ],
+      "status": "ok"
+    },
+    "wave_sync": {
+      "runs": [
+        {
+          "run": 0,
+          "status": "failed",
+          "error": "ct 'TestCustomKernel' has no attribute 'test_wave_sync'. Did you mean: 'test_lds_sync'?\n\n----------------------------------------------------------------------\nRan 1 test in 0.002s\n\nFAILED (errors=1)\n"
+        },
+        {
+          "run": 1,
+          "status": "failed",
+          "error": "ct 'TestCustomKernel' has no attribute 'test_wave_sync'. Did you mean: 'test_lds_sync'?\n\n----------------------------------------------------------------------\nRan 1 test in 0.002s\n\nFAILED (errors=1)\n"
+        },
+        {
+          "run": 2,
+          "status": "failed",
+          "error": "ct 'TestCustomKernel' has no attribute 'test_wave_sync'. Did you mean: 'test_lds_sync'?\n\n----------------------------------------------------------------------\nRan 1 test in 0.002s\n\nFAILED (errors=1)\n"
+        }
+      ],
+      "status": "failed"
+    },
+    "plus": {
+      "runs": [
+        {
+          "run": 0,
+          "status": "ok",
+          "file": "/home/admin653792/code/tinygrad/extra/sqtt/captures/20260414_130733/profile_plus_run_0.pkl",
+          "size_kb": 84.4
+        },
+        {
+          "run": 1,
+          "status": "ok",
+          "file": "/home/admin653792/code/tinygrad/extra/sqtt/captures/20260414_130733/profile_plus_run_1.pkl",
+          "size_kb": 84.5
+        },
+        {
+          "run": 2,
+          "status": "ok",
+          "file": "/home/admin653792/code/tinygrad/extra/sqtt/captures/20260414_130733/profile_plus_run_2.pkl",
+          "size_kb": 84.6
+        }
+      ],
+      "status": "ok"
+    },
+    "gemm": {
+      "runs": [
+        {
+          "run": 0,
+          "status": "ok",
+          "file": "/home/admin653792/code/tinygrad/extra/sqtt/captures/20260414_130733/profile_gemm_run_0.pkl",
+          "size_kb": 74.3
+        },
+        {
+          "run": 1,
+          "status": "ok",
+          "file": "/home/admin653792/code/tinygrad/extra/sqtt/captures/20260414_130733/profile_gemm_run_1.pkl",
+          "size_kb": 73.8
+        },
+        {
+          "run": 2,
+          "status": "ok",
+          "file": "/home/admin653792/code/tinygrad/extra/sqtt/captures/20260414_130733/profile_gemm_run_2.pkl",
+          "size_kb": 73.9
+        }
+      ],
+      "status": "ok"
+    },
+    "empty": {
+      "runs": [
+        {
+          "run": 0,
+          "status": "ok",
+          "file": "/home/admin653792/code/tinygrad/extra/sqtt/captures/20260414_130733/profile_empty_run_0.pkl",
+          "size_kb": 68.7
+        },
+        {
+          "run": 1,
+          "status": "ok",
+          "file": "/home/admin653792/code/tinygrad/extra/sqtt/captures/20260414_130733/profile_empty_run_1.pkl",
+          "size_kb": 68.7
+        },
+        {
+          "run": 2,
+          "status": "ok",
+          "file": "/home/admin653792/code/tinygrad/extra/sqtt/captures/20260414_130733/profile_empty_run_2.pkl",
+          "size_kb": 68.9
+        }
+      ],
+      "status": "ok"
+    }
+  },
+  "timestamp": "2026-04-14T13:07:46.928058",
+  "runs_per_kernel": 3
+}

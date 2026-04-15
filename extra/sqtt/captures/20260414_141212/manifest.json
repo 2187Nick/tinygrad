@@ -1,0 +1,146 @@
+{
+  "arch": "gfx1100\nrewrote 0 graphs and matched 0 times, saved to /tmp/rewrites.pkl.root",
+  "capture_dir": "/home/admin653792/code/tinygrad/extra/sqtt/captures/20260414_141212",
+  "kernels": {
+    "sync": {
+      "runs": [
+        {
+          "run": 0,
+          "status": "ok",
+          "file": "/home/admin653792/code/tinygrad/extra/sqtt/captures/20260414_141212/profile_sync_run_0.pkl",
+          "size_kb": 146.4
+        },
+        {
+          "run": 1,
+          "status": "ok",
+          "file": "/home/admin653792/code/tinygrad/extra/sqtt/captures/20260414_141212/profile_sync_run_1.pkl",
+          "size_kb": 496.4
+        },
+        {
+          "run": 2,
+          "status": "ok",
+          "file": "/home/admin653792/code/tinygrad/extra/sqtt/captures/20260414_141212/profile_sync_run_2.pkl",
+          "size_kb": 146.5
+        }
+      ],
+      "status": "ok"
+    },
+    "data_deps": {
+      "runs": [
+        {
+          "run": 0,
+          "status": "ok",
+          "file": "/home/admin653792/code/tinygrad/extra/sqtt/captures/20260414_141212/profile_data_deps_run_0.pkl",
+          "size_kb": 402.6
+        },
+        {
+          "run": 1,
+          "status": "ok",
+          "file": "/home/admin653792/code/tinygrad/extra/sqtt/captures/20260414_141212/profile_data_deps_run_1.pkl",
+          "size_kb": 428.2
+        },
+        {
+          "run": 2,
+          "status": "ok",
+          "file": "/home/admin653792/code/tinygrad/extra/sqtt/captures/20260414_141212/profile_data_deps_run_2.pkl",
+          "size_kb": 79.2
+        }
+      ],
+      "status": "ok"
+    },
+    "wave_sync": {
+      "runs": [
+        {
+          "run": 0,
+          "status": "ok",
+          "file": "/home/admin653792/code/tinygrad/extra/sqtt/captures/20260414_141212/profile_wave_sync_run_0.pkl",
+          "size_kb": 0.1
+        },
+        {
+          "run": 1,
+          "status": "ok",
+          "file": "/home/admin653792/code/tinygrad/extra/sqtt/captures/20260414_141212/profile_wave_sync_run_1.pkl",
+          "size_kb": 0.1
+        },
+        {
+          "run": 2,
+          "status": "ok",
+          "file": "/home/admin653792/code/tinygrad/extra/sqtt/captures/20260414_141212/profile_wave_sync_run_2.pkl",
+          "size_kb": 0.1
+        }
+      ],
+      "status": "ok"
+    },
+    "plus": {
+      "runs": [
+        {
+          "run": 0,
+          "status": "ok",
+          "file": "/home/admin653792/code/tinygrad/extra/sqtt/captures/20260414_141212/profile_plus_run_0.pkl",
+          "size_kb": 85.5
+        },
+        {
+          "run": 1,
+          "status": "ok",
+          "file": "/home/admin653792/code/tinygrad/extra/sqtt/captures/20260414_141212/profile_plus_run_1.pkl",
+          "size_kb": 85.5
+        },
+        {
+          "run": 2,
+          "status": "ok",
+          "file": "/home/admin653792/code/tinygrad/extra/sqtt/captures/20260414_141212/profile_plus_run_2.pkl",
+          "size_kb": 85.5
+        }
+      ],
+      "status": "ok"
+    },
+    "gemm": {
+      "runs": [
+        {
+          "run": 0,
+          "status": "ok",
+          "file": "/home/admin653792/code/tinygrad/extra/sqtt/captures/20260414_141212/profile_gemm_run_0.pkl",
+          "size_kb": 429.1
+        },
+        {
+          "run": 1,
+          "status": "ok",
+          "file": "/home/admin653792/code/tinygrad/extra/sqtt/captures/20260414_141212/profile_gemm_run_1.pkl",
+          "size_kb": 80.9
+        },
+        {
+          "run": 2,
+          "status": "ok",
+          "file": "/home/admin653792/code/tinygrad/extra/sqtt/captures/20260414_141212/profile_gemm_run_2.pkl",
+          "size_kb": 429.6
+        }
+      ],
+      "status": "ok"
+    },
+    "empty": {
+      "runs": [
+        {
+          "run": 0,
+          "status": "ok",
+          "file": "/home/admin653792/code/tinygrad/extra/sqtt/captures/20260414_141212/profile_empty_run_0.pkl",
+          "size_kb": 70.0
+        },
+        {
+          "run": 1,
+          "status": "ok",
+          "file": "/home/admin653792/code/tinygrad/extra/sqtt/captures/20260414_141212/profile_empty_run_1.pkl",
+          "size_kb": 419.4
+        },
+        {
+          "run": 2,
+          "status": "ok",
+          "file": "/home/admin653792/code/tinygrad/extra/sqtt/captures/20260414_141212/profile_empty_run_2.pkl",
+          "size_kb": 70.0
+        }
+      ],
+      "status": "ok"
+    }
+  },
+  "timestamp": "2026-04-14T14:12:26.918971",
+  "runs_per_kernel": 3
+}

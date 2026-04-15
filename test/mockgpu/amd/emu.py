@@ -387,13 +387,11 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
     if cat == 'branch' and extra is True:  # extra=True means reads_exec
       issue_cycle = max(issue_cycle, exec_write_time[i] + _EXEC_WRITE_LATENCY)
 
-    # VGPR readiness: auto-apply VALU_DEP_1 when no delay_alu present (HW interlock handles RAW deps without hints)
-    if not has_delay_alu[i] and cat == 'valu' and vgpr_r_regs:
-      vh = valu_issue_hist[i]
-      if vh:
-        vr = vgpr_ready[i]
-        for r in vgpr_r_regs:
-          if r in vr: issue_cycle = max(issue_cycle, vr[r])
+    # VGPR readiness: HW interlock enforces RAW deps on VALU-written VGPRs regardless of s_delay_alu coverage
+    if cat == 'valu' and vgpr_r_regs:
+      vr = vgpr_ready[i]
+      for r in vgpr_r_regs:
+        if r in vr: issue_cycle = max(issue_cycle, vr[r])
     # Enforce trans ALU pipeline occupancy: trans instructions wait for the trans unit to be free
     _is_trans = cat == 'valu' and pkt_cls is INST and kwargs.get('op') == InstOp.VALUT_4
     if _is_trans:

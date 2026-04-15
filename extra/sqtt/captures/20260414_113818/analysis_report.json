@@ -1,0 +1,118 @@
+{
+  "arch": "gfx1100\nrewrote 0 graphs and matched 0 times, saved to /tmp/rewrites.pkl.admin653792",
+  "kernels": {
+    "sync": {
+      "status": "ok",
+      "waves": {},
+      "deterministic_deltas": {}
+    },
+    "data_deps": {
+      "status": "ok",
+      "waves": {},
+      "deterministic_deltas": {}
+    },
+    "wave_sync": {
+      "status": "failed"
+    },
+    "plus": {
+      "status": "ok",
+      "waves": {},
+      "deterministic_deltas": {}
+    },
+    "gemm": {
+      "status": "ok",
+      "waves": {
+        "0": {
+          "n_insts": 1,
+          "deltas": [
+            0
+          ],
+          "types": [
+            "WAVEEND"
+          ],
+          "categories": [
+            "SALU"
+          ],
+          "deterministic": true,
+          "non_dram_windows": []
+        },
+        "1": {
+          "n_insts": 1,
+          "deltas": [
+            0
+          ],
+          "types": [
+            "WAVEEND"
+          ],
+          "categories": [
+            "SALU"
+          ],
+          "deterministic": true,
+          "non_dram_windows": []
+        },
+        "2": {
+          "n_insts": 1,
+          "deltas": [
+            0
+          ],
+          "types": [
+            "WAVEEND"
+          ],
+          "categories": [
+            "SALU"
+          ],
+          "deterministic": true,
+          "non_dram_windows": []
+        },
+        "3": {
+          "n_insts": 1,
+          "deltas": [
+            0
+          ],
+          "types": [
+            "WAVEEND"
+          ],
+          "categories": [
+            "SALU"
+          ],
+          "deterministic": true,
+          "non_dram_windows": []
+        },
+        "4": {
+          "n_insts": 1,
+          "deltas": [
+            0
+          ],
+          "types": [
+            "WAVEEND"
+          ],
+          "categories": [
+            "SALU"
+          ],
+          "deterministic": true,
+          "non_dram_windows": []
+        },
+        "5": {
+          "n_insts": 1,
+          "deltas": [
+            0
+          ],
+          "types": [
+            "WAVEEND"
+          ],
+          "categories": [
+            "SALU"
+          ],
+          "deterministic": true,
+          "non_dram_windows": []
+        }
+      },
+      "deterministic_deltas": {}
+    },
+    "empty": {
+      "status": "ok",
+      "waves": {},
+      "deterministic_deltas": {}
+    }
+  }
+}
