@@ -127,10 +127,13 @@ _BARRIER_FROM_LAST = 6    # cycles from last wave's barrier issue to release
 _LDS_SERVICE_COST = 6     # cycles LDS unit is busy per DS op
 _VALU_DS_WR_FORWARD = 26  # VALU→DS_WR forwarding stall (from reference PKL; our HW shows 22 — card variance)
 _VALU_DS_RD_FORWARD = 22  # VALU→DS_RD forwarding stall
-_VALU_VMEM_WR_FORWARD = 21 # VALU→VMEM_WR forwarding stall (validated: data_deps=21, cast_b128=20)
+_VALU_VMEM_WR_FORWARD = 21 # VALU→VMEM_WR forwarding stall (base for b32; b128 HW varies: elementwise=20, plus=24)
+_VALU_VMEM_ADDR_FORWARD = 27 # VALU→VMEM address VGPR forwarding: recently-written addr VGPRs need 27 cycles (HW validated: lds_sync=27)
 _VALU_VMEM_RD_FORWARD = 22 # VALU→VMEM_RD forwarding stall
-_VMEM_DRAIN_CYCLES = 14    # VMEM pipeline drain: SQ holds s_nop/s_endpgm until VMEM op accepted (HW=15, minus 1 for nop cost)
+_VMEM_DRAIN_CYCLES = 15    # VMEM pipeline drain: SQ holds s_nop/s_endpgm until VMEM op accepted (HW=15 validated: plus, cast, elementwise)
 _TRANS_PIPELINE_LATENCY = 27 # transcendental unit result latency (v_exp, v_log, v_rcp, etc.) — depctr waits for this
+_TRANS_PIPELINE_LATENCY_SQRT = 31 # v_sqrt/v_rsq have longer latency (HW validated: depctr after v_sqrt = L-6=25 → L=31)
+_SGPR_LATENCY = 4   # VALU SGPR write-to-read latency: HW enforces without explicit S_DELAY_ALU hints
 _WAVESTART_GAP = 1
 _FIRST_INST_GAP = 2
 # S_DELAY_ALU INSTID → base stall cycles for single-wave (0=NO_DEP, 1-4=VALU_DEP, 5-7=TRANS32_DEP, 8=FMA_ACCUM, 9-11=SALU_CYCLE)
@@ -138,6 +141,7 @@ _FIRST_INST_GAP = 2
 # TRANS32 deps (5-7): 0 — trans ALU runs in parallel with VALU. Pipeline occupancy enforced by trans_pipe_avail. Register deps by s_waitcnt_depctr.
 _INSTID_BASE_STALLS = (0, 4, 3, 2, 1, 0, 0, 0, 1, 1, 2, 3)
 _TRANS_PIPE_CYCLES = 4  # trans ALU pipeline occupancy: trans→trans must wait 4 cycles; trans→VALU = 1 cycle (parallel)
+_VOPD_PIPE_CYCLES = 2  # VOPD dual-issue occupancy: consecutive VOPDs need 2 extra cycles (HW validated: exp_chain [16]/[17])
 def _instid_stall(instid: int, n_waves: int) -> int:
   base = _INSTID_BASE_STALLS[min(instid, 11)]
   return max(0, base - (n_waves - 1)) if 1 <= instid <= 4 else base
@@ -157,6 +161,15 @@ def _get_issue_cost(pkt_cls, kwargs) -> int:
     if op == InstOp.VALUT_4: return 1
     return _INSTOP_ISSUE_COST.get(op, 1)
   return 1
+
+def _vmem_wr_issue(deadline: int, store_vgprs: int, selffwd_vgprs: int, vgprs_written: int) -> int:
+  """Compute VMEM store issue deadline based on VALU forwarding pattern."""
+  width_extra = max(0, store_vgprs - 1)
+  if selffwd_vgprs >= store_vgprs and store_vgprs > 1:
+    return deadline - 1  # pipeline batch: all data VGPRs from consecutive self-fwd VALUs
+  if vgprs_written >= store_vgprs:
+    return deadline + width_extra  # all data VGPRs from consecutive non-VOPC VALUs
+  return deadline + width_extra + 1  # scattered writes (VOPCs broke chain) — extra gather cycle
 
 def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, type, dict]]:
   # RDNA3 SQ round-robin scheduling: one non-zero-cost instruction per cycle per SIMD
@@ -180,7 +193,14 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
   valu_vmem_rd_deadline = [0] * n # VALU→VMEM_RD forwarding
   vmem_drain_deadline = [0] * n   # VMEM pipeline drain: blocks s_nop/s_endpgm until VMEM accepted
   trans_pipe_avail = [0] * n      # trans ALU pipeline: when trans unit is free for next trans instruction
+  vopd_pipe_avail = [0] * n      # VOPD dual-issue: when VOPD unit is free for next VOPD instruction
   valu_issue_hist: list[list[int]] = [[] for _ in range(n)]  # last 4 non-trans VALU issue times (for time-based delay_alu)
+  sgpr_write_time: list[dict[int, int]] = [{} for _ in range(n)]  # SGPR last VALU-write cycle (offset → cycle)
+  vgpr_ready: list[dict[int, int]] = [{} for _ in range(n)]  # VGPR readiness scoreboard (reg_idx → cycle when result available)
+  vgpr_write_time: list[dict[int, int]] = [{} for _ in range(n)]  # VGPR last VALU-write cycle (reg_idx → issue cycle) for VMEM addr forwarding
+  has_delay_alu = [False] * n     # per-wave: has any s_delay_alu been seen (controls VGPR scoreboard activation)
+  consecutive_selffwd_vgprs = [0] * n  # count of VGPRs written by consecutive self-forwarding non-VOPC VALUs
+  consecutive_vgprs_written = [0] * n  # count of VGPRs written by consecutive non-VOPC VALUs (any kind)
   cu_lds_available = 0        # shared LDS unit contention
   cu_lds_last_was_write = False
   burst_wave = -1             # VALU burst: wave in consecutive VALU sequence
@@ -292,8 +312,13 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
         if next_cat == 'ds_wr': eff_ready = max(eff_ready, valu_ds_wr_deadline[i])
         elif next_cat == 'ds_rd': eff_ready = max(eff_ready, valu_ds_rd_deadline[i])
         elif next_cat == 'vmem_wr':
-          width_extra = max(0, (next_extra or 4) // 4 - 1) if next_extra else 0
-          eff_ready = max(eff_ready, valu_vmem_wr_deadline[i] + width_extra)
+          ne_bytes = next_extra[0] if isinstance(next_extra, tuple) else next_extra
+          store_vgprs = max(1, (ne_bytes or 4) // 4) if ne_bytes else 1
+          eff_ready = max(eff_ready, _vmem_wr_issue(valu_vmem_wr_deadline[i], store_vgprs,
+                                                     consecutive_selffwd_vgprs[i], consecutive_vgprs_written[i]))
+          if isinstance(next_extra, tuple) and next_extra[1] is not None:
+            addr_wt = vgpr_write_time[i].get(next_extra[1], 0)
+            if addr_wt > 0: eff_ready = max(eff_ready, addr_wt + _VALU_VMEM_ADDR_FORWARD)
         elif next_cat == 'vmem_rd': eff_ready = max(eff_ready, valu_vmem_rd_deadline[i])
         if eff_ready < best_cycle:
           best_cycle = eff_ready
@@ -316,6 +341,18 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
     pkt_cls, kwargs, cat, extra = wave_events[wid][pc[i]]
     issue_cycle = max(clock, ready[i])
 
+    # Extract VALU register info from extra tuple: (is_vopc, sgpr_writes, sgpr_reads, vgpr_writes, vgpr_reads, is_vopd)
+    if isinstance(extra, tuple) and len(extra) == 6:
+      is_vopc, sgpr_w_regs, sgpr_r_regs, vgpr_w_regs, vgpr_r_regs, is_vopd = extra
+    elif isinstance(extra, tuple) and len(extra) == 5:
+      is_vopc, sgpr_w_regs, sgpr_r_regs, vgpr_w_regs, vgpr_r_regs = extra
+      is_vopd = False
+    elif isinstance(extra, tuple) and len(extra) == 3:
+      is_vopc, sgpr_w_regs, sgpr_r_regs = extra
+      vgpr_w_regs, vgpr_r_regs, is_vopd = (), (), False
+    else:
+      is_vopc, sgpr_w_regs, sgpr_r_regs, vgpr_w_regs, vgpr_r_regs, is_vopd = extra, (), (), (), (), False
+
     # Apply S_DELAY_ALU stall (time-based for VALU_DEP, fixed for TRANS32_DEP/SALU)
     ds = dly[i]
     ds[0] += 1  # count packet-emitting instructions for INSTSKIP tracking
@@ -329,25 +366,48 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
       return _instid_stall(instid, n)
     stall = 0
     if ds[1] == ds[0]:
+      has_delay_alu[i] = True
       stall = max(stall, _resolve_delay(ds[2]))
       ds[1] = -1
     if ds[3] == ds[0]:
+      has_delay_alu[i] = True
       stall = max(stall, _resolve_delay(ds[4]))
       ds[3] = -1
     issue_cycle += stall
 
+    # SGPR write-to-read dependency stall: HW enforces 4-cycle latency without requiring S_DELAY_ALU hints
+    if cat == 'valu' and sgpr_r_regs:
+      for r in sgpr_r_regs:
+        if r in sgpr_write_time[i]:
+          issue_cycle = max(issue_cycle, sgpr_write_time[i][r] + _SGPR_LATENCY)
+
+    # VGPR readiness: auto-apply VALU_DEP_1 when no delay_alu present (HW interlock handles RAW deps without hints)
+    if not has_delay_alu[i] and cat == 'valu' and vgpr_r_regs:
+      vh = valu_issue_hist[i]
+      if vh:
+        vr = vgpr_ready[i]
+        for r in vgpr_r_regs:
+          if r in vr: issue_cycle = max(issue_cycle, vr[r])
     # Enforce trans ALU pipeline occupancy: trans instructions wait for the trans unit to be free
     _is_trans = cat == 'valu' and pkt_cls is INST and kwargs.get('op') == InstOp.VALUT_4
     if _is_trans:
       issue_cycle = max(issue_cycle, trans_pipe_avail[i])
+    # Enforce VOPD dual-issue occupancy: consecutive VOPDs need spacing
+    if is_vopd:
+      issue_cycle = max(issue_cycle, vopd_pipe_avail[i])
 
     # Apply VALU→DS/VMEM forwarding stall (wave selection already deferred this wave; just clamp)
     if cat == 'ds_wr': issue_cycle = max(issue_cycle, valu_ds_wr_deadline[i])
     elif cat == 'ds_rd': issue_cycle = max(issue_cycle, valu_ds_rd_deadline[i])
     elif cat == 'vmem_wr':
-      # Width-dependent forwarding: wider stores need extra cycles for VGPR reads (b32=0, b128=+3)
-      width_extra = max(0, (extra or 4) // 4 - 1) if extra else 0
-      issue_cycle = max(issue_cycle, valu_vmem_wr_deadline[i] + width_extra)
+      vmem_bytes = extra[0] if isinstance(extra, tuple) else extra
+      store_vgprs = max(1, (vmem_bytes or 4) // 4) if vmem_bytes else 1
+      issue_cycle = max(issue_cycle, _vmem_wr_issue(valu_vmem_wr_deadline[i], store_vgprs,
+                                                     consecutive_selffwd_vgprs[i], consecutive_vgprs_written[i]))
+      # Per-operand address VGPR forwarding: recently-written addr VGPRs need extra cycles to reach AGU
+      if isinstance(extra, tuple) and extra[1] is not None:
+        addr_wt = vgpr_write_time[i].get(extra[1], 0)
+        if addr_wt > 0: issue_cycle = max(issue_cycle, addr_wt + _VALU_VMEM_ADDR_FORWARD)
     elif cat == 'vmem_rd':
       issue_cycle = max(issue_cycle, valu_vmem_rd_deadline[i])
 
@@ -379,21 +439,57 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
 
     # Track multi-cycle VALU (transcendental) completion for s_waitcnt_depctr, and trans pipeline occupancy
     if _is_trans:
-      valu_pend[i].append(issue_cycle + _TRANS_PIPELINE_LATENCY)
+      tn = kwargs.get('trans_name', '')
+      if 'SQRT' in tn or 'RSQ' in tn or 'EXP' in tn:
+        trans_lat = _TRANS_PIPELINE_LATENCY_SQRT  # complex trans: v_exp, v_sqrt, v_rsq = 31 cycles
+      else:
+        trans_lat = _TRANS_PIPELINE_LATENCY  # simple trans: v_log, v_rcp = 27 cycles
+      valu_pend[i].append(issue_cycle + trans_lat)
       trans_pipe_avail[i] = issue_cycle + _TRANS_PIPE_CYCLES
 
-    # Track last VALU for DS/VMEM forwarding stall (skip VOPC — writes VCC not VGPR)
-    if cat == 'valu' and not extra:
+    # Track VOPD pipeline occupancy: next VOPD must wait for the dual-issue slot
+    if is_vopd:
+      vopd_pipe_avail[i] = issue_cycle + _VOPD_PIPE_CYCLES
+
+    # Track last VALU for DS/VMEM forwarding stall (skip VOPC/VOP3_SDST — writes VCC/SGPR not VGPR)
+    if cat == 'valu' and vgpr_w_regs:
       valu_ds_wr_deadline[i] = issue_cycle + _VALU_DS_WR_FORWARD
       valu_ds_rd_deadline[i] = issue_cycle + _VALU_DS_RD_FORWARD
       valu_vmem_wr_deadline[i] = issue_cycle + _VALU_VMEM_WR_FORWARD
       valu_vmem_rd_deadline[i] = issue_cycle + _VALU_VMEM_RD_FORWARD
+      # Track consecutive VGPR write patterns for VMEM store forwarding optimization
+      n_written = len(set(vgpr_w_regs))
+      is_selffwd = bool(vgpr_r_regs and set(vgpr_w_regs) & set(vgpr_r_regs))
+      if is_selffwd:
+        consecutive_selffwd_vgprs[i] += n_written
+      else:
+        consecutive_selffwd_vgprs[i] = 0
+      consecutive_vgprs_written[i] += n_written
+    elif cat == 'valu':  # VOPC/VOP3_SDST — no VGPR writes, breaks forwarding chain
+      consecutive_selffwd_vgprs[i] = 0
+      consecutive_vgprs_written[i] = 0
 
     # Track VALU issue times for time-based delay_alu (non-trans only)
     if cat == 'valu' and not _is_trans:
       vh = valu_issue_hist[i]
       vh.append(issue_cycle)
       if len(vh) > 4: vh.pop(0)
+
+    # Track SGPR write times for SGPR dependency stall detection (non-trans VALU only)
+    if cat == 'valu' and not _is_trans and sgpr_w_regs:
+      for r in sgpr_w_regs: sgpr_write_time[i][r] = issue_cycle
+
+    # Track VGPR write readiness: all VALU writes update scoreboard for RAW dependency tracking
+    if cat == 'valu' and not _is_trans and vgpr_w_regs:
+      vr = vgpr_ready[i]
+      # VALU with no VGPR reads (e.g. v_mov with constant) has 1-cycle latency (no register file read needed)
+      lat = 1 if not vgpr_r_regs else 5
+      for r in vgpr_w_regs: vr[r] = issue_cycle + lat
+
+    # Track per-VGPR write times for VMEM address forwarding (all non-trans VALU writes)
+    if cat == 'valu' and not _is_trans and vgpr_w_regs:
+      vwt = vgpr_write_time[i]
+      for r in vgpr_w_regs: vwt[r] = issue_cycle
 
     # Track VALU burst
     if cat == 'valu':
@@ -429,6 +525,8 @@ def _init_sqtt_encoder(entry_pc: int):
            ir4.VOP1, ir4.VOP2, ir4.VOP3, ir4.VOP3P, ir4.VOPC, ir4.VOPD, ir4.VOP3SD, ir4.VOP3_SDST, ir4.VOP1_SDST,
            irc.VOP1, irc.VOP2, irc.VOP3, irc.VOP3P, irc.VOPC, irc.VOP3SD, irc.VOP3_SDST)
   _VOPC = (ir3.VOPC, ir4.VOPC, irc.VOPC)  # comparison ops write VCC, not VGPR — no DS forwarding stall
+  _VOP3_SDST = (ir3.VOP3_SDST, ir3.VOP3SD, ir4.VOP3_SDST, ir4.VOP3SD, irc.VOP3_SDST, irc.VOP3SD)  # compares writing named SGPR (2 sources; src2 is don't-care)
+  _VOPD = (ir3.VOPD, ir4.VOPD)  # dual-issue: two ops, two VGPR dests — delay_alu can't cover both deps
   _DS = (ir3.DS, ir4.DS, irc.DS)
   _GLOBAL = (ir3.GLOBAL, ir4.VGLOBAL, irc.GLOBAL)
   _FLAT = (ir3.FLAT, ir4.VFLAT, irc.FLAT)
@@ -535,8 +633,44 @@ def _init_sqtt_encoder(entry_pc: int):
     if issubclass(inst_type, _VALU):
       is_vopc = issubclass(inst_type, _VOPC)
       op = _valu_op(op_name)
-      if op is None: events.append((VALUINST, {'wave': w}, 'valu', is_vopc))
-      else: events.append((INST, {'wave': w, 'op': op}, 'valu', is_vopc))
+      # Extract SGPR reads/writes for dependency stall detection
+      sgpr_w: list[int] = []
+      sgpr_r: list[int] = []
+      vgpr_w: list[int] = []
+      vgpr_r: list[int] = []
+      # SGPR destinations: vdst is SSrcField(0-106) for VOP3_SDST, VGPRField(256+) for VOP3; sdst is SGPRField(0-106)
+      if hasattr(inst, 'vdst'):
+        o = getattr(inst.vdst, 'offset', -1)
+        if 0 <= o <= 106: sgpr_w.append(o)
+        elif o >= 256: vgpr_w.append(o - 256)
+      if hasattr(inst, 'sdst'):
+        o = getattr(inst.sdst, 'offset', -1)
+        if 0 <= o <= 106: sgpr_w.append(o)
+      if is_vopc: sgpr_w.append(106)   # VOPC implicitly writes VCC_LO (offset 106)
+      # VOPD dual destinations: vdstx and vdsty
+      if hasattr(inst, 'vdstx'):
+        o = getattr(inst.vdstx, 'offset', -1)
+        if o >= 256: vgpr_w.append(o - 256)
+      if hasattr(inst, 'vdsty'):
+        o = getattr(inst.vdsty, 'offset', -1)
+        if o >= 256: vgpr_w.append(o - 256)
+      # Sources: SGPR reads (SrcFields encode SGPRs 0-105, VCC 106-107; HW reads all encoded sources)
+      for fn in ('src0', 'src1', 'src2', 'srcx0', 'srcy0'):
+        if hasattr(inst, fn):
+          o = getattr(getattr(inst, fn), 'offset', -1)
+          if 0 <= o <= 106: sgpr_r.append(o)
+          elif o >= 256: vgpr_r.append(o - 256)
+      # VGPR-only sources: vsrc1, vsrcx1, vsrcy1 are always VGPRs
+      for fn in ('vsrc1', 'vsrcx1', 'vsrcy1'):
+        if hasattr(inst, fn):
+          o = getattr(getattr(inst, fn), 'offset', -1)
+          if o >= 256: vgpr_r.append(o - 256)
+      reg_info = (is_vopc, tuple(sgpr_w), tuple(sgpr_r), tuple(vgpr_w), tuple(vgpr_r), issubclass(inst_type, _VOPD))
+      if op is None: events.append((VALUINST, {'wave': w}, 'valu', reg_info))
+      else:
+        kw = {'wave': w, 'op': op}
+        if op == InstOp.VALUT_4: kw['trans_name'] = op_name
+        events.append((INST, kw, 'valu', reg_info))
       return
 
     if issubclass(inst_type, _SMEM):
@@ -549,12 +683,19 @@ def _init_sqtt_encoder(entry_pc: int):
     if issubclass(inst_type, _DS): cat = 'ds_wr' if is_store else 'ds_rd'
     elif issubclass(inst_type, (*_GLOBAL, *_FLAT, *_SCRATCH)): cat = 'vmem_wr' if is_store else 'vmem_rd'
     else: cat = 'salu'
-    # For VMEM stores, extract data width (in bytes) from op_name for width-dependent forwarding
-    vmem_bytes = None
+    # For VMEM stores, extract data width and address VGPR for per-operand forwarding
+    vmem_extra = None
     if cat == 'vmem_wr':
+      vmem_bytes = None
       m = re.search(r'_B(\d+)', op_name)
       if m: vmem_bytes = int(m.group(1)) // 8
-    events.append((INST, {'wave': w, 'op': mem_op_val}, cat, vmem_bytes))
+      # Extract address VGPR index for per-operand forwarding (Reg.offset = 256 + vgpr_idx)
+      addr_vgpr = None
+      addr_field = getattr(inst, 'addr', None)
+      if addr_field is not None and hasattr(addr_field, 'offset') and addr_field.offset >= 256:
+        addr_vgpr = addr_field.offset - 256
+      vmem_extra = (vmem_bytes, addr_vgpr)
+    events.append((INST, {'wave': w, 'op': mem_op_val}, cat, vmem_extra))
 
   def finish(wave_id: int):
     """Record wave completion for deferred encoding."""
@@ -582,7 +723,8 @@ def _init_sqtt_encoder(entry_pc: int):
     prev_time = 0
     for ts, _, pkt_cls, kwargs in timed:
       delta = max(ts - prev_time, 0)
-      _emit_with_delta(nibbles, pkt_cls, delta=delta, **kwargs)
+      enc_kwargs = {k: v for k, v in kwargs.items() if k != 'trans_name'}
+      _emit_with_delta(nibbles, pkt_cls, delta=delta, **enc_kwargs)
       prev_time = max(ts, prev_time)  # actual encoded time; clamped deltas (delta=0) don't advance time
     # Pad to 32-byte alignment
     while len(nibbles) % 2 != 0: nibbles.append(0)

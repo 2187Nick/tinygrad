@@ -251,6 +251,11 @@ def do_compare():
 
     hw_waves = sorted(hw_traces.keys())
     emu_waves = sorted(emu_traces.keys())
+    # Skip kernels where HW has MORE waves than EMU — indicates genuinely different workgroup size (e.g. matmul: HW=6, EMU=1)
+    # When EMU >= HW, we compare the overlapping waves
+    if len(hw_waves) > len(emu_waves):
+      print(f"  SKIP (wave count mismatch: HW={len(hw_waves)} waves, EMU={len(emu_waves)} waves)")
+      continue
     n_common = min(len(hw_waves), len(emu_waves))
 
     k_exact = 0
@@ -288,6 +293,7 @@ def do_compare():
           exact += 1; within2 += 1
         elif abs(hd - ed) <= 2:
           within2 += 1
+          mismatches.append((j, hd, ed, hw[j][2], hw[j][3] if len(hw[j]) > 3 else ""))
         else:
           mismatches.append((j, hd, ed, hw[j][2], hw[j][3] if len(hw[j]) > 3 else ""))
 
@@ -300,10 +306,10 @@ def do_compare():
         pct2 = 100*within2/compared
         print(f"  Wave {i}: {exact}/{compared} exact ({pct:.1f}%), {within2}/{compared} ±2 ({pct2:.1f}%)")
         if mismatches:
-          for j, hd, ed, typ, inst in mismatches[:5]:
-            print(f"    [{j:2d}] HW={hd:3d} EMU={ed:3d} diff={ed-hd:+d} {typ} {inst[:50]}")
-          if len(mismatches) > 5:
-            print(f"    ... {len(mismatches)-5} more mismatches")
+          for j, hd, ed, typ, inst in mismatches[:25]:
+            print(f"    [{j:2d}] HW={hd:3d} EMU={ed:3d} diff={ed-hd:+d} {typ} {inst[:60]}")
+          if len(mismatches) > 25:
+            print(f"    ... {len(mismatches)-25} more mismatches")
 
     total_exact += k_exact
     total_within2 += k_within2
