@@ -131,6 +131,7 @@ _VALU_VMEM_WR_FORWARD = 21 # VALU→VMEM_WR forwarding stall (base for b32; b128
 _VALU_VMEM_ADDR_FORWARD = 27 # VALU→VMEM address VGPR forwarding: recently-written addr VGPRs need 27 cycles (HW validated: lds_sync=27)
 _VALU_VMEM_RD_FORWARD = 22 # VALU→VMEM_RD forwarding stall
 _VMEM_DRAIN_CYCLES = 15    # VMEM pipeline drain: SQ holds s_nop/s_endpgm until VMEM op accepted (HW=15 validated: plus, cast, elementwise)
+_VMEM_EXEC_MIN = 8         # minimum VMEM execution time after forwarding stall overlap
 _TRANS_PIPELINE_LATENCY = 27 # transcendental unit result latency (v_exp, v_log, v_rcp, etc.) — depctr waits for this
 _TRANS_PIPELINE_LATENCY_SQRT = 31 # v_sqrt/v_rsq have longer latency (HW validated: depctr after v_sqrt = L-6=25 → L=31)
 _SGPR_LATENCY = 4   # VALU SGPR write-to-read latency: HW enforces without explicit S_DELAY_ALU hints
@@ -194,6 +195,7 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
   valu_ds_wr_deadline = [0] * n   # VALU→DS_WR forwarding
   valu_ds_rd_deadline = [0] * n   # VALU→DS_RD forwarding
   valu_vmem_wr_deadline = [0] * n # VALU→VMEM_WR forwarding
+  valu_vmem_wr_slow_ext = [0] * n # slow-fresh extension baked into VMEM_WR deadline
   valu_vmem_rd_deadline = [0] * n # VALU→VMEM_RD forwarding
   vmem_drain_deadline = [0] * n   # VMEM pipeline drain: blocks s_nop/s_endpgm until VMEM accepted
   trans_pipe_avail = [0] * n      # trans ALU pipeline: when trans unit is free for next trans instruction
@@ -413,6 +415,7 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
     if cat == 'ds_wr': issue_cycle = max(issue_cycle, valu_ds_wr_deadline[i])
     elif cat == 'ds_rd': issue_cycle = max(issue_cycle, valu_ds_rd_deadline[i])
     elif cat == 'vmem_wr':
+      pre_fwd_cycle = issue_cycle
       vmem_bytes = extra[0] if isinstance(extra, tuple) else extra
       store_vgprs = max(1, (vmem_bytes or 4) // 4) if vmem_bytes else 1
       issue_cycle = max(issue_cycle, _vmem_wr_issue(valu_vmem_wr_deadline[i], store_vgprs,
@@ -421,8 +424,11 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
       if isinstance(extra, tuple) and extra[1] is not None:
         addr_wt = vgpr_write_time[i].get(extra[1], 0)
         if addr_wt > 0: issue_cycle = max(issue_cycle, addr_wt + _VALU_VMEM_ADDR_FORWARD)
+      _vmem_fwd_stall = issue_cycle - pre_fwd_cycle
     elif cat == 'vmem_rd':
+      pre_fwd_cycle = issue_cycle
       issue_cycle = max(issue_cycle, valu_vmem_rd_deadline[i])
+      _vmem_fwd_stall = issue_cycle - pre_fwd_cycle
 
     # Barrier arrival penalty: non-first waves incur +1 cycle
     if cat == 'barrier' and any(at_barrier):
@@ -473,7 +479,9 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
       vmem_drain_deadline[i] = issue_cycle + _VMEM_DRAIN_CYCLES
     elif cat == 'vmem_wr':
       vm_pend[i].append(issue_cycle + _VMEM_LATENCY)
-      vmem_drain_deadline[i] = issue_cycle + _VMEM_DRAIN_CYCLES
+      # Slow-fresh forwarding stall overlaps with VMEM execution: reduce drain by the slow-fresh extension
+      _drain = max(_VMEM_EXEC_MIN, _VMEM_DRAIN_CYCLES - valu_vmem_wr_slow_ext[i]) if _vmem_fwd_stall > 0 else _VMEM_DRAIN_CYCLES
+      vmem_drain_deadline[i] = issue_cycle + _drain
 
     # Track multi-cycle VALU (transcendental) completion for s_waitcnt_depctr, and trans pipeline occupancy
     if _is_trans:
@@ -498,6 +506,7 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
       valu_ds_wr_deadline[i] = issue_cycle + _VALU_DS_WR_FORWARD + _slow_extra
       valu_ds_rd_deadline[i] = issue_cycle + _VALU_DS_RD_FORWARD + _slow_extra
       valu_vmem_wr_deadline[i] = issue_cycle + _VALU_VMEM_WR_FORWARD + _slow_extra
+      valu_vmem_wr_slow_ext[i] = _slow_extra
       valu_vmem_rd_deadline[i] = issue_cycle + _VALU_VMEM_RD_FORWARD + _slow_extra
       # Track consecutive VGPR write patterns for VMEM store forwarding optimization
       n_written = len(set(vgpr_w_regs))
