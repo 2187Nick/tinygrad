@@ -135,6 +135,7 @@ _VMEM_EXEC_MIN = 8         # minimum VMEM execution time after forwarding stall 
 _TRANS_PIPELINE_LATENCY = 27 # transcendental unit result latency (v_exp, v_log, v_rcp, etc.) — depctr waits for this
 _TRANS_PIPELINE_LATENCY_SQRT = 31 # v_sqrt/v_rsq have longer latency (HW validated: depctr after v_sqrt = L-6=25 → L=31)
 _SGPR_LATENCY = 4   # VALU SGPR write-to-read latency: HW enforces without explicit S_DELAY_ALU hints
+_CNDMASK_SGPR_LATENCY = 6  # v_cndmask condition SGPR: 2cy extra over standard SGPR path (HW validated: exp_chain [14],[57])
 _WAVESTART_GAP = 1
 _FIRST_INST_GAP = 2
 # S_DELAY_ALU INSTID → base stall cycles for single-wave (0=NO_DEP, 1-4=VALU_DEP, 5-7=TRANS32_DEP, 8=FMA_ACCUM, 9-11=SALU_CYCLE)
@@ -352,17 +353,20 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
     pkt_cls, kwargs, cat, extra = wave_events[wid][pc[i]]
     issue_cycle = max(clock, ready[i])
 
-    # Extract VALU register info from extra tuple: (is_vopc, sgpr_writes, sgpr_reads, vgpr_writes, vgpr_reads, is_vopd)
-    if isinstance(extra, tuple) and len(extra) == 6:
+    # Extract VALU register info from extra tuple: (is_vopc, sgpr_writes, sgpr_reads, vgpr_writes, vgpr_reads, is_vopd, cond_sgpr)
+    if isinstance(extra, tuple) and len(extra) == 7:
+      is_vopc, sgpr_w_regs, sgpr_r_regs, vgpr_w_regs, vgpr_r_regs, is_vopd, cond_sgpr = extra
+    elif isinstance(extra, tuple) and len(extra) == 6:
       is_vopc, sgpr_w_regs, sgpr_r_regs, vgpr_w_regs, vgpr_r_regs, is_vopd = extra
+      cond_sgpr = -1
     elif isinstance(extra, tuple) and len(extra) == 5:
       is_vopc, sgpr_w_regs, sgpr_r_regs, vgpr_w_regs, vgpr_r_regs = extra
-      is_vopd = False
+      is_vopd, cond_sgpr = False, -1
     elif isinstance(extra, tuple) and len(extra) == 3:
       is_vopc, sgpr_w_regs, sgpr_r_regs = extra
-      vgpr_w_regs, vgpr_r_regs, is_vopd = (), (), False
+      vgpr_w_regs, vgpr_r_regs, is_vopd, cond_sgpr = (), (), False, -1
     else:
-      sgpr_w_regs, sgpr_r_regs, vgpr_w_regs, vgpr_r_regs, is_vopd = (), (), (), (), False
+      sgpr_w_regs, sgpr_r_regs, vgpr_w_regs, vgpr_r_regs, is_vopd, cond_sgpr = (), (), (), (), False, -1
 
     # Apply S_DELAY_ALU stall (time-based for VALU_DEP, fixed for TRANS32_DEP/SALU)
     ds = dly[i]
@@ -387,12 +391,24 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
     issue_cycle += stall
 
     # SGPR write-to-read dependency stall: HW enforces 4-cycle latency without requiring S_DELAY_ALU hints
+    # v_cndmask reading non-VCC condition SGPR has enhanced 6-cycle latency + drain for pending SGPR write-backs
     if cat == 'valu' and sgpr_r_regs:
+      _is_cndmask_nonvcc = cond_sgpr >= 0 and cond_sgpr != 106  # non-VCC condition read (v_cndmask_b32_e64)
       for r in sgpr_r_regs:
         if r in sgpr_write_time[i]:
-          issue_cycle = max(issue_cycle, sgpr_write_time[i][r] + _SGPR_LATENCY)
+          lat = _CNDMASK_SGPR_LATENCY if (_is_cndmask_nonvcc and r == cond_sgpr) else _SGPR_LATENCY
+          issue_cycle = max(issue_cycle, sgpr_write_time[i][r] + lat)
         if r in smem_sgpr_ready[i]:
           issue_cycle = max(issue_cycle, smem_sgpr_ready[i][r])
+      # v_cndmask condition drain: when target SGPR recently completed (gap<3cy from completion),
+      # stall for ALL pending non-VCC SGPR write-backs + 1 (write-back bus contention on SGPR file)
+      if _is_cndmask_nonvcc and cond_sgpr in sgpr_write_time[i]:
+        target_complete = sgpr_write_time[i][cond_sgpr] + _SGPR_LATENCY
+        if issue_cycle - target_complete < 3:
+          pre_drain = issue_cycle
+          max_nonvcc = max((sgpr_write_time[i][r] + _SGPR_LATENCY for r in sgpr_write_time[i] if r != 106), default=0)
+          if max_nonvcc > pre_drain:
+            issue_cycle = max(issue_cycle, max_nonvcc + 1)
 
     # EXEC write-to-read dependency: v_cmpx writes EXEC, s_cbranch_execz/nz must wait for EXEC propagation
     if cat == 'branch' and extra is True:  # extra=True means reads_exec
@@ -732,17 +748,27 @@ def _init_sqtt_encoder(entry_pc: int):
         o = getattr(inst.vdsty, 'offset', -1)
         if o >= 256: vgpr_w.append(o - 256)
       # Sources: SGPR reads (SrcFields encode SGPRs 0-105, VCC 106-107; HW reads all encoded sources)
-      for fn in ('src0', 'src1', 'src2', 'srcx0', 'srcy0'):
+      # src2 handling: VOP3_SDST (v_cmp_e64) doesn't read src2; VOP3 v_cndmask reads src2 as condition SGPR
+      is_sdst = issubclass(inst_type, _VOP3_SDST)
+      cond_sgpr = -1  # condition SGPR for v_cndmask (non-VCC src2); -1 = none
+      for fn in ('src0', 'src1', 'srcx0', 'srcy0'):
         if hasattr(inst, fn):
           o = getattr(getattr(inst, fn), 'offset', -1)
           if 0 <= o <= 106: sgpr_r.append(o)
+          elif o >= 256: vgpr_r.append(o - 256)
+      if hasattr(inst, 'src2'):
+        o = getattr(inst.src2, 'offset', -1)
+        if not is_sdst:  # VOP3_SDST (v_cmp_e64) has src2 in encoding but HW doesn't read it (validated: exp_chain [54])
+          if 0 <= o <= 106:
+            sgpr_r.append(o)
+            if o != 106: cond_sgpr = o  # non-VCC condition SGPR (v_cndmask_b32_e64)
           elif o >= 256: vgpr_r.append(o - 256)
       # VGPR-only sources: vsrc1, vsrcx1, vsrcy1 are always VGPRs
       for fn in ('vsrc1', 'vsrcx1', 'vsrcy1'):
         if hasattr(inst, fn):
           o = getattr(getattr(inst, fn), 'offset', -1)
           if o >= 256: vgpr_r.append(o - 256)
-      reg_info = (is_vopc, tuple(sgpr_w), tuple(sgpr_r), tuple(vgpr_w), tuple(vgpr_r), issubclass(inst_type, _VOPD))
+      reg_info = (is_vopc, tuple(sgpr_w), tuple(sgpr_r), tuple(vgpr_w), tuple(vgpr_r), issubclass(inst_type, _VOPD), cond_sgpr)
       if op is None: events.append((VALUINST, {'wave': w}, 'valu', reg_info))
       else:
         kw = {'wave': w, 'op': op}
