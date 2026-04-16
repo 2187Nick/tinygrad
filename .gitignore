@@ -59,6 +59,7 @@ weights
 comgr_*
 *.pkl
 !extra/sqtt/examples/**/*.pkl
+!extra/sqtt/captures/**/*.pkl
 site/
 profile_stats
 *.log

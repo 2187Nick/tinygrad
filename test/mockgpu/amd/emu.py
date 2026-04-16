@@ -6,7 +6,7 @@
 #   arg=3: lds - local data share
 #   arg=4: scratch - per-lane scratch memory
 from __future__ import annotations
-import ctypes, functools, re, platform, subprocess, tempfile
+import ctypes, functools, os, re, platform, subprocess, tempfile
 from typing import Callable
 
 # Set/restore DAZ+FTZ (denormals-are-zero + flush-to-zero) to match RDNA3 default float mode
@@ -376,13 +376,16 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
       release_cycle = max(barrier_issue[i] for i in barrier_waves) + _BARRIER_FROM_LAST
       for idx, i in enumerate(sorted(barrier_waves)):
         at_barrier[i] = False
-        ready[i] = release_cycle + idx * 2  # 2-cycle RR stagger observed on GFX1100
+        # +2cy post-barrier pipeline refill; 2cy RR stagger per wave (GFX1100 observation)
+        ready[i] = release_cycle + idx * 2 + 2
       continue
 
     i = best
     wid = wave_ids[i]
     pkt_cls, kwargs, cat, extra = wave_events[wid][pc[i]]
-    issue_cycle = max(clock, ready[i])
+    # RDNA3: waves run on independent SIMDs — per-wave issue is not serialized by other waves' clock.
+    # Shared resources (LDS port, barrier) have their own trackers (cu_lds_available, at_barrier).
+    issue_cycle = ready[i]
 
     # Extract VALU register info from extra tuple: (is_vopc, sgpr_writes, sgpr_reads, vgpr_writes, vgpr_reads, is_vopd, cond_sgpr)
     if isinstance(extra, tuple) and len(extra) == 7:
