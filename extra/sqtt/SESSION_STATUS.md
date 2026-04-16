@@ -3,7 +3,7 @@
 ## Bounty Goal
 $1,000 bounty: Make tinygrad's software GPU emulator produce cycle-accurate instruction timing matching real AMD 7900 XTX hardware, validated via SQTT (Shader Queue Thread Trace).
 
-## Current Accuracy: 203/233 exact (87.1%), 228/233 ±2 (97.9%)
+## Current Accuracy: 205/233 exact (88.0%), 228/233 ±2 (97.9%)
 
 All 63 SQTT tests pass (encoder, map, examples, timing, E2E).
 
@@ -13,13 +13,13 @@ All 63 SQTT tests pass (encoder, map, examples, timing, E2E).
 |-------------|-------|-------|--------|---------|
 | elementwise | 16 | 16 | 100.0% | 100.0% |
 | cast | 14 | 14 | 100.0% | 100.0% |
-| plus | 12 | 13 | 92.3% | 100.0% |
+| plus | 13 | 13 | 100.0% | 100.0% |
 | data_deps | 9 | 10 | 90.0% | 90.0% |
 | exp_chain | 99 | 112 | 88.4% | 99.1% |
-| layernorm | 34 | 42 | 81.0% | 100.0% |
+| layernorm | 35 | 42 | 83.3% | 100.0% |
 | lds_sync | 19 | 26 | 73.1% | 88.5% |
 
-Progress: Started at 74.8% → now 87.1% exact (+16 points).
+Progress: 74.8% → 88.0% exact (+17 points this run: s_clause, scalar-branch issue cost).
 
 ## What We Built
 
