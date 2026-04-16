@@ -165,6 +165,8 @@ def _get_issue_cost(pkt_cls, kwargs) -> int:
     op = kwargs['op']
     # Trans instructions (VALUT_4) have 1-cycle SQ issue cost — the 4-cycle pipeline is enforced by trans_pipe_avail
     if op == InstOp.VALUT_4: return 1
+    # Scalar branches (taken and not-taken): SQTT records 3cy before next instruction (HW validated: layernorm [15])
+    if op in (InstOp.JUMP, InstOp.JUMP_NO): return 3
     return _INSTOP_ISSUE_COST.get(op, 1)
   return 1
 
