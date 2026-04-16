@@ -294,6 +294,16 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
           nop_stamp = nop_start + nop_cycles + 1
           timed.append((nop_stamp, wid, pkt_cls, kwargs))
           ready[i] = nop_stamp
+          # ISA team answer2.md (Bonus): s_nop counts toward all cycle-based forwarding windows.
+          # Cap VALU→VMEM forwarding deadlines: after a drain nop, only residual ≤5cy hazard remains
+          # (LLVM GCNHazardRecognizer: VALU→VMEM general = 1 wait state; address SGPR = 5).
+          _residual = nop_stamp + 5
+          valu_vmem_wr_deadline[i] = min(valu_vmem_wr_deadline[i], _residual)
+          valu_vmem_rd_deadline[i] = min(valu_vmem_rd_deadline[i], _residual)
+          # VGPR address-forwarding (wt + 27): also cap per-VGPR last-write so deadline ≤ nop_stamp+5
+          _wt_cap = _residual - _VALU_VMEM_ADDR_FORWARD
+          for _r in list(vgpr_write_time[i].keys()):
+            if vgpr_write_time[i][_r] > _wt_cap: vgpr_write_time[i][_r] = _wt_cap
         else:
           timed.append((nop_start, wid, pkt_cls, kwargs))
           ready[i] = nop_start + nop_cycles
@@ -480,7 +490,7 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
     timed.append((stamp_cycle, wid, pkt_cls, kwargs))
     issue_cost = _get_issue_cost(pkt_cls, kwargs)
     if pkt_cls is INST and kwargs.get('op') == InstOp.JUMP_NO:
-      issue_cost = 9
+      issue_cost = 8
 
     # Track memory operation completion times
     if cat == 'smem':

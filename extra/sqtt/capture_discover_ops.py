@@ -3,8 +3,7 @@
 import os, sys, pickle, pathlib, functools, inspect
 sys.path.insert(0, str(pathlib.Path(__file__).parent.parent.parent))
 from tinygrad import Tensor, Device, dtypes
-from tinygrad.device import Compiled
-from tinygrad.runtime.support.compiler_amd import ProfileProgramEvent, ProfileDeviceEvent
+from tinygrad.device import Compiled, ProfileProgramEvent, ProfileDeviceEvent
 from tinygrad.renderer.amd.sqtt import map_insts
 
 def _clear():
