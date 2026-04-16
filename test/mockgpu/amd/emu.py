@@ -464,8 +464,16 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
     if cat == 'barrier' and any(at_barrier):
       issue_cycle += 1
 
-    timed.append((issue_cycle, wid, pkt_cls, kwargs))
+    # Scalar branch NOT-TAKEN: HW stamps SQTT token ~6cy after issue; total 9cy until next ready.
+    # (Branch TAKEN: 3cy total — next inst redirects, no late stamp.)
+    stamp_cycle = issue_cycle
+    if pkt_cls is INST and kwargs.get('op') == InstOp.JUMP_NO:
+      stamp_cycle = issue_cycle + 6
+
+    timed.append((stamp_cycle, wid, pkt_cls, kwargs))
     issue_cost = _get_issue_cost(pkt_cls, kwargs)
+    if pkt_cls is INST and kwargs.get('op') == InstOp.JUMP_NO:
+      issue_cost = 9
 
     # Track memory operation completion times
     if cat == 'smem':
