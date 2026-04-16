@@ -153,11 +153,15 @@ def _instid_stall(instid: int, n_waves: int) -> int:
   return max(0, base - (n_waves - 1)) if 1 <= instid <= 4 else base
 
 # Per-instruction SQ issue cost: multi-cycle ops occupy the execution unit for N cycles.
-# Suffix number in InstOp name = issue cost.
+# Suffix number in InstOp name = issue cost — but ONLY for VALU ops. Memory op suffixes
+# (SGMEM_WR_2, FLAT_WR_3, LDS_WR_2, etc.) are opcode markers, not cycle counts.
 _INSTOP_ISSUE_COST: dict[InstOp, int] = {}
+_COST_SUFFIX_PREFIXES = ('VALU',)  # only parse suffix as cost for VALU* ops
 for _op in InstOp:
   _parts = _op.name.rsplit('_', 1)
-  if len(_parts) == 2 and _parts[1].isdigit() and int(_parts[1]) > 1: _INSTOP_ISSUE_COST[_op] = int(_parts[1])
+  if (len(_parts) == 2 and _parts[1].isdigit() and int(_parts[1]) > 1
+      and _op.name.startswith(_COST_SUFFIX_PREFIXES)):
+    _INSTOP_ISSUE_COST[_op] = int(_parts[1])
 del _op, _parts
 
 def _get_issue_cost(pkt_cls, kwargs) -> int:
@@ -165,8 +169,10 @@ def _get_issue_cost(pkt_cls, kwargs) -> int:
     op = kwargs['op']
     # Trans instructions (VALUT_4) have 1-cycle SQ issue cost — the 4-cycle pipeline is enforced by trans_pipe_avail
     if op == InstOp.VALUT_4: return 1
-    # Scalar branches (taken and not-taken): SQTT records 3cy before next instruction (HW validated: layernorm [15])
-    if op in (InstOp.JUMP, InstOp.JUMP_NO): return 3
+    # Scalar branch TAKEN: SQTT records 3cy before next instruction (HW: layernorm [15])
+    # Scalar branch NOT-TAKEN: SQTT records 10cy on the branch's own token (HW: probe_branch_cost)
+    if op == InstOp.JUMP: return 3
+    if op == InstOp.JUMP_NO: return 3
     return _INSTOP_ISSUE_COST.get(op, 1)
   return 1
 
