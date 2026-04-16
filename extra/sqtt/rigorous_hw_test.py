@@ -158,6 +158,42 @@ def _run_cast():
   _clear()
   return x.cast(dtypes.int32).cast(dtypes.float32).realize()
 
+def _run_probe_sgpr_cmps():
+  from test.amd.test_custom_kernel import custom_probe_sgpr_cmps
+  from test.amd.helpers import TARGET_TO_ARCH
+  arch = TARGET_TO_ARCH[Device["AMD"].arch]
+  a = Tensor.empty(128, dtype=dtypes.float32).contiguous().realize()
+  Device[Device.DEFAULT].synchronize()
+  _clear()
+  return Tensor.custom_kernel(a, fxn=functools.partial(custom_probe_sgpr_cmps, arch=arch))[0].realize()
+
+def _run_probe_cmp_chain():
+  from test.amd.test_custom_kernel import custom_probe_cmp_chain
+  from test.amd.helpers import TARGET_TO_ARCH
+  arch = TARGET_TO_ARCH[Device["AMD"].arch]
+  a = Tensor.empty(128, dtype=dtypes.float32).contiguous().realize()
+  Device[Device.DEFAULT].synchronize()
+  _clear()
+  return Tensor.custom_kernel(a, fxn=functools.partial(custom_probe_cmp_chain, arch=arch))[0].realize()
+
+def _run_probe_branch_cost():
+  from test.amd.test_custom_kernel import custom_probe_branch_cost
+  from test.amd.helpers import TARGET_TO_ARCH
+  arch = TARGET_TO_ARCH[Device["AMD"].arch]
+  a = Tensor.empty(128, dtype=dtypes.float32).contiguous().realize()
+  Device[Device.DEFAULT].synchronize()
+  _clear()
+  return Tensor.custom_kernel(a, fxn=functools.partial(custom_probe_branch_cost, arch=arch))[0].realize()
+
+def _run_probe_vmem_chain():
+  from test.amd.test_custom_kernel import custom_probe_vmem_chain
+  from test.amd.helpers import TARGET_TO_ARCH
+  arch = TARGET_TO_ARCH[Device["AMD"].arch]
+  a = Tensor.empty(128, dtype=dtypes.float32).contiguous().realize()
+  Device[Device.DEFAULT].synchronize()
+  _clear()
+  return Tensor.custom_kernel(a, fxn=functools.partial(custom_probe_vmem_chain, arch=arch))[0].realize()
+
 KERNELS = {
   # Non-DRAM dominated (best for emulator validation)
   "lds_sync":       (_run_lds_sync, 30),
@@ -175,6 +211,11 @@ KERNELS = {
   "plus":           (_run_plus, 30),
   "where":          (_run_where, 20),
   "cast":           (_run_cast, 20),
+  # Mechanism probes (for SGPR write-port mystery + branch cost + VMEM serialization)
+  "probe_sgpr_cmps":   (_run_probe_sgpr_cmps, 30),
+  "probe_cmp_chain":   (_run_probe_cmp_chain, 30),
+  "probe_branch_cost": (_run_probe_branch_cost, 30),
+  "probe_vmem_chain":  (_run_probe_vmem_chain, 30),
 }
 
 # ─── Capture mode ─────────────────────────────────────────────────────────────

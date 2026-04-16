@@ -146,6 +146,130 @@ def custom_data_deps(A:UOp, arch:str) -> UOp:
   sink = UOp.sink(A.base, threads, arg=KernelInfo("custom_data_deps"))
   return UOp(Ops.PROGRAM, src=(sink, UOp(Ops.DEVICE, arg="AMD"), UOp(Ops.LINEAR, src=tuple([UOp(Ops.INS, arg=x) for x in insts]))))
 
+def custom_probe_sgpr_cmps(A:UOp, arch:str) -> UOp:
+  """Probe: 4 v_cmp_e64 back-to-back writing s[0..3], then 4 v_cndmask reading them.
+  Run TWICE with a long trans-pipeline gap between. Compare stall patterns."""
+  A = A.flatten()
+  threads = UOp.special(A.size, "lidx0")
+  k = Kernel(arch)
+  k.emit(s_load_b64(s[0:1], s[0:1], soffset=NULL))
+  k.emit(s_waitcnt_lgkmcnt(sdst=NULL, simm16=0))
+  k.emit(v_lshlrev_b32_e32(v[0], 2, v[0]))
+  k.emit(global_load_b32(v[1], v[0], saddr=s[0:1]))
+  k.emit(s_waitcnt_vmcnt(sdst=NULL, simm16=0))
+  # Prep v[2..5] to compare
+  k.emit(v_mov_b32_e32(v[2], 1.0))
+  k.emit(v_mov_b32_e32(v[3], 2.0))
+  k.emit(v_mov_b32_e32(v[4], 3.0))
+  k.emit(v_mov_b32_e32(v[5], 4.0))
+  # Block A: 4 v_cmps back-to-back (use s[4..6] to avoid kernel args s[0:1])
+  k.emit(v_cmp_gt_f32_e32(0.5, v[2]))                  # VCC
+  k.emit(v_cmp_gt_f32_e64(s[4], 0.5, v[3]))            # s[4]
+  k.emit(v_cmp_gt_f32_e64(s[5], 0.5, v[4]))            # s[5] — watch this
+  k.emit(v_cmp_gt_f32_e64(s[6], 0.5, v[5]))            # s[6]
+  # 4 v_cndmask
+  k.emit(v_cndmask_b32_e32(v[6], 0.0, v[3]))           # VCC implicit (e32)
+  k.emit(v_cndmask_b32_e64(v[7], 0.0, v[3], s[4]))
+  k.emit(v_cndmask_b32_e64(v[8], 0.0, v[3], s[5]))
+  k.emit(v_cndmask_b32_e64(v[9], 0.0, v[3], s[6]))
+  # Long trans pipeline to drain state
+  k.emit(v_exp_f32_e32(v[10], v[2]))
+  k.emit(v_log_f32_e32(v[10], v[10]))
+  k.emit(v_sqrt_f32_e32(v[10], v[10]))
+  k.emit(s_waitcnt(simm16=0))
+  k.emit(s_nop(15))  # force drain
+  k.emit(s_nop(15))
+  k.emit(s_nop(15))
+  # Block B: IDENTICAL sequence - compare stalls
+  k.emit(v_cmp_gt_f32_e32(0.5, v[2]))
+  k.emit(v_cmp_gt_f32_e64(s[4], 0.5, v[3]))
+  k.emit(v_cmp_gt_f32_e64(s[5], 0.5, v[4]))
+  k.emit(v_cmp_gt_f32_e64(s[6], 0.5, v[5]))
+  k.emit(v_cndmask_b32_e32(v[11], 0.0, v[3]))
+  k.emit(v_cndmask_b32_e64(v[12], 0.0, v[3], s[4]))
+  k.emit(v_cndmask_b32_e64(v[13], 0.0, v[3], s[5]))
+  k.emit(v_cndmask_b32_e64(v[14], 0.0, v[3], s[6]))
+  # Store something to keep compiler happy
+  k.emit(v_add_f32_e32(v[1], v[6], v[1]))
+  k.emit(global_store_b32(addr=v[0], data=v[1], saddr=s[0:1]))
+  k.emit(s_endpgm())
+  insts = k.finalize()
+  sink = UOp.sink(A.base, threads, arg=KernelInfo("custom_probe_sgpr_cmps"))
+  return UOp(Ops.PROGRAM, src=(sink, UOp(Ops.DEVICE, arg="AMD"), UOp(Ops.LINEAR, src=tuple([UOp(Ops.INS, arg=x) for x in insts]))))
+
+def custom_probe_cmp_chain(A:UOp, arch:str) -> UOp:
+  """Probe: 8 v_cmp_e64 in a row writing s[0..7]. Check where stalls appear."""
+  A = A.flatten()
+  threads = UOp.special(A.size, "lidx0")
+  k = Kernel(arch)
+  k.emit(s_load_b64(s[0:1], s[0:1], soffset=NULL))
+  k.emit(s_waitcnt_lgkmcnt(sdst=NULL, simm16=0))
+  k.emit(v_lshlrev_b32_e32(v[0], 2, v[0]))
+  k.emit(global_load_b32(v[1], v[0], saddr=s[0:1]))
+  k.emit(s_waitcnt_vmcnt(sdst=NULL, simm16=0))
+  for i in range(8): k.emit(v_mov_b32_e32(v[2+i], float(i+1)))
+  # 8 v_cmps back-to-back writing s[4..11] (avoid s[0:1] which holds kernel args)
+  for i in range(8): k.emit(v_cmp_gt_f32_e64(s[4+i], 0.5, v[2+i]))
+  # nop drain
+  k.emit(s_nop(15))
+  k.emit(v_add_f32_e32(v[1], 1.0, v[1]))
+  k.emit(global_store_b32(addr=v[0], data=v[1], saddr=s[0:1]))
+  k.emit(s_endpgm())
+  insts = k.finalize()
+  sink = UOp.sink(A.base, threads, arg=KernelInfo("custom_probe_cmp_chain"))
+  return UOp(Ops.PROGRAM, src=(sink, UOp(Ops.DEVICE, arg="AMD"), UOp(Ops.LINEAR, src=tuple([UOp(Ops.INS, arg=x) for x in insts]))))
+
+def custom_probe_branch_cost(A:UOp, arch:str) -> UOp:
+  """Probe: branches of various types, to measure branch issue cost vs retire delay.
+  Use forward branches that are never taken (scc=0 + scc1 branch, exec stays set)."""
+  A = A.flatten()
+  threads = UOp.special(A.size, "lidx0")
+  k = Kernel(arch)
+  k.emit(s_load_b64(s[0:1], s[0:1], soffset=NULL))
+  k.emit(s_waitcnt_lgkmcnt(sdst=NULL, simm16=0))
+  k.emit(v_lshlrev_b32_e32(v[0], 2, v[0]))
+  k.emit(global_load_b32(v[1], v[0], saddr=s[0:1]))
+  k.emit(s_waitcnt_vmcnt(sdst=NULL, simm16=0))
+  # SCC-based branch NOT TAKEN (scc=0, branch on scc1)
+  k.emit(s_mov_b32(s[4], 0))
+  k.emit(s_cmp_eq_i32(s[4], 1))      # sets SCC=0
+  k.emit(s_cbranch_scc1(), target="end")
+  k.emit(v_mov_b32_e32(v[10], 1.0))
+  k.emit(v_mov_b32_e32(v[11], 2.0))
+  # Second SCC branch
+  k.emit(s_cmp_eq_i32(s[4], 1))
+  k.emit(s_cbranch_scc1(), target="end")
+  k.emit(v_mov_b32_e32(v[12], 3.0))
+  k.emit(v_add_f32_e32(v[1], v[10], v[1]))
+  k.emit(global_store_b32(addr=v[0], data=v[1], saddr=s[0:1]))
+  k.label("end")
+  k.emit(s_endpgm())
+  insts = k.finalize()
+  sink = UOp.sink(A.base, threads, arg=KernelInfo("custom_probe_branch_cost"))
+  return UOp(Ops.PROGRAM, src=(sink, UOp(Ops.DEVICE, arg="AMD"), UOp(Ops.LINEAR, src=tuple([UOp(Ops.INS, arg=x) for x in insts]))))
+
+def custom_probe_vmem_chain(A:UOp, arch:str) -> UOp:
+  """Probe: back-to-back global_stores to probe VMEM issue port serialization."""
+  A = A.flatten()
+  threads = UOp.special(A.size, "lidx0")
+  k = Kernel(arch)
+  k.emit(s_load_b64(s[0:1], s[0:1], soffset=NULL))
+  k.emit(s_waitcnt_lgkmcnt(sdst=NULL, simm16=0))
+  k.emit(v_lshlrev_b32_e32(v[0], 2, v[0]))
+  k.emit(v_mov_b32_e32(v[1], 1.0))
+  k.emit(v_mov_b32_e32(v[2], 2.0))
+  k.emit(v_mov_b32_e32(v[3], 3.0))
+  k.emit(v_mov_b32_e32(v[4], 4.0))
+  k.emit(s_nop(10))  # drain VALU
+  k.emit(global_store_b32(addr=v[0], data=v[1], saddr=s[0:1]))
+  k.emit(global_store_b32(addr=v[0], data=v[2], saddr=s[0:1]))
+  k.emit(global_store_b32(addr=v[0], data=v[3], saddr=s[0:1]))
+  k.emit(global_store_b32(addr=v[0], data=v[4], saddr=s[0:1]))
+  k.emit(s_endpgm())
+  insts = k.finalize()
+  sink = UOp.sink(A.base, threads, arg=KernelInfo("custom_probe_vmem_chain"))
+  return UOp(Ops.PROGRAM, src=(sink, UOp(Ops.DEVICE, arg="AMD"), UOp(Ops.LINEAR, src=tuple([UOp(Ops.INS, arg=x) for x in insts]))))
+
 @unittest.skipUnless(Device.DEFAULT == "AMD", "requires AMD device")
 class TestCustomKernel(unittest.TestCase):
   def setUp(self): self.arch = TARGET_TO_ARCH[Device["AMD"].arch]
