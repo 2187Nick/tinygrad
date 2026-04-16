@@ -595,3 +595,4 @@ trace of the exp_chain kernel showing all instructions between Block 1, 2, and 3
 **Expected impact**: Fixing these two mechanisms should resolve ~13 of 30 mismatches
 (the team's estimate of >40% improvement), specifically all mismatches involving
 consecutive V_CMP_e64 writes and subsequent v_cndmask SGPR reads.
+sudo DEV=AMD AM_RESET=1 VIZ=-2 PROFILE=1 SQTT=1 DEBUG=0 PYTHONPATH=. .venv/bin/python extra/sqtt/capture_discover_ops.py

@@ -285,11 +285,18 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
         valu_pend[i] = [c for c in valu_pend[i] if c > stall_until]
         continue
       if cat == 'nop':
-        # s_nop(N): stall for N+1 cycles, but also wait for VMEM pipeline drain
+        # s_nop(N): stalls IB for N+1 cycles. HW stamps SQTT token AFTER the stall elapses
+        # when N>0 (probe_vmem_chain wave0 s_nop(10) → delta=13). For nop(0) the stall is
+        # typically short and overlapped by drain, so keep legacy "stamp at start" behavior.
         nop_cycles = (extra + 1) if extra is not None else 1
-        nop_time = max(ready[i], vmem_drain_deadline[i])
-        timed.append((nop_time, wid, pkt_cls, kwargs))
-        ready[i] = nop_time + nop_cycles
+        nop_start = max(ready[i], vmem_drain_deadline[i])
+        if nop_cycles > 1:
+          nop_stamp = nop_start + nop_cycles + 1
+          timed.append((nop_stamp, wid, pkt_cls, kwargs))
+          ready[i] = nop_stamp
+        else:
+          timed.append((nop_start, wid, pkt_cls, kwargs))
+          ready[i] = nop_start + nop_cycles
         pc[i] += 1
         continue
       if cat == 'immediate':
