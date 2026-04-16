@@ -288,6 +288,12 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
         timed.append((ready[i], wid, pkt_cls, kwargs))
         pc[i] += 1
         continue
+      if cat == 'clause':
+        # S_CLAUSE marks clause start; HW records it 1cy before next instruction (plus [0]→[1])
+        timed.append((ready[i], wid, pkt_cls, kwargs))
+        ready[i] += 1
+        pc[i] += 1
+        continue
       break  # hit a non-zero-cost event
 
   # Phase 2: Round-robin instruction scheduling
@@ -696,6 +702,8 @@ def _init_sqtt_encoder(entry_pc: int):
           events.append((IMMEDIATE, {'wave': w}, 'depctr', inst.simm16))
         elif inst_op == SOPPOp3.S_NOP.value:
           events.append((IMMEDIATE, {'wave': w}, 'nop', inst.simm16))
+        elif inst_op == SOPPOp3.S_CLAUSE.value:
+          events.append((IMMEDIATE, {'wave': w}, 'clause', None))
         else:
           events.append((IMMEDIATE, {'wave': w}, 'immediate', None))
         return
