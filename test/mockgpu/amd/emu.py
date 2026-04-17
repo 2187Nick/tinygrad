@@ -118,6 +118,10 @@ def _nibbles_to_bytes(nibbles: list[int]) -> bytes:
 # SQTT TIMING MODEL — Cycle-accurate SQ scheduling simulation for RDNA3
 # ═══════════════════════════════════════════════════════════════════════════════
 
+# Debug trace: when SQTT_DEBUG=1, collect per-instruction diagnostic info accessible via _sqtt_debug_log
+_SQTT_DEBUG = int(os.environ.get("SQTT_DEBUG", "0"))
+_sqtt_debug_log: list[dict] = []  # populated by _simulate_sq_timing when _SQTT_DEBUG=1
+
 # Latency constants (in SQ clock cycles) — tuned against GFX1100 SQTT traces
 _LDS_RD_LATENCY = 31
 _LDS_WR_LATENCY = 33
@@ -136,7 +140,7 @@ _VMEM_EXEC_MIN = 8         # minimum VMEM execution time after forwarding stall 
 _TRANS_PIPELINE_LATENCY = 27 # transcendental unit result latency (v_exp, v_log, v_rcp, etc.) — depctr waits for this
 _TRANS_PIPELINE_LATENCY_SQRT = 31 # v_sqrt/v_rsq have longer latency (HW validated: depctr after v_sqrt = L-6=25 → L=31)
 _SGPR_LATENCY = 4   # VALU SGPR write-to-read latency: HW enforces without explicit S_DELAY_ALU hints
-_CNDMASK_SGPR_LATENCY = 6  # v_cndmask condition SGPR: 2cy extra over standard SGPR path (HW validated: exp_chain [14],[57])
+_CNDMASK_SGPR_LATENCY = 4  # v_cndmask condition SGPR: same as standard SGPR (HW validated: probe_sgpr_cmps gap=4 sufficient)
 _WAVESTART_GAP = 1
 _FIRST_INST_GAP = 2
 # S_DELAY_ALU INSTID → base stall cycles for single-wave (0=NO_DEP, 1-4=VALU_DEP, 5-7=TRANS32_DEP, 8=FMA_ACCUM, 9-11=SALU_CYCLE)
@@ -191,6 +195,7 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
   wave_ids = sorted(wave_events.keys())
   n = len(wave_ids)
   if not n: return []
+  if _SQTT_DEBUG: _sqtt_debug_log.clear()
 
   # Per-wave state
   pc = [0] * n
@@ -210,6 +215,7 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
   valu_vmem_rd_deadline = [0] * n # VALU→VMEM_RD forwarding
   vmem_drain_deadline = [0] * n   # VMEM pipeline drain: blocks s_nop/s_endpgm until VMEM accepted
   trans_pipe_avail = [0] * n      # trans ALU pipeline: when trans unit is free for next trans instruction
+  scalar_after_trans_ready = [0] * n  # trans→scalar visibility: scalar path stalls until trans has cleared (HW validated: probe_sgpr_cmps)
   vopd_pipe_avail = [0] * n      # VOPD dual-issue: when VOPD unit is free for next VOPD instruction
   valu_issue_hist: list[list[int]] = [[] for _ in range(n)]  # last 4 non-trans VALU issue times (for time-based delay_alu)
   sgpr_write_time: list[dict[int, int]] = [{} for _ in range(n)]  # SGPR last VALU-write cycle (offset → cycle)
@@ -217,25 +223,33 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
   vgpr_ready: list[dict[int, int]] = [{} for _ in range(n)]  # VGPR readiness scoreboard (reg_idx → cycle when result available)
   vgpr_slow_fresh_until: list[dict[int, int]] = [{} for _ in range(n)]  # VGPR slow-freshness: consuming before this cycle yields 9cy VALU latency
   vgpr_write_time: list[dict[int, int]] = [{} for _ in range(n)]  # VGPR last VALU-write cycle (reg_idx → issue cycle) for VMEM addr forwarding
+  trans_vgpr_ready: list[dict[int, int]] = [{} for _ in range(n)]  # trans-written VGPR readiness: only non-trans consumers wait for full writeback
   has_delay_alu = [False] * n     # per-wave: has any s_delay_alu been seen (controls VGPR scoreboard activation)
   exec_write_time = [0] * n      # per-wave: last cycle when EXEC was written (by v_cmpx)
+  scc_write_time = [0] * n       # per-wave: last cycle when SCC was written (by s_cmp/s_cmpk/SALU)
   consecutive_selffwd_vgprs = [0] * n  # count of VGPRs written by consecutive self-forwarding non-VOPC VALUs
   consecutive_vgprs_written = [0] * n  # count of VGPRs written by consecutive non-VOPC VALUs (any kind)
   cu_lds_available = 0        # shared LDS unit contention
   cu_lds_last_was_write = False
   cu_lds_rd_available = 0     # b128 read LDS serialization: next b128 read completion delayed
   burst_wave = -1             # VALU burst: wave in consecutive VALU sequence
+  burst_exclusive = False     # True when burst started with no other wave recently active (prevents false bursts during interleaving)
+  prev_issue_cycle = -1       # global SIMD scheduling: last non-zero-cost issue cycle
+  prev_wave = -1              # last wave that issued a non-zero-cost instruction
 
   timed: list[tuple[int, int, type, dict]] = []
 
   def _vmem_wr_bypass_active(i: int) -> bool:
     """Check if inter-wave VMEM forwarding bypass applies for wave i's store.
-    Bypass fires when another wave will be scheduled ≥4cy before our deadline, providing
-    enough overlap for the SQ to pipeline forwarding (reducing 21→17cy)."""
+    Bypass fires when the SQ has overlapping work: either another wave's active VMEM drain
+    provides pipeline overlap, or another wave is schedulable before our reduced deadline."""
     if valu_vmem_wr_set_time[i] == 0: return False
     reduced = valu_vmem_wr_deadline[i] - _VALU_VMEM_WR_BYPASS
     for j in range(n):
-      if j == i or wave_done[j] or at_barrier[j]: continue
+      if j == i or at_barrier[j]: continue
+      # Active VMEM drain from another wave provides pipeline overlap (even waveend waves)
+      if vmem_drain_deadline[j] >= reduced: return True
+      if wave_done[j]: continue
       if pc[j] >= len(wave_events[wave_ids[j]]): continue
       _, _, jcat, _ = wave_events[wave_ids[j]][pc[j]]
       if jcat == 'waveend': continue
@@ -260,8 +274,14 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
       ready[i] = 1
 
   def _drain_zero_cost(i: int):
+    nonlocal burst_wave, burst_exclusive
     wid = wave_ids[i]
     events = wave_events[wid]
+    # Track the stamp of the last drain event (waitcnt/depctr/nop).
+    # When nop follows a drain event, it starts at that stamp (no 1-cycle gap).
+    # When nop follows a non-drain event (VALU/etc), normal gap applies.
+    last_drain_stamp = -1
+    had_drain_nop = False  # nop preceded by drain → needs IB resume +1 after loop
     while pc[i] < len(events):
       pkt_cls, kwargs, cat, extra = events[pc[i]]
       if cat == 'delay_alu':
@@ -279,6 +299,8 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
         lgkm_th = (simm16 >> 4) & 0x3f
         vm_th = (simm16 >> 10) & 0x3f
         stall_until = ready[i]
+        # Trans→scalar stall: scalar path waits for trans pipeline to clear
+        stall_until = max(stall_until, scalar_after_trans_ready[i])
         # lgkmcnt: stall until at most lgkm_th ops are still pending
         sl = sorted(lgkm_pend[i])
         if lgkm_th < len(sl):
@@ -289,6 +311,7 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
           stall_until = max(stall_until, sv[len(sv) - vm_th - 1])
         timed.append((stall_until, wid, pkt_cls, kwargs))
         ready[i] = stall_until + 1  # waitcnt occupies the stall_until cycle; next issue at +1
+        last_drain_stamp = stall_until  # nop after waitcnt starts at stall_until (no +1 gap)
         pc[i] += 1
         # Prune completed ops
         lgkm_pend[i] = [c for c in lgkm_pend[i] if c > stall_until]
@@ -302,29 +325,45 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
           stall_until = max(stall_until, max(valu_pend[i]))
         timed.append((stall_until, wid, pkt_cls, kwargs))
         ready[i] = stall_until + 1
+        last_drain_stamp = stall_until
         pc[i] += 1
         valu_pend[i] = [c for c in valu_pend[i] if c > stall_until]
         continue
       if cat == 'nop':
-        # s_nop(N): stalls IB for N+1 cycles. HW stamps SQTT token AFTER the stall elapses
-        # when N>0 (probe_vmem_chain wave0 s_nop(10) → delta=13). For nop(0) the stall is
-        # typically short and overlapped by drain, so keep legacy "stamp at start" behavior.
+        # s_nop(N): stalls IB for N+1 cycles.
         nop_cycles = (extra + 1) if extra is not None else 1
-        nop_start = max(ready[i], vmem_drain_deadline[i])
+        # After drain event: nop starts at drain stamp (no gap). After non-drain: normal gap.
+        if last_drain_stamp >= 0:
+          nop_start = max(last_drain_stamp, vmem_drain_deadline[i])
+        else:
+          nop_start = max(ready[i], vmem_drain_deadline[i])
+        # SGPR drain: s_nop stalls until all pending SGPR write-backs complete
+        if sgpr_write_time[i]:
+          sgpr_drain = max(t + _SGPR_LATENCY + 1 for t in sgpr_write_time[i].values())
+          nop_start = max(nop_start, sgpr_drain)
         if nop_cycles > 1:
-          nop_stamp = nop_start + nop_cycles + 1
+          if last_drain_stamp >= 0:
+            # After drain event: stamp = start + stall_cycles (no overhead)
+            nop_stamp = nop_start + nop_cycles
+            had_drain_nop = True
+          else:
+            # After non-drain event (VALU/etc): stamp includes +1 overhead
+            nop_stamp = nop_start + nop_cycles + 1
+          if nop_cycles >= 16: print(f"NOP_TRACE wave={i} pc={pc[i]} nop_start={nop_start} nop_cycles={nop_cycles} nop_stamp={nop_stamp} drain={last_drain_stamp} sgpr_wt={dict(sgpr_write_time[i])} ready_before={ready[i]} vmem_drain={vmem_drain_deadline[i]}")
           timed.append((nop_stamp, wid, pkt_cls, kwargs))
           ready[i] = nop_stamp
+          last_drain_stamp = nop_stamp  # chain: next nop starts at this stamp
           # ISA team answer2.md (Bonus): s_nop counts toward all cycle-based forwarding windows.
-          # Cap VALU→VMEM forwarding deadlines: after a drain nop, only residual ≤5cy hazard remains
-          # (LLVM GCNHazardRecognizer: VALU→VMEM general = 1 wait state; address SGPR = 5).
           _residual = nop_stamp + 5
           valu_vmem_wr_deadline[i] = min(valu_vmem_wr_deadline[i], _residual)
           valu_vmem_rd_deadline[i] = min(valu_vmem_rd_deadline[i], _residual)
-          # VGPR address-forwarding (wt + 27): also cap per-VGPR last-write so deadline ≤ nop_stamp+5
           _wt_cap = _residual - _VALU_VMEM_ADDR_FORWARD
           for _r in list(vgpr_write_time[i].keys()):
             if vgpr_write_time[i][_r] > _wt_cap: vgpr_write_time[i][_r] = _wt_cap
+          # Prune completed SGPR writes: writes that have fully drained during the nop
+          sgpr_write_time[i] = {r: t for r, t in sgpr_write_time[i].items() if t + _SGPR_LATENCY >= nop_stamp}
+          # Long nops invalidate burst state: the scheduling gap makes pre-nop burst stale
+          if nop_cycles >= 16: burst_wave = -1; burst_exclusive = False
         else:
           timed.append((nop_start, wid, pkt_cls, kwargs))
           ready[i] = nop_start + nop_cycles
@@ -341,6 +380,9 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
         pc[i] += 1
         continue
       break  # hit a non-zero-cost event
+    # After draining: nop preceded by drain event needs 1 cycle for IB resume
+    # (HW validated: v_cmp/v_add after drain nop chain always has delta=1, not 0)
+    if had_drain_nop: ready[i] += 1
 
   # Phase 2: Round-robin instruction scheduling
   clock = min(ready) if ready else 1
@@ -354,16 +396,26 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
     for i in range(n):
       if not wave_done[i] and not at_barrier[i]: _drain_zero_cost(i)
 
-    # VALU burst: consecutive VALU from same wave get priority if ready
+    # DEBUG: trace ready values after drain when they're in the nop range
+    if n > 1 and 590 <= ready[0] <= 620:
+      print(f"POST_DRAIN ready={[ready[j] for j in range(n)]} burst_wave={burst_wave} burst_excl={burst_exclusive} prev_issue={prev_issue_cycle} pc={[pc[j] for j in range(n)]}")
+
+    # VALU burst: consecutive VALU from same wave gets priority only when burst started exclusively
+    # (other wave was stalled). When both waves are interleaving, no burst priority (HW interleaves).
     best, best_cycle = -1, 1 << 62
-    if burst_wave >= 0 and not wave_done[burst_wave] and not at_barrier[burst_wave] \
-        and pc[burst_wave] < len(wave_events[wave_ids[burst_wave]]) and ready[burst_wave] <= clock:
+    if burst_wave >= 0 and burst_exclusive and not wave_done[burst_wave] and not at_barrier[burst_wave] \
+        and pc[burst_wave] < len(wave_events[wave_ids[burst_wave]]):
       _, _, bcat, _ = wave_events[wave_ids[burst_wave]][pc[burst_wave]]
       if bcat == 'valu':
         best = burst_wave
         best_cycle = ready[burst_wave]
     if best == -1:
+      # Burst ending: other waves must wait until after burst's last issue cycle (SIMD serialization)
+      if burst_wave >= 0 and burst_exclusive and prev_issue_cycle >= 0:
+        for j in range(n):
+          if j != burst_wave: ready[j] = max(ready[j], prev_issue_cycle + 1)
       burst_wave = -1
+      burst_exclusive = False
     # Fallback: earliest effective-ready cycle, round-robin tiebreak
     if best == -1:
       for offset in range(n):
@@ -458,19 +510,16 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
           issue_cycle = max(issue_cycle, sgpr_write_time[i][r] + lat)
         if r in smem_sgpr_ready[i]:
           issue_cycle = max(issue_cycle, smem_sgpr_ready[i][r])
-      # v_cndmask condition drain: when target SGPR recently completed (gap<3cy from completion),
-      # stall for ALL pending non-VCC SGPR write-backs + 1 (write-back bus contention on SGPR file)
-      if _is_cndmask_nonvcc and cond_sgpr in sgpr_write_time[i]:
-        target_complete = sgpr_write_time[i][cond_sgpr] + _SGPR_LATENCY
-        if issue_cycle - target_complete < 3:
-          pre_drain = issue_cycle
-          max_nonvcc = max((sgpr_write_time[i][r] + _SGPR_LATENCY for r in sgpr_write_time[i] if r != 106), default=0)
-          if max_nonvcc > pre_drain:
-            issue_cycle = max(issue_cycle, max_nonvcc + 1)
+      # v_cndmask condition drain: disabled — HW probe_sgpr_cmps shows gap=4 sufficient without drain
 
     # EXEC write-to-read dependency: v_cmpx writes EXEC, s_cbranch_execz/nz must wait for EXEC propagation
-    if cat == 'branch' and extra is True:  # extra=True means reads_exec
-      issue_cycle = max(issue_cycle, exec_write_time[i] + _EXEC_WRITE_LATENCY)
+    # SCC write-to-read dependency: s_cmp writes SCC, s_cbranch_scc0/scc1 must wait 1cy for SCC propagation
+    if cat == 'branch' and isinstance(extra, tuple):
+      reads_exec, reads_scc = extra
+      if reads_exec:
+        issue_cycle = max(issue_cycle, exec_write_time[i] + _EXEC_WRITE_LATENCY)
+      if reads_scc:
+        issue_cycle = max(issue_cycle, scc_write_time[i] + 2)
 
     # VGPR readiness: HW interlock enforces RAW deps on VALU-written VGPRs regardless of s_delay_alu coverage
     if cat == 'valu' and vgpr_r_regs:
@@ -479,6 +528,12 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
         if r in vr: issue_cycle = max(issue_cycle, vr[r])
     # Enforce trans ALU pipeline occupancy: trans instructions wait for the trans unit to be free
     _is_trans = cat == 'valu' and pkt_cls is INST and kwargs.get('op') == InstOp.VALUT_4
+    # Trans-written VGPR readiness: non-trans VALU must wait for full trans writeback (27/31 cycles)
+    # Trans→trans uses internal ALU forwarding — only trans_pipe_avail applies (4 cycles)
+    if cat == 'valu' and not _is_trans and vgpr_r_regs:
+      tvr = trans_vgpr_ready[i]
+      for r in vgpr_r_regs:
+        if r in tvr: issue_cycle = max(issue_cycle, tvr[r])
     if _is_trans:
       issue_cycle = max(issue_cycle, trans_pipe_avail[i])
     # Enforce VOPD dual-issue occupancy: consecutive VOPDs need spacing
@@ -519,7 +574,40 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
     if pkt_cls is INST and kwargs.get('op') == InstOp.JUMP_NO:
       stamp_cycle = issue_cycle + 7
 
+    prev_issue_cycle = issue_cycle
+    prev_wave = i
     timed.append((stamp_cycle, wid, pkt_cls, kwargs))
+
+    # Debug trace: collect per-instruction diagnostic data
+    if _SQTT_DEBUG:
+      dbg = {"wave": i, "pc_idx": pc[i], "cat": cat, "issue_cycle": issue_cycle, "stamp": stamp_cycle,
+             "ready": ready[i], "clock": clock}
+      if cat == 'valu':
+        dbg["sgpr_write_time"] = dict(sgpr_write_time[i])
+        dbg["vgpr_stall"] = {r: vgpr_ready[i].get(r, 0) for r in (vgpr_r_regs or ())}
+        dbg["sgpr_r_regs"] = sgpr_r_regs
+        dbg["cond_sgpr"] = cond_sgpr
+        dbg["has_delay_alu"] = has_delay_alu[i]
+        dbg["trans_pipe_avail"] = trans_pipe_avail[i]
+      if cat == 'vmem_wr':
+        dbg["vmem_wr_deadline"] = valu_vmem_wr_deadline[i]
+        dbg["vmem_wr_set_time"] = valu_vmem_wr_set_time[i]
+        dbg["vmem_drain_deadline"] = vmem_drain_deadline[i]
+        dbg["bypass_active"] = store_vgprs == 1 and _vmem_wr_bypass_active(i)
+        # Log other waves' state for bypass analysis
+        for j in range(n):
+          if j == i: continue
+          jdone = wave_done[j]
+          jpc = pc[j] if pc[j] < len(wave_events[wave_ids[j]]) else -1
+          jcat = wave_events[wave_ids[j]][pc[j]][2] if jpc >= 0 else "done"
+          dbg[f"w{j}_done"] = jdone
+          dbg[f"w{j}_ready"] = ready[j]
+          dbg[f"w{j}_cat"] = jcat
+          dbg[f"w{j}_vmem_drain"] = vmem_drain_deadline[j]
+      if cat == 'nop': dbg["vmem_drain_deadline"] = vmem_drain_deadline[i]
+      if cat == 'branch': dbg["op"] = str(kwargs.get('op', ''))
+      _sqtt_debug_log.append(dbg)
+
     issue_cost = _get_issue_cost(pkt_cls, kwargs)
     if pkt_cls is INST and kwargs.get('op') == InstOp.JUMP_NO:
       issue_cost = 10
@@ -579,6 +667,8 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
         trans_lat = _TRANS_PIPELINE_LATENCY  # simple trans: v_log, v_rcp = 27 cycles
       valu_pend[i].append(issue_cycle + trans_lat)
       trans_pipe_avail[i] = issue_cycle + _TRANS_PIPE_CYCLES
+      # Trans→scalar visibility: scalar path (waitcnt, s_nop) stalls until trans pipeline clears
+      scalar_after_trans_ready[i] = issue_cycle + _TRANS_PIPE_CYCLES - 1
 
     # Track VOPD pipeline occupancy: next VOPD must wait for the dual-issue slot
     if is_vopd:
@@ -622,6 +712,11 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
     if cat == 'valu' and kwargs.get('op') == InstOp.VALU1_WR_EXEC:
       exec_write_time[i] = issue_cycle
 
+    # Track SCC write time: SALU (s_cmp, s_cmpk, etc.) writes SCC for branch dependency
+    if cat == 'salu':
+      scc_write_time[i] = issue_cycle
+      exec_write_time[i] = issue_cycle
+
     # Track VGPR write readiness: all VALU writes update scoreboard for RAW dependency tracking
     if cat == 'valu' and not _is_trans and vgpr_w_regs:
       vr = vgpr_ready[i]
@@ -634,9 +729,17 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
       else: lat = 5
       for r in vgpr_w_regs:
         vr[r] = issue_cycle + lat
+        trans_vgpr_ready[i].pop(r, None)  # non-trans write overrides trans readiness
         # Propagate slow-freshness: if this VALU is slow, its result is also slow-fresh for a window
         if lat == 9: sf[r] = vr[r] + 4
         else: sf.pop(r, None)  # clean VALU clears slow-freshness
+
+    # Track VGPR readiness for trans ops: non-trans consumers must wait for full writeback
+    # Trans→trans uses internal forwarding (handled by trans_pipe_avail), so we track separately
+    if cat == 'valu' and _is_trans and vgpr_w_regs:
+      tvr = trans_vgpr_ready[i]
+      for r in vgpr_w_regs:
+        tvr[r] = issue_cycle + trans_lat
 
     # Track per-VGPR write times for VMEM address forwarding (all non-trans VALU writes)
     if cat == 'valu' and not _is_trans and vgpr_w_regs:
@@ -645,9 +748,14 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
 
     # Track VALU burst
     if cat == 'valu':
+      if burst_wave != i:
+        # New burst starting — only exclusive if other waves are truly stalled (not just 1cy behind from interleaving)
+        burst_exclusive = all(wave_done[j] or at_barrier[j] or ready[j] > issue_cycle + 2
+                             for j in range(n) if j != i)
       burst_wave = i
     else:
       burst_wave = -1
+      burst_exclusive = False
 
     if cat == 'barrier':
       at_barrier[i] = True
@@ -701,6 +809,7 @@ def _init_sqtt_encoder(entry_pc: int):
                   SOPPOp3.S_CBRANCH_VCCZ.value, SOPPOp3.S_CBRANCH_VCCNZ.value,
                   SOPPOp3.S_CBRANCH_EXECZ.value, SOPPOp3.S_CBRANCH_EXECNZ.value}
   _SOPP_BRANCH_EXEC = {SOPPOp3.S_CBRANCH_EXECZ.value, SOPPOp3.S_CBRANCH_EXECNZ.value}
+  _SOPP_BRANCH_SCC = {SOPPOp3.S_CBRANCH_SCC0.value, SOPPOp3.S_CBRANCH_SCC1.value}
 
   # RDNA3-only SOPK waitcnt instructions (RDNA4 uses SOPP s_wait_* instead)
   _SOPK = (ir3.SOPK, ir4.SOPK, irc.SOPK)
@@ -778,7 +887,8 @@ def _init_sqtt_encoder(entry_pc: int):
         return
       if inst_op in _SOPP_BRANCH:
         reads_exec = inst_op in _SOPP_BRANCH_EXEC
-        events.append((INST, {'wave': w, 'op': InstOp.JUMP if branch_taken else InstOp.JUMP_NO}, 'branch', reads_exec))
+        reads_scc = inst_op in _SOPP_BRANCH_SCC
+        events.append((INST, {'wave': w, 'op': InstOp.JUMP if branch_taken else InstOp.JUMP_NO}, 'branch', (reads_exec, reads_scc)))
         return
       events.append((INST, {'wave': w, 'op': InstOp.SALU}, 'salu', None))
       return
