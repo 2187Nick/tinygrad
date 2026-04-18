@@ -60,10 +60,8 @@ def compare_against_baseline():
   os.environ["PYTHON_REMU"] = "1"; os.environ["PROFILE"] = "1"; os.environ["SQTT"] = "1"
   os.environ["PROBE"] = "1"
   sys.path.insert(0, str(ROOT))
-  from extra.sqtt.rigorous_hw_test import PROBE_KERNELS
-  from tinygrad import Device
-  from tinygrad.viz.serve import extract_traces
-  from tinygrad import Tensor
+  from extra.sqtt.rigorous_hw_test import PROBE_KERNELS, extract_traces
+  from tinygrad import Device, Tensor
   # Warmup
   (Tensor([1.]) + Tensor([1.])).realize()
   Device[Device.DEFAULT].synchronize()
