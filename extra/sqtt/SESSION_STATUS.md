@@ -3,26 +3,33 @@
 ## Bounty Goal
 $1,000 bounty: Make tinygrad's software GPU emulator produce cycle-accurate instruction timing matching real AMD 7900 XTX hardware, validated via SQTT (Shader Queue Thread Trace).
 
-## Current Accuracy: 282/321 exact (87.9%), 307/321 ±2 (95.6%)
+## Current Accuracy: 293/321 exact (91.3%), 309/321 ±2 (96.3%)
 
 All SQTT tests pass (encoder, map, examples, timing, E2E).
 Validated against 9 HW-captured kernels (17 total captures, 11 comparable + 6 new probes).
 
-### Per-Kernel Breakdown (2026-04-17)
+### Per-Kernel Breakdown (2026-04-18)
 
 | Kernel | Exact | Total | Rate | ±2 Rate | Notes |
 |------------------|-------|-------|--------|---------|-------|
 | elementwise | 16 | 16 | 100.0% | 100.0% | ✅ Perfect |
 | cast | 14 | 14 | 100.0% | 100.0% | ✅ Perfect |
 | plus | 13 | 13 | 100.0% | 100.0% | ✅ Perfect |
-| data_deps | 10 | 10 | 100.0% | 100.0% | ✅ Perfect |
+| data_deps | 9 | 10 | 90.0% | 90.0% | w1 [2] v_lshlrev variance |
 | probe_vmem_chain | 21 | 22 | 95.5% | 95.5% | w1 startup stagger (±1cy) |
-| probe_sgpr_cmps | 56 | 64 | 87.5% | 90.6% | v_cndmask/v_log/s_nop timing |
-| probe_cmp_chain | 38 | 44 | 86.4% | 93.2% | v_add after branch + store |
-| exp_chain | 91 | 112 | 81.2% | 96.4% | trans stall deferred to depctr |
-| probe_branch_cost| 21 | 26 | 80.8% | 92.3% | branch SCC stamp variance |
+| probe_sgpr_cmps | 57 | 64 | 89.1% | 92.2% | s_nop(15) context variance |
+| probe_cmp_chain | 41 | 44 | 93.2% | 95.5% | W0/W1 store bypass split |
+| probe_branch_cost| 22 | 26 | 84.6% | 96.2% | branch SCC stamp variance |
+| exp_chain | 100 | 112 | 89.3% | 98.2% | VOPD inter-pattern spacing |
 
-Progress: 74.8% → 87.2% exact across sessions. ±2 accuracy is 95.0%.
+Progress: 74.8% → 91.3% exact across sessions. ±2 accuracy is 96.3%.
+
+### Session 2026-04-18 Changes
+1. **LIT v_cmp commit-buffer model** (292 → 293): C[n] = max(W[n], C[n-1]+2) for consecutive LIT v_cmp chains.
+2. **VMEM bypass restricted to done-wave drain** (probe_cmp_chain w1 + probe_branch_cost w1 fixed).
+3. **Trans VGPR read stall deferred to ready[i]** (exp_chain VOPD+depctr distribution fixed).
+4. **VOPD_PIPE_CYCLES = 4 for cold starts, 1 for VOPD_LIT→VOPD_LIT** (exp_chain dual-issue).
+5. **VGPR bank/cache infrastructure added** (Seb-V model): `bank_vopd_write_time`, `last_vopd_issue`, `consecutive_single_valu` tracking. Inter-VOPD bank-conflict check in place but doesn't fire on current test set (compiler enforces VOPD bank validity). Kept as groundwork for future work.
 
 ### Session 2026-04-17 Changes
 1. **PC offset normalization** in rigorous_hw_test.py: compare PC offsets relative to first instruction (HW/EMU load bases differ). Unblocked exp_chain/cast/elementwise/plus from being skipped — recovered 277/321 → baseline.
@@ -206,26 +213,76 @@ sudo DEV=AMD AM_RESET=1 VIZ=-2 PROFILE=1 SQTT=1 DEBUG=0 \
 - GPU: AMD 7900 XTX (gfx1100), 96 CUs
 
 
-Update April 18
-Analysis of remaining 28 mismatches:                                      
-                                                                           
-Wave-dependent SQ arbitration (hard to model deterministically):            
-- probe_cmp_chain / probe_branch_cost: W0 gets store bypass (17cy), W1
-doesn't (21cy) — same instruction stream, different arbitration state.      
-- probe_cmp_chain W1: s_nop(15) = 18cy (vs 22cy in W0), store = 21cy (vs    
-17cy W0). Totals balance to 40cy either way; HW distributes the stall   
-differently per wave.                                                       
-- probe_vmem_chain W1 [2]: post-DRAM v_lshlrev dt=4 in HW vs 1 in EMU — SQ
-busy issuing W0's stream when W1's waitcnt returns.                         
-                                                                           
-Context-dependent s_nop(15) (16/20cy): probe_sgpr_cmps 3rd s_nop = 20cy when
-preceded by 2 others, but 16cy individually. Not trans pipeline (v_sqrt    
-completed 24cy prior).                                                      
-                                                                           
-Tried and reverted in this session: aggressive vmem_wr bypass (-2), set-time
-narrow bypass, writer-side stall=4, waveend-based bypass. Each fixed one
-mismatch but regressed others.                                              
-                                                               
-Working tree is stable at 293/321 (91.3%) exact, 309/321 (96.3%) within ±2, 
-up +1 from the 292/321 baseline via the LIT v_cmp
-commit-buffer model in test/mockgpu/amd/emu.                                                          
+## 2026-04-18 — Handoff to 7900 XTX Server
+
+### Current state: 293/321 (91.3%) exact, 309/321 (96.3%) ±2
+
+### What we want
+Close the remaining 28 exact mismatches to reach 100% cycle-accurate SQTT match between emulator and real AMD 7900 XTX HW. Preserve existing ±2 accuracy (no regressions on already-matching tokens).
+
+### Analysis of the remaining 28 mismatches
+
+**Wave-dependent SQ arbitration (hard to model deterministically):**
+- `probe_cmp_chain` / `probe_branch_cost`: W0 gets store bypass (17cy), W1 doesn't (21cy) — same instruction stream, different arbitration state.
+- `probe_cmp_chain` W1: s_nop(15) = 18cy (vs 22cy in W0), store = 21cy (vs 17cy W0). Totals balance to 40cy either way; HW distributes the stall differently per wave.
+- `probe_vmem_chain` W1 [2]: post-DRAM v_lshlrev dt=4 in HW vs 1 in EMU — SQ busy issuing W0's stream when W1's waitcnt returns.
+
+**Context-dependent s_nop(15) (16cy vs 20cy):** `probe_sgpr_cmps` 3rd s_nop = 20cy when preceded by 2 others, but 16cy individually. Not trans pipeline (v_sqrt completed 24cy prior). Likely SQ serializes s_nop decode across waves.
+
+**exp_chain VOPD inter-pattern spacing (~12 mismatches):** HW varies VOPD→VOPD spacing 2-4cy based on context that doesn't map cleanly to bank or trans state.
+
+### Tried & reverted in 2026-04-18 session
+- Aggressive `vmem_wr_bypass` (-2), set-time narrow bypass, writer-side stall=4, waveend-based bypass — each fixed one mismatch but regressed others.
+- Shared-SIMD serialization (`n==2` → 1 VALU/cy): regressed 293 → 214 because `data_deps` shows 2 waves on *different* SIMDs (no serialization). Global rule can't distinguish; needs per-wave SIMD-residency signal.
+- VOPD dual-issue ramp (+2cy after 2+ single-issue VALUs): broke exp_chain [26] because we don't model the 768cy SMEM wait that resets HW's ramp state.
+
+### Radeon GPU Profiler (RGP) — is it the unblocker?
+
+**Short answer: probably yes, for the wave-level mismatches.**
+
+RGP uses SQTT internally — so the instruction timestamps themselves won't be different from what we already capture. But RGP exposes **additional metadata** that raw SQTT parsing doesn't give us:
+
+1. **Wave-to-SIMD mapping** — tells us which SIMD each wave is on. This is the missing signal that would let us correctly model shared-SIMD VALU serialization (the big win we couldn't land because of `data_deps` vs `probe_vmem_chain` divergence).
+2. **WGP / CU placement per wave** — confirms whether 2-wave WGs share SIMD or not.
+3. **Performance counters alongside SQTT** — occupancy, SALU/VALU busy, wavefront launch rate.
+4. **Sync/barrier events** — explicit signals for waves waiting on each other.
+5. **UI pipeline view** — nice for eyeballing WG/WGP/SE layout at a glance.
+
+**What RGP will NOT solve:**
+- The raw instruction timing is still SQTT packets — same data we have.
+- If an effect is below the SQTT sample resolution (sub-cycle arbitration state), RGP won't expose it either.
+
+**Recommended capture plan on the server:**
+1. Re-capture our 9 probe kernels with RGP (`rgp_capture`) alongside our existing SQTT pickles, so we can cross-reference.
+2. For each of the 9 kernels, dump the RGP-exposed wave→SIMD mapping.
+3. If the mapping confirms co-residence hypothesis (probe_vmem_chain same-SIMD, data_deps different-SIMD), implement shared-SIMD model gated on that signal.
+4. Investigate RGP's SALU/VALU busy counters — they may reveal the s_nop context effect.
+
+### Key files for new session
+
+- `test/mockgpu/amd/emu.py` — emulator + SQTT timing model (~3090 lines). `_simulate_sq_timing()` is the per-wave scheduler.
+- `extra/sqtt/rigorous_hw_test.py` — HW capture + comparison harness. `--capture` captures, `--compare` runs emulator and diffs.
+- `extra/sqtt/captures/rigorous/*.pkl` — 17 HW reference captures.
+- `extra/sqtt/SESSION_STATUS.md` — this file.
+- `extra/sqtt/answer.md`, `answer2.md` — prior ISA team analyses of SGPR/s_nop/VMEM timing.
+- `extra/sqtt/ISA_TIMING_REFERENCE.md` — RDNA3 timing reference.
+
+### Run commands (on the new 7900 XTX server)
+
+```bash
+# Emulator-only validation (no GPU needed):
+DEV=AMD MOCKGPU=1 PYTHON_REMU=1 PROFILE=1 SQTT=1 PYTHONPATH=. \
+  .venv/bin/python extra/sqtt/rigorous_hw_test.py --compare
+
+# SQTT HW capture (needs root + AMD 7900 XTX):
+sudo DEV=AMD AM_RESET=1 VIZ=-2 PROFILE=1 SQTT=1 DEBUG=0 \
+  PYTHONPATH=. .venv/bin/python extra/sqtt/rigorous_hw_test.py --capture
+
+# RGP capture (to try): use AMD's rgp CLI with -a attach to the above process,
+# or integrate RGP SDK into the capture harness for synchronized dump.
+```
+
+### Working tree state at handoff
+- Branch: `master` at commit `0145c31b0` (pushed after this session's commits).
+- Uncommitted: VGPR bank infrastructure in `test/mockgpu/amd/emu.py` (behavior-neutral, ready to commit).
+- Both 2026-04-18 session revert paths have been applied; tree is stable at 293/321.

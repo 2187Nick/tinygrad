@@ -219,6 +219,7 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
   trans_pipe_avail = [0] * n      # trans ALU pipeline: when trans unit is free for next trans instruction
   scalar_after_trans_ready = [0] * n  # trans→scalar visibility: scalar path stalls until trans has cleared (HW validated: probe_sgpr_cmps)
   vopd_pipe_avail = [0] * n      # VOPD dual-issue: when VOPD unit is free for next VOPD instruction
+  last_vopd_issue = [-1000] * n  # last VOPD issue cycle (for dual-issue pipeline warm/cold classification)
   valu_issue_hist: list[list[int]] = [[] for _ in range(n)]  # last 4 non-trans VALU issue times (for time-based delay_alu)
   sgpr_write_time: list[dict[int, int]] = [{} for _ in range(n)]  # SGPR last VALU-write cycle (offset → cycle)
   # LIT v_cmp completion buffer (answer.md): tracks W[n]=I[n]+5, C[n]=max(W[n], C[n-1]+2), A[n]=C[n]+1.
@@ -231,6 +232,10 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
   vgpr_slow_fresh_until: list[dict[int, int]] = [{} for _ in range(n)]  # VGPR slow-freshness: consuming before this cycle yields 9cy VALU latency
   vgpr_write_time: list[dict[int, int]] = [{} for _ in range(n)]  # VGPR last VALU-write cycle (reg_idx → issue cycle) for VMEM addr forwarding
   trans_vgpr_ready: list[dict[int, int]] = [{} for _ in range(n)]  # trans-written VGPR readiness: only non-trans consumers wait for full writeback
+  # VGPR bank cache (Seb-V): 4 banks indexed by reg%4, each has 3 read ports. Writes commit to bank cache with 1cy delay.
+  # bank_vopd_write_time[wave][bank] = last VOPD issue cycle that wrote to this bank (used for inter-VOPD bank port pressure).
+  bank_vopd_write_time: list[list[int]] = [[0] * 4 for _ in range(n)]
+  consecutive_single_valu = [0] * n   # non-trans non-VOPD VALU run-length (for VOPD dual-issue ramp detection)
   has_delay_alu = [False] * n     # per-wave: has any s_delay_alu been seen (controls VGPR scoreboard activation)
   exec_write_time = [0] * n      # per-wave: last cycle when EXEC was written (by v_cmpx)
   scc_write_time = [0] * n       # per-wave: last cycle when SCC was written (by s_cmp/s_cmpk/SALU)
@@ -243,6 +248,9 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
   burst_exclusive = False     # True when burst started with no other wave recently active (prevents false bursts during interleaving)
   prev_issue_cycle = -1       # global SIMD scheduling: last non-zero-cost issue cycle
   prev_wave = -1              # last wave that issued a non-zero-cost instruction
+  # Shared-SIMD VALU issue port (GPUOpen / Seb-V): when waves share a SIMD, VALU issues serialize 1 wave/cycle.
+  # For n==2 workgroups, HW typically places both waves on the same SIMD (16 wave slots, small wg fits).
+  simd_valu_avail = 0
 
   timed: list[tuple[int, int, type, dict]] = []
 
@@ -557,6 +565,14 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
     # Enforce VOPD dual-issue occupancy: consecutive VOPDs need spacing
     if is_vopd:
       issue_cycle = max(issue_cycle, vopd_pipe_avail[i])
+      # VGPR bank port pressure (Seb-V): after a VOPD, next VOPD within _VOPD_PIPE_CYCLES window
+      # gets +1cy if it reads a bank the previous VOPD wrote (1cy bank-cache commit delay).
+      if not is_vopd_lit and last_vopd_issue[i] >= 0 and issue_cycle - last_vopd_issue[i] <= _VOPD_PIPE_CYCLES:
+        read_banks = {r & 3 for r in (vgpr_r_regs or ())}
+        for b in read_banks:
+          if bank_vopd_write_time[i][b] == last_vopd_issue[i]:
+            issue_cycle += 1
+            break
 
     # LIT v_cmp SGPR completion buffer (answer.md): depth-2 writer stall.
     # N-th LIT v_cmp in a chain must wait until (n-2)th has propagated (W[n-2] = I[n-2]+5).
@@ -703,6 +719,17 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
     if is_vopd:
       # VOPD_LIT → VOPD_LIT pipelines at 1cy; VOPD→VOPD uses full _VOPD_PIPE_CYCLES
       vopd_pipe_avail[i] = issue_cycle + (1 if is_vopd_lit else _VOPD_PIPE_CYCLES)
+      last_vopd_issue[i] = issue_cycle
+      # Track per-bank write time for inter-VOPD bank port pressure (Seb-V write-commit 1cy delay).
+      if isinstance(vgpr_w_regs, (tuple, list)) and vgpr_w_regs:
+        for r in vgpr_w_regs: bank_vopd_write_time[i][r & 3] = issue_cycle
+
+    # Track consecutive single-issue (non-VOPD non-trans) VALU run-length for dual-issue ramp (Seb-V).
+    # VOPD after a chain of singles needs extra cycles to ramp the dual-issue pipeline.
+    if cat == 'valu' and not _is_trans and not is_vopd:
+      consecutive_single_valu[i] += 1
+    elif cat != 'valu' or is_vopd:
+      consecutive_single_valu[i] = 0
 
     # Track last VALU for DS/VMEM forwarding stall (skip VOPC/VOP3_SDST — writes VCC/SGPR not VGPR)
     if cat == 'valu' and vgpr_w_regs:
