@@ -128,6 +128,7 @@ _sqtt_debug_log: list[dict] = []  # populated by _simulate_sq_timing when _SQTT_
 # existing references in `_simulate_sq_timing`; every value matches
 # CONST.<FIELD> exactly (see EMU_REWRITE_DESIGN.md §3, §5 Step 1).
 from test.mockgpu.amd.sq_timing.constants import CONST
+from test.mockgpu.amd.sq_timing.ib_fetch import IbFetch
 _LDS_RD_LATENCY = CONST.LDS_RD_LATENCY
 _LDS_WR_LATENCY = CONST.LDS_WR_LATENCY
 _SMEM_LATENCY = CONST.SMEM_LATENCY
@@ -246,6 +247,10 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
   scc_write_time = [0] * n       # per-wave: last cycle when SCC was written (by s_cmp/s_cmpk/SALU)
   consecutive_selffwd_vgprs = [0] * n  # count of VGPRs written by consecutive self-forwarding non-VOPC VALUs
   consecutive_vgprs_written = [0] * n  # count of VGPRs written by consecutive non-VOPC VALUs (any kind)
+  # Per-wave IB-fetch tracker (EMU_REWRITE_DESIGN.md §1.8 / §5 Step 2). Owns last_drain_stamp and
+  # had_drain_nop. Reset at the top of each `_drain_zero_cost(i)` call to preserve scalar-per-call
+  # semantics of the pre-refactor code (pure refactor — zero behaviour change).
+  ib = [IbFetch(CONST) for _ in range(n)]
   cu_lds_available = 0        # shared LDS unit contention
   cu_lds_last_was_write = False
   cu_lds_rd_available = 0     # b128 read LDS serialization: next b128 read completion delayed
@@ -300,8 +305,10 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
     # Track the stamp of the last drain event (waitcnt/depctr/nop).
     # When nop follows a drain event, it starts at that stamp (no 1-cycle gap).
     # When nop follows a non-drain event (VALU/etc), normal gap applies.
-    last_drain_stamp = -1
-    had_drain_nop = False  # nop preceded by drain → needs IB resume +1 after loop
+    # Per EMU_REWRITE_DESIGN §1.8 / §5 Step 2: state lives on per-wave IbFetch;
+    # reset per-call preserves the pre-refactor scalar-per-call semantics.
+    ib[i].reset_drain()
+    ib[i].clear_nop_chain()  # nop preceded by drain → needs IB resume +1 after loop
     while pc[i] < len(events):
       pkt_cls, kwargs, cat, extra = events[pc[i]]
       if cat == 'delay_alu':
@@ -331,7 +338,7 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
           stall_until = max(stall_until, sv[len(sv) - vm_th - 1])
         timed.append((stall_until, wid, pkt_cls, kwargs))
         ready[i] = stall_until + 1  # waitcnt occupies the stall_until cycle; next issue at +1
-        last_drain_stamp = stall_until  # nop after waitcnt starts at stall_until (no +1 gap)
+        ib[i].set_drain(stall_until)  # nop after waitcnt starts at stall_until (no +1 gap)
         pc[i] += 1
         # Prune completed ops
         lgkm_pend[i] = [c for c in lgkm_pend[i] if c > stall_until]
@@ -345,7 +352,7 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
           stall_until = max(stall_until, max(valu_pend[i]))
         timed.append((stall_until, wid, pkt_cls, kwargs))
         ready[i] = stall_until + 1
-        last_drain_stamp = stall_until
+        ib[i].set_drain(stall_until)
         pc[i] += 1
         valu_pend[i] = [c for c in valu_pend[i] if c > stall_until]
         # depctr drains the LIT v_cmp completion buffer — subsequent chains start fresh
@@ -357,8 +364,8 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
         # s_nop(N): stalls IB for N+1 cycles.
         nop_cycles = (extra + 1) if extra is not None else 1
         # After drain event: nop starts at drain stamp (no gap). After non-drain: normal gap.
-        if last_drain_stamp >= 0:
-          nop_start = max(last_drain_stamp, vmem_drain_deadline[i])
+        if ib[i].last_drain_stamp >= 0:
+          nop_start = max(ib[i].last_drain_stamp, vmem_drain_deadline[i])
         else:
           nop_start = max(ready[i], vmem_drain_deadline[i])
         # SGPR drain: s_nop stalls until all pending SGPR write-backs complete
@@ -366,17 +373,17 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
           sgpr_drain = max(t + _SGPR_LATENCY + 1 for t in sgpr_write_time[i].values())
           nop_start = max(nop_start, sgpr_drain)
         if nop_cycles > 1:
-          if last_drain_stamp >= 0:
+          if ib[i].last_drain_stamp >= 0:
             # After drain event: stamp = start + stall_cycles (no overhead)
             nop_stamp = nop_start + nop_cycles
-            had_drain_nop = True
+            ib[i].mark_nop_in_chain()
           else:
             # After non-drain event (VALU/etc): stamp includes +1 overhead
             nop_stamp = nop_start + nop_cycles + 1
-            had_drain_nop = True  # next VALU stamps 1cy after nop (IB resume), same as drain path
+            ib[i].mark_nop_in_chain()  # next VALU stamps 1cy after nop (IB resume), same as drain path
           timed.append((nop_stamp, wid, pkt_cls, kwargs))
           ready[i] = nop_stamp
-          last_drain_stamp = nop_stamp  # chain: next nop starts at this stamp
+          ib[i].set_drain(nop_stamp)  # chain: next nop starts at this stamp
           # ISA team answer2.md (Bonus): s_nop counts toward all cycle-based forwarding windows.
           _residual = nop_stamp + 5
           valu_vmem_wr_deadline[i] = min(valu_vmem_wr_deadline[i], _residual)
@@ -406,7 +413,7 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
       break  # hit a non-zero-cost event
     # After draining: nop preceded by drain event needs 1 cycle for IB resume
     # (HW validated: v_cmp/v_add after drain nop chain always has delta=1, not 0)
-    if had_drain_nop: ready[i] += 1
+    ready[i] += ib[i].resume_penalty()
 
   # Phase 2: Round-robin instruction scheduling
   clock = min(ready) if ready else 1
