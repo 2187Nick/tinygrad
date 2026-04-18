@@ -141,6 +141,8 @@ _TRANS_PIPELINE_LATENCY = 27 # transcendental unit result latency (v_exp, v_log,
 _TRANS_PIPELINE_LATENCY_SQRT = 31 # v_sqrt/v_rsq have longer latency (HW validated: depctr after v_sqrt = L-6=25 → L=31)
 _SGPR_LATENCY = 4   # VALU SGPR write-to-read latency: HW enforces without explicit S_DELAY_ALU hints
 _CNDMASK_SGPR_LATENCY = 4  # v_cndmask sgpr source uses standard SGPR latency
+_CMP_LIT_WB_LATENCY = 5    # LIT-source v_cmp: SGPR result not visible until W[n]=I[n]+5 (answer.md completion buffer)
+_SGPR_COMMIT_GAP = 2       # LIT v_cmp commit port serialization: 2cy per commit (answer.md)
 _WAVESTART_GAP = 1
 _FIRST_INST_GAP = 2
 # S_DELAY_ALU INSTID → base stall cycles for single-wave (0=NO_DEP, 1-4=VALU_DEP, 5-7=TRANS32_DEP, 8=FMA_ACCUM, 9-11=SALU_CYCLE)
@@ -219,6 +221,11 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
   vopd_pipe_avail = [0] * n      # VOPD dual-issue: when VOPD unit is free for next VOPD instruction
   valu_issue_hist: list[list[int]] = [[] for _ in range(n)]  # last 4 non-trans VALU issue times (for time-based delay_alu)
   sgpr_write_time: list[dict[int, int]] = [{} for _ in range(n)]  # SGPR last VALU-write cycle (offset → cycle)
+  # LIT v_cmp completion buffer (answer.md): tracks W[n]=I[n]+5, C[n]=max(W[n], C[n-1]+2), A[n]=C[n]+1.
+  # Applies only when v_cmp uses a 32-bit LIT source — inline-constant v_cmp (e.g. 0.5) uses standard SGPR latency.
+  sgpr_cmp_lit_read_ready: list[dict[int, int]] = [{} for _ in range(n)]  # reg → A[n] for LIT v_cmp-written SGPRs
+  sgpr_cmp_lit_last_commit = [0] * n   # last C[n] in current LIT v_cmp chain (for commit-gap serialization)
+  sgpr_cmp_lit_hist: list[list[int]] = [[] for _ in range(n)]  # recent LIT v_cmp I[n] values (for depth-2 writer stall)
   smem_sgpr_ready: list[dict[int, int]] = [{} for _ in range(n)]  # SGPR idx → cycle when SMEM result available
   vgpr_ready: list[dict[int, int]] = [{} for _ in range(n)]  # VGPR readiness scoreboard (reg_idx → cycle when result available)
   vgpr_slow_fresh_until: list[dict[int, int]] = [{} for _ in range(n)]  # VGPR slow-freshness: consuming before this cycle yields 9cy VALU latency
@@ -328,6 +335,10 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
         last_drain_stamp = stall_until
         pc[i] += 1
         valu_pend[i] = [c for c in valu_pend[i] if c > stall_until]
+        # depctr drains the LIT v_cmp completion buffer — subsequent chains start fresh
+        sgpr_cmp_lit_hist[i].clear()
+        sgpr_cmp_lit_last_commit[i] = 0
+        sgpr_cmp_lit_read_ready[i].clear()
         continue
       if cat == 'nop':
         # s_nop(N): stalls IB for N+1 cycles.
@@ -459,9 +470,12 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
     # Shared resources (LDS port, barrier) have their own trackers (cu_lds_available, at_barrier).
     issue_cycle = ready[i]
 
-    # Extract VALU register info from extra tuple: (is_vopc, sgpr_writes, sgpr_reads, vgpr_writes, vgpr_reads, is_vopd, cond_sgpr, is_vopd_lit)
+    # Extract VALU register info from extra tuple: (is_vopc, sgpr_writes, sgpr_reads, vgpr_writes, vgpr_reads, is_vopd, cond_sgpr, is_vopd_lit, is_cmp_lit)
     is_vopd_lit = False
-    if isinstance(extra, tuple) and len(extra) == 8:
+    is_cmp_lit = False
+    if isinstance(extra, tuple) and len(extra) == 9:
+      is_vopc, sgpr_w_regs, sgpr_r_regs, vgpr_w_regs, vgpr_r_regs, is_vopd, cond_sgpr, is_vopd_lit, is_cmp_lit = extra
+    elif isinstance(extra, tuple) and len(extra) == 8:
       is_vopc, sgpr_w_regs, sgpr_r_regs, vgpr_w_regs, vgpr_r_regs, is_vopd, cond_sgpr, is_vopd_lit = extra
     elif isinstance(extra, tuple) and len(extra) == 7:
       is_vopc, sgpr_w_regs, sgpr_r_regs, vgpr_w_regs, vgpr_r_regs, is_vopd, cond_sgpr = extra
@@ -504,7 +518,9 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
     if cat == 'valu' and sgpr_r_regs:
       _is_cndmask_nonvcc = cond_sgpr >= 0 and cond_sgpr != 106  # non-VCC condition read (v_cndmask_b32_e64)
       for r in sgpr_r_regs:
-        if r in sgpr_write_time[i]:
+        if r in sgpr_cmp_lit_read_ready[i]:  # LIT v_cmp writer: completion-buffer A[n] overrides standard latency
+          issue_cycle = max(issue_cycle, sgpr_cmp_lit_read_ready[i][r])
+        elif r in sgpr_write_time[i]:
           lat = _CNDMASK_SGPR_LATENCY if (_is_cndmask_nonvcc and r == cond_sgpr) else _SGPR_LATENCY
           issue_cycle = max(issue_cycle, sgpr_write_time[i][r] + lat)
         if r in smem_sgpr_ready[i]:
@@ -541,6 +557,13 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
     # Enforce VOPD dual-issue occupancy: consecutive VOPDs need spacing
     if is_vopd:
       issue_cycle = max(issue_cycle, vopd_pipe_avail[i])
+
+    # LIT v_cmp SGPR completion buffer (answer.md): depth-2 writer stall.
+    # N-th LIT v_cmp in a chain must wait until (n-2)th has propagated (W[n-2] = I[n-2]+5).
+    if is_cmp_lit:
+      cmp_hist = sgpr_cmp_lit_hist[i]
+      if len(cmp_hist) >= 2:
+        issue_cycle = max(issue_cycle, cmp_hist[-2] + _CMP_LIT_WB_LATENCY)
 
     # Apply VALU→DS/VMEM forwarding stall (wave selection already deferred this wave; just clamp)
     if cat == 'ds_wr': issue_cycle = max(issue_cycle, valu_ds_wr_deadline[i])
@@ -596,6 +619,7 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
         dbg["vmem_wr_set_time"] = valu_vmem_wr_set_time[i]
         dbg["vmem_drain_deadline"] = vmem_drain_deadline[i]
         dbg["bypass_active"] = store_vgprs == 1 and _vmem_wr_bypass_active(i)
+        dbg["valu_hist"] = list(valu_issue_hist[i])
         # Log other waves' state for bypass analysis
         for j in range(n):
           if j == i: continue
@@ -606,6 +630,9 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
           dbg[f"w{j}_ready"] = ready[j]
           dbg[f"w{j}_cat"] = jcat
           dbg[f"w{j}_vmem_drain"] = vmem_drain_deadline[j]
+          dbg[f"w{j}_pc_idx"] = pc[j]
+          dbg[f"w{j}_valu_hist"] = list(valu_issue_hist[j])
+          dbg[f"w{j}_vmem_wr_deadline"] = valu_vmem_wr_deadline[j]
       if cat == 'nop': dbg["vmem_drain_deadline"] = vmem_drain_deadline[i]
       if cat == 'branch': dbg["op"] = str(kwargs.get('op', ''))
       _sqtt_debug_log.append(dbg)
@@ -709,7 +736,26 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
 
     # Track SGPR write times for SGPR dependency stall detection (non-trans VALU only)
     if cat == 'valu' and not _is_trans and sgpr_w_regs:
-      for r in sgpr_w_regs: sgpr_write_time[i][r] = issue_cycle
+      for r in sgpr_w_regs:
+        sgpr_write_time[i][r] = issue_cycle
+        # Non-LIT-v_cmp SGPR write invalidates completion-buffer entry (standard SGPR latency applies)
+        if not is_cmp_lit: sgpr_cmp_lit_read_ready[i].pop(r, None)
+
+    # LIT v_cmp completion buffer: update write/commit tracking, compute A[n] for readers.
+    if is_cmp_lit and sgpr_w_regs:
+      W = issue_cycle + _CMP_LIT_WB_LATENCY
+      prev_C = sgpr_cmp_lit_last_commit[i]
+      C = max(W, prev_C + _SGPR_COMMIT_GAP) if prev_C else W
+      A = C + 1
+      sgpr_cmp_lit_last_commit[i] = C
+      for r in sgpr_w_regs: sgpr_cmp_lit_read_ready[i][r] = A
+      cmp_hist = sgpr_cmp_lit_hist[i]
+      cmp_hist.append(issue_cycle)
+      if len(cmp_hist) > 3: cmp_hist.pop(0)
+    elif cat == 'valu' and not is_cmp_lit:
+      # Non-LIT-v_cmp VALU resets the LIT chain (commit buffer drains when out of chain)
+      if sgpr_cmp_lit_hist[i]: sgpr_cmp_lit_hist[i].clear()
+      sgpr_cmp_lit_last_commit[i] = 0
 
     # Track EXEC write time for v_cmpx → s_cbranch_execz/nz dependency
     if cat == 'valu' and kwargs.get('op') == InstOp.VALU1_WR_EXEC:
@@ -792,6 +838,7 @@ def _init_sqtt_encoder(entry_pc: int):
   _VOP3_SDST = (ir3.VOP3_SDST, ir3.VOP3SD, ir4.VOP3_SDST, ir4.VOP3SD, irc.VOP3_SDST, irc.VOP3SD)  # compare → named SGPR
   _VOPD = (ir3.VOPD, ir4.VOPD)  # dual-issue: two ops, two VGPR dests
   _VOPD_LIT = (ir3.VOPD_LIT, ir4.VOPD_LIT)  # VOPD with shared literal operand
+  _CMP_LIT = (ir3.VOPC_LIT, ir3.VOP3_SDST_LIT, ir4.VOPC_LIT, ir4.VOP3_SDST_LIT)  # LIT-source v_cmp: uses SGPR write-back completion buffer
   _DS = (ir3.DS, ir4.DS, irc.DS)
   _GLOBAL = (ir3.GLOBAL, ir4.VGLOBAL, irc.GLOBAL)
   _FLAT = (ir3.FLAT, ir4.VFLAT, irc.FLAT)
@@ -957,7 +1004,8 @@ def _init_sqtt_encoder(entry_pc: int):
         if hasattr(inst, fn):
           o = getattr(getattr(inst, fn), 'offset', -1)
           if o >= 256: vgpr_r.append(o - 256)
-      reg_info = (is_vopc, tuple(sgpr_w), tuple(sgpr_r), tuple(vgpr_w), tuple(vgpr_r), issubclass(inst_type, _VOPD), cond_sgpr, issubclass(inst_type, _VOPD_LIT))
+      reg_info = (is_vopc, tuple(sgpr_w), tuple(sgpr_r), tuple(vgpr_w), tuple(vgpr_r), issubclass(inst_type, _VOPD), cond_sgpr,
+                  issubclass(inst_type, _VOPD_LIT), issubclass(inst_type, _CMP_LIT))
       if op is None: events.append((VALUINST, {'wave': w}, 'valu', reg_info))
       else:
         kw = {'wave': w, 'op': op}

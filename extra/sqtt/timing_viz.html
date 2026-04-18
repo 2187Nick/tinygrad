@@ -1,0 +1,367 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>SQTT Timing Visualizer</title>
+<style>
+:root {
+  --bg: #08090e; --bg2: #111320; --bg3: #1a1d2e; --fg: #e8e8f0; --fg2: #888;
+  --green: #2ea043; --yellow: #d29922; --red: #f85149; --blue: #58a6ff;
+  --cyan: #39c5cf; --purple: #bc8cff; --orange: #f0883e;
+  --valu: #58a6ff; --salu: #39c5cf; --vmem: #f0883e; --smem: #bc8cff;
+  --lds: #d2a8ff; --branch: #f778ba; --nop: #484f58; --other: #666;
+}
+* { box-sizing: border-box; margin: 0; padding: 0; }
+html, body { height: 100%; overflow: hidden; background: var(--bg); color: var(--fg); font-family: 'SF Mono', 'Cascadia Code', 'Fira Code', monospace; font-size: 13px; }
+#app { display: flex; height: 100%; }
+
+/* Sidebar */
+#sidebar { width: 260px; min-width: 260px; background: var(--bg2); border-right: 1px solid #2d3148; display: flex; flex-direction: column; }
+#sidebar h1 { padding: 16px; font-size: 15px; color: var(--blue); border-bottom: 1px solid #2d3148; }
+#sidebar .summary { padding: 12px 16px; border-bottom: 1px solid #2d3148; font-size: 12px; color: var(--fg2); }
+#sidebar .summary .big { font-size: 22px; color: var(--fg); font-weight: bold; }
+#kernel-list { flex: 1; overflow-y: auto; scrollbar-width: thin; scrollbar-color: #484f58 var(--bg2); }
+.kernel-item { padding: 10px 16px; cursor: pointer; border-bottom: 1px solid #1e2132; transition: background .15s; display: flex; justify-content: space-between; align-items: center; }
+.kernel-item:hover { background: var(--bg3); }
+.kernel-item.active { background: #1c2541; border-left: 3px solid var(--blue); }
+.kernel-item .name { font-weight: 600; }
+.kernel-item .pct { font-size: 12px; padding: 2px 6px; border-radius: 4px; }
+.kernel-item .pct.perfect { background: #0d3117; color: var(--green); }
+.kernel-item .pct.good { background: #2a1e0d; color: var(--yellow); }
+.kernel-item .pct.bad { background: #3d1117; color: var(--red); }
+
+/* Main */
+#main { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
+#toolbar { padding: 8px 16px; background: var(--bg2); border-bottom: 1px solid #2d3148; display: flex; gap: 16px; align-items: center; }
+#toolbar label { color: var(--fg2); font-size: 12px; }
+#toolbar select, #toolbar input { background: var(--bg3); color: var(--fg); border: 1px solid #2d3148; padding: 4px 8px; border-radius: 4px; font-family: inherit; font-size: 12px; }
+#view-area { flex: 1; overflow: auto; padding: 16px; scrollbar-width: thin; scrollbar-color: #484f58 var(--bg); }
+
+/* Wave section */
+.wave-section { margin-bottom: 24px; }
+.wave-header { font-size: 14px; font-weight: 600; margin-bottom: 8px; display: flex; align-items: center; gap: 12px; }
+.wave-header .badge { font-size: 11px; padding: 2px 8px; border-radius: 10px; }
+.wave-header .badge.exact { background: #0d3117; color: var(--green); }
+.wave-header .badge.partial { background: #2a1e0d; color: var(--yellow); }
+
+/* Chart */
+.chart-container { position: relative; }
+.chart-row { display: flex; align-items: end; gap: 1px; margin-bottom: 2px; min-height: 60px; }
+.chart-labels { display: flex; gap: 1px; }
+
+/* Bar chart */
+.bar-group { display: flex; flex-direction: column; align-items: center; position: relative; min-width: 18px; }
+.bar-pair { display: flex; gap: 1px; align-items: end; height: 80px; }
+.bar { min-width: 8px; border-radius: 2px 2px 0 0; cursor: pointer; transition: opacity .15s; position: relative; }
+.bar:hover { opacity: 0.8; }
+.bar.hw { background: var(--blue); }
+.bar.emu { background: var(--orange); }
+.bar.match { background: var(--green); }
+.bar-label { font-size: 9px; color: var(--fg2); margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 60px; text-align: center; }
+.bar-idx { font-size: 8px; color: #555; }
+
+/* Mismatch highlight */
+.bar-group.mismatch { background: rgba(248, 81, 73, 0.08); border-radius: 4px; }
+.bar-group.close { background: rgba(210, 153, 34, 0.06); border-radius: 4px; }
+
+/* Table view */
+table.trace { width: 100%; border-collapse: collapse; font-size: 12px; }
+table.trace th { background: var(--bg3); padding: 6px 10px; text-align: left; position: sticky; top: 0; z-index: 1; border-bottom: 2px solid #2d3148; }
+table.trace td { padding: 4px 10px; border-bottom: 1px solid #1e2132; }
+table.trace tr.exact td { }
+table.trace tr.close td { background: rgba(210, 153, 34, 0.08); }
+table.trace tr.mismatch td { background: rgba(248, 81, 73, 0.1); }
+table.trace tr.dram_wait td { color: #555; }
+table.trace td.diff-pos { color: var(--red); font-weight: bold; }
+table.trace td.diff-neg { color: var(--blue); font-weight: bold; }
+table.trace td.diff-zero { color: var(--green); }
+.cat-badge { display: inline-block; padding: 1px 6px; border-radius: 3px; font-size: 10px; font-weight: 600; }
+.cat-VALUINST { background: rgba(88,166,255,.2); color: var(--valu); }
+.cat-INST { background: rgba(57,197,207,.15); color: var(--salu); }
+.cat-WAVESTART { background: rgba(102,102,102,.2); color: #999; }
+.cat-WAVEEND { background: rgba(102,102,102,.2); color: #999; }
+.cat-IMMEDIATE { background: rgba(188,140,255,.15); color: var(--purple); }
+
+/* Timeline view */
+.timeline-container { overflow-x: auto; padding: 8px 0; }
+.timeline-wave { margin-bottom: 16px; }
+.timeline-lane { display: flex; align-items: center; height: 28px; margin: 2px 0; position: relative; }
+.timeline-lane-label { width: 60px; font-size: 11px; color: var(--fg2); flex-shrink: 0; }
+.timeline-blocks { flex: 1; display: flex; position: relative; height: 100%; }
+.tblock { height: 100%; border-radius: 2px; position: absolute; cursor: pointer; border: 1px solid rgba(255,255,255,.1); min-width: 2px; transition: opacity .15s; }
+.tblock:hover { opacity: .75; z-index: 10; }
+.tblock.cat-valu { background: var(--valu); }
+.tblock.cat-salu { background: var(--cyan); }
+.tblock.cat-vmem { background: var(--vmem); }
+.tblock.cat-smem { background: var(--purple); }
+.tblock.cat-lds { background: var(--lds); }
+.tblock.cat-branch { background: var(--branch); }
+.tblock.cat-nop { background: var(--nop); }
+.tblock.cat-other { background: var(--other); }
+.tblock.mismatch { border: 2px solid var(--red); }
+
+/* Tooltip */
+#tooltip { position: fixed; background: #1a1d2e; border: 1px solid #3d4466; border-radius: 6px; padding: 10px 14px; font-size: 12px; max-width: 400px; pointer-events: none; z-index: 100; display: none; box-shadow: 0 4px 12px rgba(0,0,0,.5); }
+#tooltip .tt-title { font-weight: bold; color: var(--blue); margin-bottom: 6px; }
+#tooltip .tt-row { display: flex; justify-content: space-between; gap: 16px; margin: 2px 0; }
+#tooltip .tt-label { color: var(--fg2); }
+#tooltip .tt-val { color: var(--fg); font-weight: 600; }
+
+/* Legend */
+.legend { display: flex; gap: 16px; align-items: center; flex-wrap: wrap; }
+.legend-item { display: flex; align-items: center; gap: 4px; font-size: 11px; color: var(--fg2); }
+.legend-swatch { width: 12px; height: 12px; border-radius: 2px; }
+
+/* View toggle */
+.view-tabs { display: flex; gap: 0; }
+.view-tab { padding: 4px 12px; background: var(--bg3); border: 1px solid #2d3148; cursor: pointer; font-size: 12px; color: var(--fg2); }
+.view-tab:first-child { border-radius: 4px 0 0 4px; }
+.view-tab:last-child { border-radius: 0 4px 4px 0; }
+.view-tab.active { background: var(--blue); color: #fff; border-color: var(--blue); }
+
+/* Empty state */
+.empty { text-align: center; padding: 60px; color: var(--fg2); }
+.empty h2 { font-size: 18px; margin-bottom: 8px; color: var(--fg); }
+</style>
+</head>
+<body>
+<div id="app">
+  <div id="sidebar">
+    <h1>⏱ SQTT Timing Viz</h1>
+    <div class="summary" id="summary"></div>
+    <div id="kernel-list"></div>
+  </div>
+  <div id="main">
+    <div id="toolbar">
+      <div class="view-tabs">
+        <div class="view-tab active" data-view="table" onclick="setView('table')">Table</div>
+        <div class="view-tab" data-view="bars" onclick="setView('bars')">Bars</div>
+        <div class="view-tab" data-view="timeline" onclick="setView('timeline')">Timeline</div>
+      </div>
+      <div class="legend">
+        <div class="legend-item"><div class="legend-swatch" style="background:var(--blue)"></div>HW Delta</div>
+        <div class="legend-item"><div class="legend-swatch" style="background:var(--orange)"></div>EMU Delta</div>
+        <div class="legend-item"><div class="legend-swatch" style="background:var(--green)"></div>Exact Match</div>
+        <div class="legend-item"><div class="legend-swatch" style="background:var(--yellow)"></div>±2 Close</div>
+        <div class="legend-item"><div class="legend-swatch" style="background:var(--red)"></div>Mismatch</div>
+      </div>
+      <label><input type="checkbox" id="hide-dram" onchange="renderKernel()"> Hide DRAM waits</label>
+      <label><input type="checkbox" id="only-mismatch" onchange="renderKernel()"> Mismatches only</label>
+    </div>
+    <div id="view-area">
+      <div class="empty"><h2>Select a kernel</h2><p>Choose a kernel from the sidebar to compare HW vs EMU timing</p></div>
+    </div>
+  </div>
+</div>
+<div id="tooltip"></div>
+
+<script>
+const DATA = __DATA_PLACEHOLDER__;
+let currentKernel = null;
+let currentView = 'table';
+
+// Category classification
+function getCategory(cat, inst) {
+  const il = (inst || '').toLowerCase();
+  if (cat === 'VALUINST') return 'valu';
+  if (cat === 'WAVESTART' || cat === 'WAVEEND') return 'other';
+  if (il.startsWith('s_waitcnt') || il.startsWith('s_nop') || il.startsWith('s_delay') || il.startsWith('s_clause')) return 'nop';
+  if (il.startsWith('s_cbranch') || il.startsWith('s_branch') || il.startsWith('s_setpc')) return 'branch';
+  if (il.includes('global_') || il.includes('buffer_') || il.includes('flat_')) return 'vmem';
+  if (il.startsWith('s_load') || il.startsWith('s_buffer')) return 'smem';
+  if (il.startsWith('ds_')) return 'lds';
+  if (il.startsWith('s_')) return 'salu';
+  return 'other';
+}
+
+// Init sidebar
+function initSidebar() {
+  const s = DATA.summary;
+  document.getElementById('summary').innerHTML = `
+    <div class="big">${s.exact}/${s.compared}</div>
+    <div>exact matches (${s.pct}%)</div>`;
+  const list = document.getElementById('kernel-list');
+  const sorted = Object.entries(DATA.kernels).sort((a, b) => a[1].stats.pct - b[1].stats.pct);
+  for (const [name, k] of sorted) {
+    const pctClass = k.stats.pct === 100 ? 'perfect' : k.stats.pct >= 90 ? 'good' : 'bad';
+    const el = document.createElement('div');
+    el.className = 'kernel-item';
+    el.dataset.name = name;
+    el.innerHTML = `<span class="name">${name}</span><span class="pct ${pctClass}">${k.stats.pct}%</span>`;
+    el.onclick = () => selectKernel(name);
+    list.appendChild(el);
+  }
+}
+
+function selectKernel(name) {
+  currentKernel = name;
+  document.querySelectorAll('.kernel-item').forEach(el =>
+    el.classList.toggle('active', el.dataset.name === name));
+  renderKernel();
+}
+
+function setView(view) {
+  currentView = view;
+  document.querySelectorAll('.view-tab').forEach(el =>
+    el.classList.toggle('active', el.dataset.view === view));
+  renderKernel();
+}
+
+function renderKernel() {
+  const area = document.getElementById('view-area');
+  if (!currentKernel) return;
+  const k = DATA.kernels[currentKernel];
+  const hideDram = document.getElementById('hide-dram').checked;
+  const onlyMismatch = document.getElementById('only-mismatch').checked;
+
+  let html = '';
+  for (const wave of k.waves) {
+    if (!wave.pc_match) {
+      html += `<div class="wave-section"><div class="wave-header">Wave ${wave.wave_idx} <span class="badge" style="background:#3d1117;color:var(--red)">PC MISMATCH</span></div></div>`;
+      continue;
+    }
+    const s = wave.stats;
+    const pct = s.compared ? Math.round(100 * s.exact / s.compared) : 0;
+    const badgeClass = pct === 100 ? 'exact' : 'partial';
+    html += `<div class="wave-section"><div class="wave-header">Wave ${wave.wave_idx}
+      <span class="badge ${badgeClass}">${s.exact}/${s.compared} exact (${pct}%)</span></div>`;
+
+    let insts = wave.instructions;
+    if (hideDram) insts = insts.filter(i => i.status !== 'dram_wait');
+    if (onlyMismatch) insts = insts.filter(i => i.status === 'mismatch' || i.status === 'close');
+
+    if (currentView === 'table') html += renderTable(insts);
+    else if (currentView === 'bars') html += renderBars(insts);
+    else html += renderTimeline(insts, wave.wave_idx);
+    html += '</div>';
+  }
+  area.innerHTML = html;
+}
+
+function renderTable(insts) {
+  let html = `<table class="trace">
+    <tr><th>#</th><th>PC</th><th>Category</th><th>Instruction</th><th>HW Δ</th><th>EMU Δ</th><th>Diff</th></tr>`;
+  for (const i of insts) {
+    const diffCls = i.diff > 0 ? 'diff-pos' : i.diff < 0 ? 'diff-neg' : 'diff-zero';
+    const diffStr = i.diff > 0 ? `+${i.diff}` : `${i.diff}`;
+    html += `<tr class="${i.status}">
+      <td>${i.idx}</td><td>${i.pc}</td>
+      <td><span class="cat-badge cat-${i.category}">${i.category}</span></td>
+      <td title="${esc(i.instruction)}">${esc(i.instruction.substring(0, 50))}</td>
+      <td>${i.hw_delta}</td><td>${i.emu_delta}</td>
+      <td class="${diffCls}">${i.status === 'dram_wait' ? '—' : diffStr}</td></tr>`;
+  }
+  return html + '</table>';
+}
+
+function renderBars(insts) {
+  const filtered = insts.filter(i => i.status !== 'dram_wait');
+  if (!filtered.length) return '<p style="color:var(--fg2)">No non-DRAM instructions</p>';
+  const maxDelta = Math.max(...filtered.map(i => Math.max(i.hw_delta, i.emu_delta)), 1);
+  const barH = 80;
+
+  let html = '<div class="chart-container" style="overflow-x:auto"><div style="display:flex;gap:2px;padding-bottom:4px">';
+  for (const i of filtered) {
+    const hH = Math.max(2, (i.hw_delta / maxDelta) * barH);
+    const eH = Math.max(2, (i.emu_delta / maxDelta) * barH);
+    const hwCls = i.status === 'exact' ? 'bar match' : 'bar hw';
+    const emuCls = i.status === 'exact' ? 'bar match' : 'bar emu';
+    const groupCls = i.status === 'mismatch' ? 'mismatch' : i.status === 'close' ? 'close' : '';
+    const cat = getCategory(i.category, i.instruction);
+
+    html += `<div class="bar-group ${groupCls}" onmouseenter="showTip(event,${JSON.stringify(i).replace(/"/g, '&quot;')})" onmouseleave="hideTip()">
+      <div class="bar-pair">
+        <div class="${hwCls}" style="height:${hH}px" title="HW: ${i.hw_delta}cy"></div>
+        <div class="${emuCls}" style="height:${eH}px" title="EMU: ${i.emu_delta}cy"></div>
+      </div>
+      <div class="bar-idx">${i.idx}</div>
+    </div>`;
+  }
+  return html + '</div></div>';
+}
+
+function renderTimeline(insts, waveIdx) {
+  const filtered = insts.filter(i => i.idx > 0); // skip WAVESTART
+  if (!filtered.length) return '';
+
+  // Compute cumulative time (relative to first instruction)
+  const hwStart = insts[0]?.hw_time || 0;
+  const emuStart = insts[0]?.emu_time || 0;
+  const hwEnd = insts[insts.length - 1]?.hw_time || 0;
+  const emuEnd = insts[insts.length - 1]?.emu_time || 0;
+  const maxSpan = Math.max(hwEnd - hwStart, emuEnd - emuStart, 1);
+  const width = Math.max(800, filtered.length * 20);
+  const pxPerCycle = width / maxSpan;
+
+  let html = `<div class="timeline-container" style="width:${width + 80}px">`;
+
+  // HW lane
+  html += `<div class="timeline-lane"><div class="timeline-lane-label" style="color:var(--blue)">HW</div><div class="timeline-blocks" style="width:${width}px">`;
+  for (const i of filtered) {
+    const left = (i.hw_time - hwStart) * pxPerCycle;
+    const w = Math.max(2, i.hw_delta * pxPerCycle);
+    const cat = getCategory(i.category, i.instruction);
+    const mismatch = i.status === 'mismatch' ? ' mismatch' : '';
+    html += `<div class="tblock cat-${cat}${mismatch}" style="left:${left}px;width:${w}px"
+      onmouseenter="showTip(event,${JSON.stringify(i).replace(/"/g, '&quot;')})" onmouseleave="hideTip()"
+      title="[${i.idx}] ${esc(i.instruction)} (${i.hw_delta}cy)"></div>`;
+  }
+  html += '</div></div>';
+
+  // EMU lane
+  html += `<div class="timeline-lane"><div class="timeline-lane-label" style="color:var(--orange)">EMU</div><div class="timeline-blocks" style="width:${width}px">`;
+  for (const i of filtered) {
+    const left = (i.emu_time - emuStart) * pxPerCycle;
+    const w = Math.max(2, i.emu_delta * pxPerCycle);
+    const cat = getCategory(i.category, i.instruction);
+    const mismatch = i.status === 'mismatch' ? ' mismatch' : '';
+    html += `<div class="tblock cat-${cat}${mismatch}" style="left:${left}px;width:${w}px"
+      onmouseenter="showTip(event,${JSON.stringify(i).replace(/"/g, '&quot;')})" onmouseleave="hideTip()"
+      title="[${i.idx}] ${esc(i.instruction)} (${i.emu_delta}cy)"></div>`;
+  }
+  html += '</div></div></div>';
+
+  // Category legend for timeline
+  html += `<div class="legend" style="margin-top:6px">
+    <div class="legend-item"><div class="legend-swatch" style="background:var(--valu)"></div>VALU</div>
+    <div class="legend-item"><div class="legend-swatch" style="background:var(--cyan)"></div>SALU</div>
+    <div class="legend-item"><div class="legend-swatch" style="background:var(--vmem)"></div>VMEM</div>
+    <div class="legend-item"><div class="legend-swatch" style="background:var(--purple)"></div>SMEM</div>
+    <div class="legend-item"><div class="legend-swatch" style="background:var(--lds)"></div>LDS</div>
+    <div class="legend-item"><div class="legend-swatch" style="background:var(--branch)"></div>Branch</div>
+    <div class="legend-item"><div class="legend-swatch" style="background:var(--nop)"></div>Wait/Nop</div>
+  </div>`;
+  return html;
+}
+
+function esc(s) { return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;'); }
+
+function showTip(ev, data) {
+  const tt = document.getElementById('tooltip');
+  const diffStr = data.diff > 0 ? `<span style="color:var(--red)">+${data.diff}</span>` : data.diff < 0 ? `<span style="color:var(--blue)">${data.diff}</span>` : `<span style="color:var(--green)">0</span>`;
+  tt.innerHTML = `
+    <div class="tt-title">[${data.idx}] ${esc(data.instruction)}</div>
+    <div class="tt-row"><span class="tt-label">PC</span><span class="tt-val">${data.pc}</span></div>
+    <div class="tt-row"><span class="tt-label">Category</span><span class="tt-val">${data.category}</span></div>
+    <div class="tt-row"><span class="tt-label">HW Delta</span><span class="tt-val" style="color:var(--blue)">${data.hw_delta} cy</span></div>
+    <div class="tt-row"><span class="tt-label">EMU Delta</span><span class="tt-val" style="color:var(--orange)">${data.emu_delta} cy</span></div>
+    <div class="tt-row"><span class="tt-label">Diff</span><span class="tt-val">${diffStr} cy</span></div>
+    <div class="tt-row"><span class="tt-label">HW Time</span><span class="tt-val">${data.hw_time}</span></div>
+    <div class="tt-row"><span class="tt-label">EMU Time</span><span class="tt-val">${data.emu_time}</span></div>`;
+  tt.style.display = 'block';
+  const x = Math.min(ev.clientX + 12, window.innerWidth - 420);
+  const y = Math.min(ev.clientY + 12, window.innerHeight - 200);
+  tt.style.left = x + 'px';
+  tt.style.top = y + 'px';
+}
+function hideTip() { document.getElementById('tooltip').style.display = 'none'; }
+
+// Init
+initSidebar();
+// Auto-select worst kernel
+const sorted = Object.entries(DATA.kernels).sort((a, b) => a[1].stats.pct - b[1].stats.pct);
+if (sorted.length) selectKernel(sorted[0][0]);
+</script>
+</body>
+</html>

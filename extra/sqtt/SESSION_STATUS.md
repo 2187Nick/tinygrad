@@ -204,3 +204,28 @@ sudo DEV=AMD AM_RESET=1 VIZ=-2 PROFILE=1 SQTT=1 DEBUG=0 \
 - Git remote: `https://github.com/2187Nick/tinygrad.git`
 - Venv: `.venv/bin/python`
 - GPU: AMD 7900 XTX (gfx1100), 96 CUs
+
+
+Update April 18
+Analysis of remaining 28 mismatches:                                      
+                                                                           
+Wave-dependent SQ arbitration (hard to model deterministically):            
+- probe_cmp_chain / probe_branch_cost: W0 gets store bypass (17cy), W1
+doesn't (21cy) — same instruction stream, different arbitration state.      
+- probe_cmp_chain W1: s_nop(15) = 18cy (vs 22cy in W0), store = 21cy (vs    
+17cy W0). Totals balance to 40cy either way; HW distributes the stall   
+differently per wave.                                                       
+- probe_vmem_chain W1 [2]: post-DRAM v_lshlrev dt=4 in HW vs 1 in EMU — SQ
+busy issuing W0's stream when W1's waitcnt returns.                         
+                                                                           
+Context-dependent s_nop(15) (16/20cy): probe_sgpr_cmps 3rd s_nop = 20cy when
+preceded by 2 others, but 16cy individually. Not trans pipeline (v_sqrt    
+completed 24cy prior).                                                      
+                                                                           
+Tried and reverted in this session: aggressive vmem_wr bypass (-2), set-time
+narrow bypass, writer-side stall=4, waveend-based bypass. Each fixed one
+mismatch but regressed others.                                              
+                                                               
+Working tree is stable at 293/321 (91.3%) exact, 309/321 (96.3%) within ±2, 
+up +1 from the 292/321 baseline via the LIT v_cmp
+commit-buffer model in test/mockgpu/amd/emu.                                                          
