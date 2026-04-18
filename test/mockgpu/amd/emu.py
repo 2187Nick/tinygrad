@@ -247,8 +247,8 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
     reduced = valu_vmem_wr_deadline[i] - _VALU_VMEM_WR_BYPASS
     for j in range(n):
       if j == i or at_barrier[j]: continue
-      # Active VMEM drain from another wave provides pipeline overlap (even waveend waves)
-      if vmem_drain_deadline[j] >= reduced: return True
+      # Active VMEM drain from a DONE wave provides pipeline overlap (wave j finished & queued VMEM)
+      if wave_done[j] and vmem_drain_deadline[j] >= reduced: return True
       if wave_done[j]: continue
       if pc[j] >= len(wave_events[wave_ids[j]]): continue
       _, _, jcat, _ = wave_events[wave_ids[j]][pc[j]]

@@ -3,7 +3,7 @@
 ## Bounty Goal
 $1,000 bounty: Make tinygrad's software GPU emulator produce cycle-accurate instruction timing matching real AMD 7900 XTX hardware, validated via SQTT (Shader Queue Thread Trace).
 
-## Current Accuracy: 280/321 exact (87.2%), 305/321 ±2 (95.0%)
+## Current Accuracy: 282/321 exact (87.9%), 307/321 ±2 (95.6%)
 
 All SQTT tests pass (encoder, map, examples, timing, E2E).
 Validated against 9 HW-captured kernels (17 total captures, 11 comparable + 6 new probes).
@@ -28,6 +28,7 @@ Progress: 74.8% → 87.2% exact across sessions. ±2 accuracy is 95.0%.
 1. **PC offset normalization** in rigorous_hw_test.py: compare PC offsets relative to first instruction (HW/EMU load bases differ). Unblocked exp_chain/cast/elementwise/plus from being skipped — recovered 277/321 → baseline.
 2. **Defer trans VGPR read stall to ready[i]** in emu.py _simulate_sq_timing: non-trans VALU reading trans-written VGPR now stamps at issue_cycle (matches HW SQTT stamp-at-dispatch), with trans wait absorbed by subsequent s_waitcnt_depctr. Fixed exp_chain VOPD+depctr distribution: +3 exact, +4 ±2.
 3. Parked probe_vmem_chain w1 [2]: ±1cy artifact of SMEM backend stagger model (HW=2cy, EMU=1cy). Fixing would regress other tokens.
+4. **Restrict VMEM bypass to done-wave drain**: changed `_vmem_wr_bypass_active` so that a running wave's vmem_drain_deadline no longer qualifies (only wave_done wave's does). Fixed probe_cmp_chain w1 + probe_branch_cost w1: +2 exact, +2 ±2. data_deps w1 regresses −1 (waves in this tiny kernel are out-of-sync enough that the later wave legitimately bypasses off the earlier running wave's drain).
 
 ## What We Built
 
