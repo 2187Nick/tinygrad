@@ -459,8 +459,11 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
     # Shared resources (LDS port, barrier) have their own trackers (cu_lds_available, at_barrier).
     issue_cycle = ready[i]
 
-    # Extract VALU register info from extra tuple: (is_vopc, sgpr_writes, sgpr_reads, vgpr_writes, vgpr_reads, is_vopd, cond_sgpr)
-    if isinstance(extra, tuple) and len(extra) == 7:
+    # Extract VALU register info from extra tuple: (is_vopc, sgpr_writes, sgpr_reads, vgpr_writes, vgpr_reads, is_vopd, cond_sgpr, is_vopd_lit)
+    is_vopd_lit = False
+    if isinstance(extra, tuple) and len(extra) == 8:
+      is_vopc, sgpr_w_regs, sgpr_r_regs, vgpr_w_regs, vgpr_r_regs, is_vopd, cond_sgpr, is_vopd_lit = extra
+    elif isinstance(extra, tuple) and len(extra) == 7:
       is_vopc, sgpr_w_regs, sgpr_r_regs, vgpr_w_regs, vgpr_r_regs, is_vopd, cond_sgpr = extra
     elif isinstance(extra, tuple) and len(extra) == 6:
       is_vopc, sgpr_w_regs, sgpr_r_regs, vgpr_w_regs, vgpr_r_regs, is_vopd = extra
@@ -671,7 +674,8 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
 
     # Track VOPD pipeline occupancy: next VOPD must wait for the dual-issue slot
     if is_vopd:
-      vopd_pipe_avail[i] = issue_cycle + _VOPD_PIPE_CYCLES
+      # VOPD_LIT → VOPD_LIT pipelines at 1cy; VOPD→VOPD uses full _VOPD_PIPE_CYCLES
+      vopd_pipe_avail[i] = issue_cycle + (1 if is_vopd_lit else _VOPD_PIPE_CYCLES)
 
     # Track last VALU for DS/VMEM forwarding stall (skip VOPC/VOP3_SDST — writes VCC/SGPR not VGPR)
     if cat == 'valu' and vgpr_w_regs:
@@ -787,6 +791,7 @@ def _init_sqtt_encoder(entry_pc: int):
   _VOPC = (ir3.VOPC, ir4.VOPC, irc.VOPC)  # comparison ops write VCC, not VGPR — no DS forwarding stall
   _VOP3_SDST = (ir3.VOP3_SDST, ir3.VOP3SD, ir4.VOP3_SDST, ir4.VOP3SD, irc.VOP3_SDST, irc.VOP3SD)  # compare → named SGPR
   _VOPD = (ir3.VOPD, ir4.VOPD)  # dual-issue: two ops, two VGPR dests
+  _VOPD_LIT = (ir3.VOPD_LIT, ir4.VOPD_LIT)  # VOPD with shared literal operand
   _DS = (ir3.DS, ir4.DS, irc.DS)
   _GLOBAL = (ir3.GLOBAL, ir4.VGLOBAL, irc.GLOBAL)
   _FLAT = (ir3.FLAT, ir4.VFLAT, irc.FLAT)
@@ -952,7 +957,7 @@ def _init_sqtt_encoder(entry_pc: int):
         if hasattr(inst, fn):
           o = getattr(getattr(inst, fn), 'offset', -1)
           if o >= 256: vgpr_r.append(o - 256)
-      reg_info = (is_vopc, tuple(sgpr_w), tuple(sgpr_r), tuple(vgpr_w), tuple(vgpr_r), issubclass(inst_type, _VOPD), cond_sgpr)
+      reg_info = (is_vopc, tuple(sgpr_w), tuple(sgpr_r), tuple(vgpr_w), tuple(vgpr_r), issubclass(inst_type, _VOPD), cond_sgpr, issubclass(inst_type, _VOPD_LIT))
       if op is None: events.append((VALUINST, {'wave': w}, 'valu', reg_info))
       else:
         kw = {'wave': w, 'op': op}
