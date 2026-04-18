@@ -122,39 +122,44 @@ def _nibbles_to_bytes(nibbles: list[int]) -> bytes:
 _SQTT_DEBUG = int(os.environ.get("SQTT_DEBUG", "0"))
 _sqtt_debug_log: list[dict] = []  # populated by _simulate_sq_timing when _SQTT_DEBUG=1
 
-# Latency constants (in SQ clock cycles) — tuned against GFX1100 SQTT traces
-_LDS_RD_LATENCY = 31
-_LDS_WR_LATENCY = 33
-_SMEM_LATENCY = 200
-_VMEM_LATENCY = 300
-_BARRIER_FROM_LAST = 6    # cycles from last wave's barrier issue to release
-_LDS_SERVICE_COST = 6     # cycles LDS unit is busy per DS op
-_VALU_DS_WR_FORWARD = 26  # VALU→DS_WR forwarding stall (from reference PKL; our HW shows 22 — card variance)
-_VALU_DS_RD_FORWARD = 22  # VALU→DS_RD forwarding stall
-_VALU_VMEM_WR_FORWARD = 21 # VALU→VMEM_WR forwarding stall (base for b32; b128 HW varies: elementwise=20, plus=24)
-_VALU_VMEM_WR_BYPASS = 4   # inter-wave VMEM_WR overlap: SQ overlaps forwarding with other waves' execution, reducing latency 21→17cy (HW validated: data_deps, probe_branch_cost, probe_cmp_chain)
-_VALU_VMEM_ADDR_FORWARD = 27 # VALU→VMEM address VGPR forwarding: recently-written addr VGPRs need 27 cycles (HW validated: lds_sync=27)
-_VALU_VMEM_RD_FORWARD = 22 # VALU→VMEM_RD forwarding stall
-_VMEM_DRAIN_CYCLES = 15    # VMEM pipeline drain: SQ holds s_nop/s_endpgm until VMEM op accepted (HW=15 validated: plus, cast, elementwise)
-_VMEM_EXEC_MIN = 8         # minimum VMEM execution time after forwarding stall overlap
-_TRANS_PIPELINE_LATENCY = 27 # transcendental unit result latency (v_exp, v_log, v_rcp, etc.) — depctr waits for this
-_TRANS_PIPELINE_LATENCY_SQRT = 31 # v_sqrt/v_rsq have longer latency (HW validated: depctr after v_sqrt = L-6=25 → L=31)
-_SGPR_LATENCY = 4   # VALU SGPR write-to-read latency: HW enforces without explicit S_DELAY_ALU hints
-_CNDMASK_SGPR_LATENCY = 4  # v_cndmask sgpr source uses standard SGPR latency
-_CMP_LIT_WB_LATENCY = 5    # LIT-source v_cmp: SGPR result not visible until W[n]=I[n]+5 (answer.md completion buffer)
-_SGPR_COMMIT_GAP = 2       # LIT v_cmp commit port serialization: 2cy per commit (answer.md)
-_WAVESTART_GAP = 1
-_FIRST_INST_GAP = 2
+# Latency constants (in SQ clock cycles) — tuned against GFX1100 SQTT traces.
+# Source of truth: `test/mockgpu/amd/sq_timing/constants.py::TimingConstants`.
+# These module-level `_XXX` aliases are kept for backward compatibility with
+# existing references in `_simulate_sq_timing`; every value matches
+# CONST.<FIELD> exactly (see EMU_REWRITE_DESIGN.md §3, §5 Step 1).
+from test.mockgpu.amd.sq_timing.constants import CONST
+_LDS_RD_LATENCY = CONST.LDS_RD_LATENCY
+_LDS_WR_LATENCY = CONST.LDS_WR_LATENCY
+_SMEM_LATENCY = CONST.SMEM_LATENCY
+_VMEM_LATENCY = CONST.VMEM_LATENCY
+_BARRIER_FROM_LAST = CONST.BARRIER_FROM_LAST
+_LDS_SERVICE_COST = CONST.LDS_SERVICE_COST
+_VALU_DS_WR_FORWARD = CONST.VALU_DS_WR_FORWARD
+_VALU_DS_RD_FORWARD = CONST.VALU_DS_RD_FORWARD
+_VALU_VMEM_WR_FORWARD = CONST.VALU_VMEM_WR_FORWARD
+_VALU_VMEM_WR_BYPASS = CONST.VALU_VMEM_WR_BYPASS
+_VALU_VMEM_ADDR_FORWARD = CONST.VALU_VMEM_ADDR_FORWARD
+_VALU_VMEM_RD_FORWARD = CONST.VALU_VMEM_RD_FORWARD
+_VMEM_DRAIN_CYCLES = CONST.VMEM_DRAIN_CYCLES
+_VMEM_EXEC_MIN = CONST.VMEM_EXEC_MIN
+_TRANS_PIPELINE_LATENCY = CONST.TRANS_PIPELINE_LATENCY
+_TRANS_PIPELINE_LATENCY_SQRT = CONST.TRANS_PIPELINE_LATENCY_SQRT
+_SGPR_LATENCY = CONST.SGPR_LATENCY
+_CNDMASK_SGPR_LATENCY = CONST.CNDMASK_SGPR_LATENCY
+_CMP_LIT_WB_LATENCY = CONST.CMP_LIT_WB_LATENCY
+_SGPR_COMMIT_GAP = CONST.SGPR_COMMIT_GAP
+_WAVESTART_GAP = CONST.WAVESTART_GAP
+_FIRST_INST_GAP = CONST.FIRST_INST_GAP
 # S_DELAY_ALU INSTID → base stall cycles for single-wave (0=NO_DEP, 1-4=VALU_DEP, 5-7=TRANS32_DEP, 8=FMA_ACCUM, 9-11=SALU_CYCLE)
 # VALU deps (1-4): RDNA3 VALU pipeline = 5 cycles. With N waves round-robin hides (N-1) cycles, so stall = max(0, base - (N-1)).
 # TRANS32 deps (5-7): 0 — trans ALU runs in parallel with VALU. Pipeline occupancy enforced by trans_pipe_avail. Register deps by s_waitcnt_depctr.
 _INSTID_BASE_STALLS = (0, 4, 3, 2, 1, 0, 0, 0, 1, 1, 2, 3)
-_TRANS_PIPE_CYCLES = 4  # trans ALU pipeline occupancy: trans→trans must wait 4 cycles; trans→VALU = 1 cycle (parallel)
-_VOPD_PIPE_CYCLES = 4  # VOPD dual-issue occupancy: consecutive VOPDs need 4 extra cycles (HW validated via brute-force sweep)
-_EXEC_WRITE_LATENCY = 24  # v_cmpx writes EXEC; s_cbranch_execz must wait for EXEC propagation (VALU→SQ path, HW validated: layernorm)
-_LDS_B128_EXTRA = 5       # extra LDS latency for b128 loads (4 VGPR dwords): HW validated layernorm [18] diff=-5
-_LDS_B128_VGPR_STAGGER = 17 # upper 2 VGPRs of SERIALIZED b128 load available 17cy after lds_complete (HW validated: layernorm [26] v[6] delta=9)
-_LDS_B128_RD_SERVICE = 19  # b128 read LDS occupancy: consecutive b128 reads serialized (HW: 2nd load +18cy, validated layernorm pair1/pair2)
+_TRANS_PIPE_CYCLES = CONST.TRANS_PIPE_CYCLES
+_VOPD_PIPE_CYCLES = CONST.VOPD_PIPE_CYCLES
+_EXEC_WRITE_LATENCY = CONST.EXEC_WRITE_LATENCY
+_LDS_B128_EXTRA = CONST.LDS_B128_EXTRA
+_LDS_B128_VGPR_STAGGER = CONST.LDS_B128_VGPR_STAGGER
+_LDS_B128_RD_SERVICE = CONST.LDS_B128_RD_SERVICE
 def _instid_stall(instid: int, n_waves: int) -> int:
   base = _INSTID_BASE_STALLS[min(instid, 11)]
   return max(0, base - (n_waves - 1)) if 1 <= instid <= 4 else base
