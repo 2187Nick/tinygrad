@@ -261,12 +261,15 @@ if os.environ.get("MICROBENCH"):
   import extra.sqtt.rgp.batch_a_valu        # noqa: F401 — 24 kernels (A.1/A.2/A.3)
   import extra.sqtt.rgp.batch_a_cmp_salu    # noqa: F401 — 26 kernels (A.4/A.5/A.6)
   import extra.sqtt.rgp.batch_a_sys         # noqa: F401 — 36 kernels (A.7/A.8/A.9/A.10)
-  import extra.sqtt.rgp.batch_b_lds         # noqa: F401 — 48 kernels (B.1 LDS bank conflicts)
+  # batch_b_lds (48 kernels): first kernel mb_lds_rd_b32_bank1 hung GPU on real
+  # HW in the 2026-04-18 Batch B capture — v[100] scratch VGPR is far outside
+  # the normal allocation window and cascades every subsequent kernel.
+  # Skip for now; needs rewrite to use v[10..20] and verified LDS alloc.
+  # import extra.sqtt.rgp.batch_b_lds
   import extra.sqtt.rgp.batch_b_vgpr_sgpr   # noqa: F401 — 39 kernels (B.2 VGPR + B.4 SGPR fwd)
   import extra.sqtt.rgp.batch_b_vopd_trans  # noqa: F401 — 55 kernels (B.3 VOPD + B.5 Trans)
-  # 3 kernels segfault under PYTHON_REMU on strided LDS stores (legit emu bugs);
-  # HW capture works, but skip them to keep --compare clean.
-  _MB_SKIP = {"mb_lds_wr_b32_stride8", "mb_lds_wr_b128_stride4", "mb_lds_wr_b128_stride8"}
+  # Kernels that crash under PYTHON_REMU (compare-only skip; HW capture OK).
+  _MB_SKIP = set()
   for _mb_name in MICROBENCHES:
     if _mb_name in _MB_SKIP: continue
     KERNELS[_mb_name] = (_run_microbench(_mb_name), 100)
