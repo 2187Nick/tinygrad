@@ -129,6 +129,7 @@ _sqtt_debug_log: list[dict] = []  # populated by _simulate_sq_timing when _SQTT_
 # CONST.<FIELD> exactly (see EMU_REWRITE_DESIGN.md §3, §5 Step 1).
 from test.mockgpu.amd.sq_timing.constants import CONST
 from test.mockgpu.amd.sq_timing.ib_fetch import IbFetch
+from test.mockgpu.amd.sq_timing.lds import LdsPipe
 _LDS_RD_LATENCY = CONST.LDS_RD_LATENCY
 _LDS_WR_LATENCY = CONST.LDS_WR_LATENCY
 _SMEM_LATENCY = CONST.SMEM_LATENCY
@@ -208,7 +209,6 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
   # Per-wave state
   pc = [0] * n
   ready = [0] * n
-  lgkm_pend: list[list[int]] = [[] for _ in range(n)]
   vm_pend: list[list[int]] = [[] for _ in range(n)]
   valu_pend: list[list[int]] = [[] for _ in range(n)]  # pending multi-cycle VALU (transcendental) completion times
   at_barrier = [False] * n
@@ -251,9 +251,11 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
   # had_drain_nop. Reset at the top of each `_drain_zero_cost(i)` call to preserve scalar-per-call
   # semantics of the pre-refactor code (pure refactor — zero behaviour change).
   ib = [IbFetch(CONST) for _ in range(n)]
-  cu_lds_available = 0        # shared LDS unit contention
-  cu_lds_last_was_write = False
-  cu_lds_rd_available = 0     # b128 read LDS serialization: next b128 read completion delayed
+  # CU-shared LDS pipeline + per-wave lgkm queue (EMU_REWRITE_DESIGN §1.7 / §5 Step 3).
+  # Owns cu_lds_available, cu_lds_last_was_write, cu_lds_rd_available, lgkm_pend[*].
+  # Pure refactor — b128 VGPR-stagger logic stays in this file (VGPR state belongs
+  # to VAluPipe / Step 5); LdsPipe only reports `is_serialized`.
+  lds = LdsPipe(n, CONST)
   burst_wave = -1             # VALU burst: wave in consecutive VALU sequence
   burst_exclusive = False     # True when burst started with no other wave recently active (prevents false bursts during interleaving)
   prev_issue_cycle = -1       # global SIMD scheduling: last non-zero-cost issue cycle
@@ -329,7 +331,7 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
         # Trans→scalar stall: scalar path waits for trans pipeline to clear
         stall_until = max(stall_until, scalar_after_trans_ready[i])
         # lgkmcnt: stall until at most lgkm_th ops are still pending
-        sl = sorted(lgkm_pend[i])
+        sl = sorted(lds.lgkm_pending(i))
         if lgkm_th < len(sl):
           stall_until = max(stall_until, sl[len(sl) - lgkm_th - 1])
         # vmcnt: stall until at most vm_th ops are still pending
@@ -341,7 +343,7 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
         ib[i].set_drain(stall_until)  # nop after waitcnt starts at stall_until (no +1 gap)
         pc[i] += 1
         # Prune completed ops
-        lgkm_pend[i] = [c for c in lgkm_pend[i] if c > stall_until]
+        lds.prune(i, stall_until)
         vm_pend[i] = [c for c in vm_pend[i] if c > stall_until]
         smem_sgpr_ready[i] = {r: c for r, c in smem_sgpr_ready[i].items() if c > stall_until}
         continue
@@ -671,41 +673,29 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
 
     # Track memory operation completion times
     if cat == 'smem':
-      lgkm_pend[i].append(issue_cycle + _SMEM_LATENCY)
+      lds.on_smem_issue(i, issue_cycle + _SMEM_LATENCY)
       if extra:
         for r in extra: smem_sgpr_ready[i][r] = issue_cycle + _SMEM_LATENCY
     elif cat in ('ds_rd', 'ds_wr'):
       if cat == 'ds_wr':  # LDS writes serialize through shared unit
-        lds_start = max(issue_cycle, cu_lds_available)
-        lgkm_pend[i].append(lds_start + _LDS_WR_LATENCY)
-        cu_lds_available = lds_start + _LDS_SERVICE_COST
-        cu_lds_last_was_write = True
+        lds.on_ds_write_issue(i, issue_cycle)
       else:
-        mode_switch_penalty = 1 if cu_lds_last_was_write else 0  # write→read direction switch
         ds_bytes, ds_dest_base = (extra if extra is not None else (4, None))
-        width_extra = _LDS_B128_EXTRA if ds_bytes >= 16 else 0
-        # b128 reads serialize through LDS: 2nd consecutive b128 completion delayed
-        if ds_bytes >= 16:
-          lds_rd_start = max(issue_cycle, cu_lds_rd_available)
-          lds_complete = lds_rd_start + _LDS_RD_LATENCY + mode_switch_penalty + width_extra
-          cu_lds_rd_available = issue_cycle + _LDS_B128_RD_SERVICE
-          # b128 VGPR stagger: upper 2 VGPRs of SERIALIZED b128 loads have extended latency
-          # Only the 2nd+ b128 load in a consecutive pair gets stagger (HW validated: layernorm 1st load v[2],v[3] no stagger)
-          is_serialized = (lds_rd_start > issue_cycle)  # load was delayed waiting for LDS port
-          if ds_dest_base is not None:
-            sf = vgpr_slow_fresh_until[i]
-            if is_serialized:
-              vr = vgpr_ready[i]
-              for off in (2, 3):
-                stagger_ready = lds_complete + _LDS_B128_VGPR_STAGGER
-                vr[ds_dest_base + off] = max(vr.get(ds_dest_base + off, 0), stagger_ready)
-                sf[ds_dest_base + off] = stagger_ready + 4  # slow-freshness window: consuming within 4cy of ready yields 9cy VALU latency
-            # Clear slow-freshness on all b128 VGPRs (fresh data overwrites any prior slow state)
-            for off in range(4): sf.pop(ds_dest_base + off, None) if not is_serialized or off < 2 else None
-        else:
-          lds_complete = issue_cycle + _LDS_RD_LATENCY + mode_switch_penalty + width_extra
-        lgkm_pend[i].append(lds_complete)
-        if cu_lds_last_was_write: cu_lds_last_was_write = False
+        lds_complete, is_serialized = lds.on_ds_read_issue(i, issue_cycle, ds_bytes=ds_bytes)
+        # b128 VGPR stagger: upper 2 VGPRs of SERIALIZED b128 loads have extended latency
+        # Only the 2nd+ b128 load in a consecutive pair gets stagger (HW validated: layernorm 1st load v[2],v[3] no stagger)
+        # Note: VGPR-scoreboard state (vgpr_ready / vgpr_slow_fresh_until) stays here in emu.py — it belongs
+        # to VAluPipe (EMU_REWRITE_DESIGN §1.2, Step 5). LdsPipe only reports `is_serialized`.
+        if ds_bytes >= 16 and ds_dest_base is not None:
+          sf = vgpr_slow_fresh_until[i]
+          if is_serialized:
+            vr = vgpr_ready[i]
+            for off in (2, 3):
+              stagger_ready = lds_complete + _LDS_B128_VGPR_STAGGER
+              vr[ds_dest_base + off] = max(vr.get(ds_dest_base + off, 0), stagger_ready)
+              sf[ds_dest_base + off] = stagger_ready + 4  # slow-freshness window: consuming within 4cy of ready yields 9cy VALU latency
+          # Clear slow-freshness on all b128 VGPRs (fresh data overwrites any prior slow state)
+          for off in range(4): sf.pop(ds_dest_base + off, None) if not is_serialized or off < 2 else None
     elif cat == 'vmem_rd':
       vm_pend[i].append(issue_cycle + _VMEM_LATENCY)
       vmem_drain_deadline[i] = issue_cycle + _VMEM_DRAIN_CYCLES
