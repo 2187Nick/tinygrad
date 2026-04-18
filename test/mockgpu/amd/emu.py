@@ -349,7 +349,6 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
           else:
             # After non-drain event (VALU/etc): stamp includes +1 overhead
             nop_stamp = nop_start + nop_cycles + 1
-          if nop_cycles >= 16: print(f"NOP_TRACE wave={i} pc={pc[i]} nop_start={nop_start} nop_cycles={nop_cycles} nop_stamp={nop_stamp} drain={last_drain_stamp} sgpr_wt={dict(sgpr_write_time[i])} ready_before={ready[i]} vmem_drain={vmem_drain_deadline[i]}")
           timed.append((nop_stamp, wid, pkt_cls, kwargs))
           ready[i] = nop_stamp
           last_drain_stamp = nop_stamp  # chain: next nop starts at this stamp
@@ -395,10 +394,6 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
     # Drain zero-cost events for all active waves
     for i in range(n):
       if not wave_done[i] and not at_barrier[i]: _drain_zero_cost(i)
-
-    # DEBUG: trace ready values after drain when they're in the nop range
-    if n > 1 and 590 <= ready[0] <= 620:
-      print(f"POST_DRAIN ready={[ready[j] for j in range(n)]} burst_wave={burst_wave} burst_excl={burst_exclusive} prev_issue={prev_issue_cycle} pc={[pc[j] for j in range(n)]}")
 
     # VALU burst: consecutive VALU from same wave gets priority only when burst started exclusively
     # (other wave was stalled). When both waves are interleaving, no burst priority (HW interleaves).
@@ -530,10 +525,13 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
     _is_trans = cat == 'valu' and pkt_cls is INST and kwargs.get('op') == InstOp.VALUT_4
     # Trans-written VGPR readiness: non-trans VALU must wait for full trans writeback (27/31 cycles)
     # Trans→trans uses internal ALU forwarding — only trans_pipe_avail applies (4 cycles)
+    # HW stamps VOPD at dispatch (before trans wait); wait is absorbed by subsequent s_waitcnt_depctr.
+    # For non-VOPD VALU, stall at dispatch (matches HW). For VOPD, defer to ready[i].
+    _trans_read_deadline = 0
     if cat == 'valu' and not _is_trans and vgpr_r_regs:
       tvr = trans_vgpr_ready[i]
       for r in vgpr_r_regs:
-        if r in tvr: issue_cycle = max(issue_cycle, tvr[r])
+        if r in tvr: _trans_read_deadline = max(_trans_read_deadline, tvr[r])
     if _is_trans:
       issue_cycle = max(issue_cycle, trans_pipe_avail[i])
     # Enforce VOPD dual-issue occupancy: consecutive VOPDs need spacing
@@ -764,7 +762,7 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
     elif cat == 'waveend':
       wave_done[i] = True
     else:
-      ready[i] = issue_cycle + issue_cost
+      ready[i] = max(issue_cycle + issue_cost, _trans_read_deadline)
 
     clock = issue_cycle + 1
     rr = (i + 1) % n

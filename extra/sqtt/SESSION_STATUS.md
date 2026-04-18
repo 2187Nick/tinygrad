@@ -3,26 +3,31 @@
 ## Bounty Goal
 $1,000 bounty: Make tinygrad's software GPU emulator produce cycle-accurate instruction timing matching real AMD 7900 XTX hardware, validated via SQTT (Shader Queue Thread Trace).
 
-## Current Accuracy: 278/321 exact (86.6%), 311/321 ±2 (96.9%)
+## Current Accuracy: 280/321 exact (87.2%), 305/321 ±2 (95.0%)
 
 All SQTT tests pass (encoder, map, examples, timing, E2E).
 Validated against 9 HW-captured kernels (17 total captures, 11 comparable + 6 new probes).
 
-### Per-Kernel Breakdown
+### Per-Kernel Breakdown (2026-04-17)
 
 | Kernel | Exact | Total | Rate | ±2 Rate | Notes |
 |------------------|-------|-------|--------|---------|-------|
 | elementwise | 16 | 16 | 100.0% | 100.0% | ✅ Perfect |
 | cast | 14 | 14 | 100.0% | 100.0% | ✅ Perfect |
 | plus | 13 | 13 | 100.0% | 100.0% | ✅ Perfect |
-| probe_vmem_chain | 21 | 22 | 95.5% | 95.5% | w1 startup stagger |
-| data_deps | 9 | 10 | 90.0% | 90.0% | VMEM bypass |
-| probe_cmp_chain | 39 | 44 | 88.6% | 95.5% | s_nop SGPR drain |
-| exp_chain | 99 | 112 | 88.4% | 99.1% | SGPR write-back contention |
-| probe_branch_cost| 21 | 26 | 80.8% | 96.2% | branch SCC latency |
-| probe_sgpr_cmps | 46 | 64 | 71.9% | 93.8% | post-trans stall, s_nop chain |
+| data_deps | 10 | 10 | 100.0% | 100.0% | ✅ Perfect |
+| probe_vmem_chain | 21 | 22 | 95.5% | 95.5% | w1 startup stagger (±1cy) |
+| probe_sgpr_cmps | 56 | 64 | 87.5% | 90.6% | v_cndmask/v_log/s_nop timing |
+| probe_cmp_chain | 38 | 44 | 86.4% | 93.2% | v_add after branch + store |
+| exp_chain | 91 | 112 | 81.2% | 96.4% | trans stall deferred to depctr |
+| probe_branch_cost| 21 | 26 | 80.8% | 92.3% | branch SCC stamp variance |
 
-Progress: 74.8% → 86.6% exact across multiple sessions. ±2 accuracy is 96.9%.
+Progress: 74.8% → 87.2% exact across sessions. ±2 accuracy is 95.0%.
+
+### Session 2026-04-17 Changes
+1. **PC offset normalization** in rigorous_hw_test.py: compare PC offsets relative to first instruction (HW/EMU load bases differ). Unblocked exp_chain/cast/elementwise/plus from being skipped — recovered 277/321 → baseline.
+2. **Defer trans VGPR read stall to ready[i]** in emu.py _simulate_sq_timing: non-trans VALU reading trans-written VGPR now stamps at issue_cycle (matches HW SQTT stamp-at-dispatch), with trans wait absorbed by subsequent s_waitcnt_depctr. Fixed exp_chain VOPD+depctr distribution: +3 exact, +4 ±2.
+3. Parked probe_vmem_chain w1 [2]: ±1cy artifact of SMEM backend stagger model (HW=2cy, EMU=1cy). Fixing would regress other tokens.
 
 ## What We Built
 

@@ -309,15 +309,20 @@ def do_compare():
       emu = emu_traces[emu_wid]
       min_len = min(len(hw), len(emu))
 
-      # Check PC alignment
-      pc_match = all(hw[j][0] == emu[j][0] for j in range(min_len))
+      # Normalize PC to offset from first instruction (HW and EMU load code at different VRAM addresses).
+      hw_pc0 = hw[0][0] if hw else 0
+      emu_pc0 = emu[0][0] if emu else 0
+      hw_off = [h[0] - hw_pc0 for h in hw]
+      emu_off = [e[0] - emu_pc0 for e in emu]
+      pc_match = all(hw_off[j] == emu_off[j] for j in range(min_len))
       if not pc_match:
-        # Find first mismatch
         for j in range(min_len):
-          if hw[j][0] != emu[j][0]:
-            print(f"  Wave {i}: PC mismatch at idx {j}: HW=0x{hw[j][0]:x} EMU=0x{emu[j][0]:x}")
-            print(f"    HW insts: {[hex(hw[k][0]) for k in range(max(0,j-2), min(j+3, len(hw)))]}")
-            print(f"    EMU insts: {[hex(emu[k][0]) for k in range(max(0,j-2), min(j+3, len(emu)))]}")
+          if hw_off[j] != emu_off[j]:
+            print(f"  Wave {i}: PC-offset mismatch at idx {j}: HW+0x{hw_off[j]:x} EMU+0x{emu_off[j]:x} (HW=0x{hw[j][0]:x}, EMU=0x{emu[j][0]:x})")
+            print(f"    HW offs:  {[hex(hw_off[k]) for k in range(max(0,j-2), min(j+3, len(hw)))]}")
+            print(f"    EMU offs: {[hex(emu_off[k]) for k in range(max(0,j-2), min(j+3, len(emu)))]}")
+            print(f"    HW insts: {[hw[k][3][:30] for k in range(max(0,j-2), min(j+3, len(hw)))]}")
+            print(f"    EMU insts:{[emu[k][3][:30] for k in range(max(0,j-2), min(j+3, len(emu)))]}")
             break
         print(f"  Wave {i}: SKIP (different instruction stream)")
         continue
