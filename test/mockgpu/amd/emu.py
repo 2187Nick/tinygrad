@@ -130,6 +130,7 @@ _sqtt_debug_log: list[dict] = []  # populated by _simulate_sq_timing when _SQTT_
 from test.mockgpu.amd.sq_timing.constants import CONST
 from test.mockgpu.amd.sq_timing.ib_fetch import IbFetch
 from test.mockgpu.amd.sq_timing.lds import LdsPipe
+from test.mockgpu.amd.sq_timing.sgpr import SgprScoreboard
 from test.mockgpu.amd.sq_timing.trans import TransPipe
 from test.mockgpu.amd.sq_timing.vmem import VmemPipe
 _LDS_RD_LATENCY = CONST.LDS_RD_LATENCY
@@ -230,13 +231,10 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
   vopd_pipe_avail = [0] * n      # VOPD dual-issue: when VOPD unit is free for next VOPD instruction
   last_vopd_issue = [-1000] * n  # last VOPD issue cycle (for dual-issue pipeline warm/cold classification)
   valu_issue_hist: list[list[int]] = [[] for _ in range(n)]  # last 4 non-trans VALU issue times (for time-based delay_alu)
-  sgpr_write_time: list[dict[int, int]] = [{} for _ in range(n)]  # SGPR last VALU-write cycle (offset → cycle)
-  # LIT v_cmp completion buffer (answer.md): tracks W[n]=I[n]+5, C[n]=max(W[n], C[n-1]+2), A[n]=C[n]+1.
-  # Applies only when v_cmp uses a 32-bit LIT source — inline-constant v_cmp (e.g. 0.5) uses standard SGPR latency.
-  sgpr_cmp_lit_read_ready: list[dict[int, int]] = [{} for _ in range(n)]  # reg → A[n] for LIT v_cmp-written SGPRs
-  sgpr_cmp_lit_last_commit = [0] * n   # last C[n] in current LIT v_cmp chain (for commit-gap serialization)
-  sgpr_cmp_lit_hist: list[list[int]] = [[] for _ in range(n)]  # recent LIT v_cmp I[n] values (for depth-2 writer stall)
-  smem_sgpr_ready: list[dict[int, int]] = [{} for _ in range(n)]  # SGPR idx → cycle when SMEM result available
+  # Per-wave SGPR scoreboard (EMU_REWRITE_DESIGN §1.5 / §5 Step 5b). Owns
+  # sgpr_write_time, sgpr_cmp_lit_read_ready/last_commit/hist, smem_sgpr_ready.
+  # Pure state holder — logic (read_stall, pending_nonvcc_drain) stays in emu.py.
+  sgpr = [SgprScoreboard(CONST) for _ in range(n)]
   vgpr_ready: list[dict[int, int]] = [{} for _ in range(n)]  # VGPR readiness scoreboard (reg_idx → cycle when result available)
   vgpr_slow_fresh_until: list[dict[int, int]] = [{} for _ in range(n)]  # VGPR slow-freshness: consuming before this cycle yields 9cy VALU latency
   vgpr_write_time: list[dict[int, int]] = [{} for _ in range(n)]  # VGPR last VALU-write cycle (reg_idx → issue cycle) for VMEM addr forwarding
@@ -351,7 +349,7 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
         # Prune completed ops
         lds.prune(i, stall_until)
         vmem[i].prune(stall_until)
-        smem_sgpr_ready[i] = {r: c for r, c in smem_sgpr_ready[i].items() if c > stall_until}
+        sgpr[i].replace_smem_ready({r: c for r, c in sgpr[i].smem_ready_map().items() if c > stall_until})
         continue
       if cat == 'depctr':
         # s_waitcnt_depctr: stall until pending multi-cycle VALU (transcendental) ops complete
@@ -364,9 +362,9 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
         pc[i] += 1
         trans[i].prune_valu_pend(stall_until)
         # depctr drains the LIT v_cmp completion buffer — subsequent chains start fresh
-        sgpr_cmp_lit_hist[i].clear()
-        sgpr_cmp_lit_last_commit[i] = 0
-        sgpr_cmp_lit_read_ready[i].clear()
+        sgpr[i].clear_cmp_lit_hist()
+        sgpr[i].set_cmp_lit_last_commit(0)
+        sgpr[i].clear_cmp_lit_read_ready()
         continue
       if cat == 'nop':
         # s_nop(N): stalls IB for N+1 cycles.
@@ -377,8 +375,8 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
         else:
           nop_start = max(ready[i], vmem[i].drain_deadline)
         # SGPR drain: s_nop stalls until all pending SGPR write-backs complete
-        if sgpr_write_time[i]:
-          sgpr_drain = max(t + _SGPR_LATENCY + 1 for t in sgpr_write_time[i].values())
+        if sgpr[i].write_time_map():
+          sgpr_drain = max(t + _SGPR_LATENCY + 1 for t in sgpr[i].write_time_map().values())
           nop_start = max(nop_start, sgpr_drain)
         if nop_cycles > 1:
           if ib[i].last_drain_stamp >= 0:
@@ -400,7 +398,7 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
           for _r in list(vgpr_write_time[i].keys()):
             if vgpr_write_time[i][_r] > _wt_cap: vgpr_write_time[i][_r] = _wt_cap
           # Prune completed SGPR writes: writes that have fully drained during the nop
-          sgpr_write_time[i] = {r: t for r, t in sgpr_write_time[i].items() if t + _SGPR_LATENCY >= nop_stamp}
+          sgpr[i].replace_write_time({r: t for r, t in sgpr[i].write_time_map().items() if t + _SGPR_LATENCY >= nop_stamp})
           # Long nops invalidate burst state: the scheduling gap makes pre-nop burst stale
           if nop_cycles >= 16: burst_wave = -1; burst_exclusive = False
         else:
@@ -545,14 +543,17 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
     # v_cndmask reading non-VCC condition SGPR has enhanced 6-cycle latency + drain for pending SGPR write-backs
     if cat == 'valu' and sgpr_r_regs:
       _is_cndmask_nonvcc = cond_sgpr >= 0 and cond_sgpr != 106  # non-VCC condition read (v_cndmask_b32_e64)
+      _cmp_lit_rr = sgpr[i].cmp_lit_read_ready_map()
+      _swt = sgpr[i].write_time_map()
+      _smem_rr = sgpr[i].smem_ready_map()
       for r in sgpr_r_regs:
-        if r in sgpr_cmp_lit_read_ready[i]:  # LIT v_cmp writer: completion-buffer A[n] overrides standard latency
-          issue_cycle = max(issue_cycle, sgpr_cmp_lit_read_ready[i][r])
-        elif r in sgpr_write_time[i]:
+        if r in _cmp_lit_rr:  # LIT v_cmp writer: completion-buffer A[n] overrides standard latency
+          issue_cycle = max(issue_cycle, _cmp_lit_rr[r])
+        elif r in _swt:
           lat = _CNDMASK_SGPR_LATENCY if (_is_cndmask_nonvcc and r == cond_sgpr) else _SGPR_LATENCY
-          issue_cycle = max(issue_cycle, sgpr_write_time[i][r] + lat)
-        if r in smem_sgpr_ready[i]:
-          issue_cycle = max(issue_cycle, smem_sgpr_ready[i][r])
+          issue_cycle = max(issue_cycle, _swt[r] + lat)
+        if r in _smem_rr:
+          issue_cycle = max(issue_cycle, _smem_rr[r])
       # v_cndmask condition drain: disabled — HW probe_sgpr_cmps shows gap=4 sufficient without drain
 
     # EXEC write-to-read dependency: v_cmpx writes EXEC, s_cbranch_execz/nz must wait for EXEC propagation
@@ -597,7 +598,7 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
     # LIT v_cmp SGPR completion buffer (answer.md): depth-2 writer stall.
     # N-th LIT v_cmp in a chain must wait until (n-2)th has propagated (W[n-2] = I[n-2]+5).
     if is_cmp_lit:
-      cmp_hist = sgpr_cmp_lit_hist[i]
+      cmp_hist = sgpr[i].cmp_lit_hist()
       if len(cmp_hist) >= 2:
         issue_cycle = max(issue_cycle, cmp_hist[-2] + _CMP_LIT_WB_LATENCY)
 
@@ -644,7 +645,7 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
       dbg = {"wave": i, "pc_idx": pc[i], "cat": cat, "issue_cycle": issue_cycle, "stamp": stamp_cycle,
              "ready": ready[i], "clock": clock}
       if cat == 'valu':
-        dbg["sgpr_write_time"] = dict(sgpr_write_time[i])
+        dbg["sgpr_write_time"] = dict(sgpr[i].write_time_map())
         dbg["vgpr_stall"] = {r: vgpr_ready[i].get(r, 0) for r in (vgpr_r_regs or ())}
         dbg["sgpr_r_regs"] = sgpr_r_regs
         dbg["cond_sgpr"] = cond_sgpr
@@ -681,7 +682,7 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
     if cat == 'smem':
       lds.on_smem_issue(i, issue_cycle + _SMEM_LATENCY)
       if extra:
-        for r in extra: smem_sgpr_ready[i][r] = issue_cycle + _SMEM_LATENCY
+        for r in extra: sgpr[i].set_smem_ready(r, issue_cycle + _SMEM_LATENCY)
     elif cat in ('ds_rd', 'ds_wr'):
       if cat == 'ds_wr':  # LDS writes serialize through shared unit
         lds.on_ds_write_issue(i, issue_cycle)
@@ -772,25 +773,25 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
     # Track SGPR write times for SGPR dependency stall detection (non-trans VALU only)
     if cat == 'valu' and not _is_trans and sgpr_w_regs:
       for r in sgpr_w_regs:
-        sgpr_write_time[i][r] = issue_cycle
+        sgpr[i].set_write_time(r, issue_cycle)
         # Non-LIT-v_cmp SGPR write invalidates completion-buffer entry (standard SGPR latency applies)
-        if not is_cmp_lit: sgpr_cmp_lit_read_ready[i].pop(r, None)
+        if not is_cmp_lit: sgpr[i].pop_cmp_lit_read_ready(r)
 
     # LIT v_cmp completion buffer: update write/commit tracking, compute A[n] for readers.
     if is_cmp_lit and sgpr_w_regs:
       W = issue_cycle + _CMP_LIT_WB_LATENCY
-      prev_C = sgpr_cmp_lit_last_commit[i]
+      prev_C = sgpr[i].cmp_lit_last_commit
       C = max(W, prev_C + _SGPR_COMMIT_GAP) if prev_C else W
       A = C + 1
-      sgpr_cmp_lit_last_commit[i] = C
-      for r in sgpr_w_regs: sgpr_cmp_lit_read_ready[i][r] = A
-      cmp_hist = sgpr_cmp_lit_hist[i]
+      sgpr[i].set_cmp_lit_last_commit(C)
+      for r in sgpr_w_regs: sgpr[i].set_cmp_lit_read_ready(r, A)
+      cmp_hist = sgpr[i].cmp_lit_hist()
       cmp_hist.append(issue_cycle)
       if len(cmp_hist) > 3: cmp_hist.pop(0)
     elif cat == 'valu' and not is_cmp_lit:
       # Non-LIT-v_cmp VALU resets the LIT chain (commit buffer drains when out of chain)
-      if sgpr_cmp_lit_hist[i]: sgpr_cmp_lit_hist[i].clear()
-      sgpr_cmp_lit_last_commit[i] = 0
+      if sgpr[i].cmp_lit_hist(): sgpr[i].clear_cmp_lit_hist()
+      sgpr[i].set_cmp_lit_last_commit(0)
 
     # Track EXEC write time for v_cmpx → s_cbranch_execz/nz dependency
     if cat == 'valu' and kwargs.get('op') == InstOp.VALU1_WR_EXEC:
