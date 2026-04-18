@@ -130,6 +130,7 @@ _sqtt_debug_log: list[dict] = []  # populated by _simulate_sq_timing when _SQTT_
 from test.mockgpu.amd.sq_timing.constants import CONST
 from test.mockgpu.amd.sq_timing.ib_fetch import IbFetch
 from test.mockgpu.amd.sq_timing.lds import LdsPipe
+from test.mockgpu.amd.sq_timing.vmem import VmemPipe
 _LDS_RD_LATENCY = CONST.LDS_RD_LATENCY
 _LDS_WR_LATENCY = CONST.LDS_WR_LATENCY
 _SMEM_LATENCY = CONST.SMEM_LATENCY
@@ -209,7 +210,6 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
   # Per-wave state
   pc = [0] * n
   ready = [0] * n
-  vm_pend: list[list[int]] = [[] for _ in range(n)]
   valu_pend: list[list[int]] = [[] for _ in range(n)]  # pending multi-cycle VALU (transcendental) completion times
   at_barrier = [False] * n
   barrier_issue = [0] * n
@@ -217,11 +217,11 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
   dly: list[list[int]] = [[0, -1, 0, -1, 0] for _ in range(n)]  # S_DELAY_ALU state
   valu_ds_wr_deadline = [0] * n   # VALU→DS_WR forwarding
   valu_ds_rd_deadline = [0] * n   # VALU→DS_RD forwarding
-  valu_vmem_wr_deadline = [0] * n # VALU→VMEM_WR forwarding
-  valu_vmem_wr_set_time = [0] * n # issue time of VALU that set the VMEM_WR deadline (for bypass detection)
-  valu_vmem_wr_slow_ext = [0] * n # slow-fresh extension baked into VMEM_WR deadline
-  valu_vmem_rd_deadline = [0] * n # VALU→VMEM_RD forwarding
-  vmem_drain_deadline = [0] * n   # VMEM pipeline drain: blocks s_nop/s_endpgm until VMEM accepted
+  # Per-wave VMEM pipeline tracker (EMU_REWRITE_DESIGN §1.6 / §5 Step 4).
+  # Owns valu_vmem_wr_deadline / wr_set_time / wr_slow_ext / rd_deadline /
+  # vmem_drain_deadline / vm_pend. `_vmem_wr_bypass_active` (cross-wave) still
+  # lives in emu.py for this step — it will move to a PeerSnapshot in Step 5+.
+  vmem = [VmemPipe(CONST) for _ in range(n)]
   trans_pipe_avail = [0] * n      # trans ALU pipeline: when trans unit is free for next trans instruction
   scalar_after_trans_ready = [0] * n  # trans→scalar visibility: scalar path stalls until trans has cleared (HW validated: probe_sgpr_cmps)
   vopd_pipe_avail = [0] * n      # VOPD dual-issue: when VOPD unit is free for next VOPD instruction
@@ -269,22 +269,26 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
   def _vmem_wr_bypass_active(i: int) -> bool:
     """Check if inter-wave VMEM forwarding bypass applies for wave i's store.
     Bypass fires when the SQ has overlapping work: either another wave's active VMEM drain
-    provides pipeline overlap, or another wave is schedulable before our reduced deadline."""
-    if valu_vmem_wr_set_time[i] == 0: return False
-    reduced = valu_vmem_wr_deadline[i] - _VALU_VMEM_WR_BYPASS
+    provides pipeline overlap, or another wave is schedulable before our reduced deadline.
+
+    NOTE: reads peer-wave VmemPipe instances via the `vmem` list. This function
+    stays here (not on VmemPipe) for Step 4 — moving it requires a PeerSnapshot
+    that also exposes pc/at_barrier/wave_done/ready (design §4.3, Step 5+)."""
+    if vmem[i].wr_set_time == 0: return False
+    reduced = vmem[i].wr_deadline - _VALU_VMEM_WR_BYPASS
     for j in range(n):
       if j == i or at_barrier[j]: continue
       # Active VMEM drain from a DONE wave provides pipeline overlap (wave j finished & queued VMEM)
-      if wave_done[j] and vmem_drain_deadline[j] >= reduced: return True
+      if wave_done[j] and vmem[j].drain_deadline >= reduced: return True
       if wave_done[j]: continue
       if pc[j] >= len(wave_events[wave_ids[j]]): continue
       _, _, jcat, _ = wave_events[wave_ids[j]][pc[j]]
       if jcat == 'waveend': continue
       j_eff = ready[j]
-      if jcat == 'vmem_wr': j_eff = max(j_eff, valu_vmem_wr_deadline[j])
+      if jcat == 'vmem_wr': j_eff = max(j_eff, vmem[j].wr_deadline)
       elif jcat == 'ds_wr': j_eff = max(j_eff, valu_ds_wr_deadline[j])
       elif jcat == 'ds_rd': j_eff = max(j_eff, valu_ds_rd_deadline[j])
-      elif jcat == 'vmem_rd': j_eff = max(j_eff, valu_vmem_rd_deadline[j])
+      elif jcat == 'vmem_rd': j_eff = max(j_eff, vmem[j].rd_deadline)
       if j_eff <= reduced: return True
     return False
 
@@ -335,7 +339,7 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
         if lgkm_th < len(sl):
           stall_until = max(stall_until, sl[len(sl) - lgkm_th - 1])
         # vmcnt: stall until at most vm_th ops are still pending
-        sv = sorted(vm_pend[i])
+        sv = sorted(vmem[i].vm_pending())
         if vm_th < len(sv):
           stall_until = max(stall_until, sv[len(sv) - vm_th - 1])
         timed.append((stall_until, wid, pkt_cls, kwargs))
@@ -344,7 +348,7 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
         pc[i] += 1
         # Prune completed ops
         lds.prune(i, stall_until)
-        vm_pend[i] = [c for c in vm_pend[i] if c > stall_until]
+        vmem[i].prune(stall_until)
         smem_sgpr_ready[i] = {r: c for r, c in smem_sgpr_ready[i].items() if c > stall_until}
         continue
       if cat == 'depctr':
@@ -367,9 +371,9 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
         nop_cycles = (extra + 1) if extra is not None else 1
         # After drain event: nop starts at drain stamp (no gap). After non-drain: normal gap.
         if ib[i].last_drain_stamp >= 0:
-          nop_start = max(ib[i].last_drain_stamp, vmem_drain_deadline[i])
+          nop_start = max(ib[i].last_drain_stamp, vmem[i].drain_deadline)
         else:
-          nop_start = max(ready[i], vmem_drain_deadline[i])
+          nop_start = max(ready[i], vmem[i].drain_deadline)
         # SGPR drain: s_nop stalls until all pending SGPR write-backs complete
         if sgpr_write_time[i]:
           sgpr_drain = max(t + _SGPR_LATENCY + 1 for t in sgpr_write_time[i].values())
@@ -388,8 +392,8 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
           ib[i].set_drain(nop_stamp)  # chain: next nop starts at this stamp
           # ISA team answer2.md (Bonus): s_nop counts toward all cycle-based forwarding windows.
           _residual = nop_stamp + 5
-          valu_vmem_wr_deadline[i] = min(valu_vmem_wr_deadline[i], _residual)
-          valu_vmem_rd_deadline[i] = min(valu_vmem_rd_deadline[i], _residual)
+          vmem[i].cap_wr_deadline(_residual)
+          vmem[i].cap_rd_deadline(_residual)
           _wt_cap = _residual - _VALU_VMEM_ADDR_FORWARD
           for _r in list(vgpr_write_time[i].keys()):
             if vgpr_write_time[i][_r] > _wt_cap: vgpr_write_time[i][_r] = _wt_cap
@@ -459,7 +463,7 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
         elif next_cat == 'vmem_wr':
           ne_bytes = next_extra[0] if isinstance(next_extra, tuple) else next_extra
           store_vgprs = max(1, (ne_bytes or 4) // 4) if ne_bytes else 1
-          wr_eff = _vmem_wr_issue(valu_vmem_wr_deadline[i], store_vgprs,
+          wr_eff = _vmem_wr_issue(vmem[i].wr_deadline, store_vgprs,
                                                      consecutive_selffwd_vgprs[i], consecutive_vgprs_written[i])
           if store_vgprs == 1 and _vmem_wr_bypass_active(i):
             wr_eff -= _VALU_VMEM_WR_BYPASS
@@ -467,7 +471,7 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
           if isinstance(next_extra, tuple) and next_extra[1] is not None:
             addr_wt = vgpr_write_time[i].get(next_extra[1], 0)
             if addr_wt > 0: eff_ready = max(eff_ready, addr_wt + _VALU_VMEM_ADDR_FORWARD)
-        elif next_cat == 'vmem_rd': eff_ready = max(eff_ready, valu_vmem_rd_deadline[i])
+        elif next_cat == 'vmem_rd': eff_ready = max(eff_ready, vmem[i].rd_deadline)
         if eff_ready < best_cycle:
           best_cycle = eff_ready
           best = i
@@ -602,7 +606,7 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
       pre_fwd_cycle = issue_cycle
       vmem_bytes = extra[0] if isinstance(extra, tuple) else extra
       store_vgprs = max(1, (vmem_bytes or 4) // 4) if vmem_bytes else 1
-      wr_deadline = _vmem_wr_issue(valu_vmem_wr_deadline[i], store_vgprs,
+      wr_deadline = _vmem_wr_issue(vmem[i].wr_deadline, store_vgprs,
                                                      consecutive_selffwd_vgprs[i], consecutive_vgprs_written[i])
       # Inter-wave VMEM bypass: another wave schedulable ≥4cy before deadline → SQ pipelines forwarding (21→17cy)
       if store_vgprs == 1 and _vmem_wr_bypass_active(i):
@@ -615,7 +619,7 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
       _vmem_fwd_stall = issue_cycle - pre_fwd_cycle
     elif cat == 'vmem_rd':
       pre_fwd_cycle = issue_cycle
-      issue_cycle = max(issue_cycle, valu_vmem_rd_deadline[i])
+      issue_cycle = max(issue_cycle, vmem[i].rd_deadline)
       _vmem_fwd_stall = issue_cycle - pre_fwd_cycle
 
     # Barrier arrival penalty: non-first waves incur +1 cycle
@@ -645,9 +649,9 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
         dbg["has_delay_alu"] = has_delay_alu[i]
         dbg["trans_pipe_avail"] = trans_pipe_avail[i]
       if cat == 'vmem_wr':
-        dbg["vmem_wr_deadline"] = valu_vmem_wr_deadline[i]
-        dbg["vmem_wr_set_time"] = valu_vmem_wr_set_time[i]
-        dbg["vmem_drain_deadline"] = vmem_drain_deadline[i]
+        dbg["vmem_wr_deadline"] = vmem[i].wr_deadline
+        dbg["vmem_wr_set_time"] = vmem[i].wr_set_time
+        dbg["vmem_drain_deadline"] = vmem[i].drain_deadline
         dbg["bypass_active"] = store_vgprs == 1 and _vmem_wr_bypass_active(i)
         dbg["valu_hist"] = list(valu_issue_hist[i])
         # Log other waves' state for bypass analysis
@@ -659,11 +663,11 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
           dbg[f"w{j}_done"] = jdone
           dbg[f"w{j}_ready"] = ready[j]
           dbg[f"w{j}_cat"] = jcat
-          dbg[f"w{j}_vmem_drain"] = vmem_drain_deadline[j]
+          dbg[f"w{j}_vmem_drain"] = vmem[j].drain_deadline
           dbg[f"w{j}_pc_idx"] = pc[j]
           dbg[f"w{j}_valu_hist"] = list(valu_issue_hist[j])
-          dbg[f"w{j}_vmem_wr_deadline"] = valu_vmem_wr_deadline[j]
-      if cat == 'nop': dbg["vmem_drain_deadline"] = vmem_drain_deadline[i]
+          dbg[f"w{j}_vmem_wr_deadline"] = vmem[j].wr_deadline
+      if cat == 'nop': dbg["vmem_drain_deadline"] = vmem[i].drain_deadline
       if cat == 'branch': dbg["op"] = str(kwargs.get('op', ''))
       _sqtt_debug_log.append(dbg)
 
@@ -697,13 +701,13 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
           # Clear slow-freshness on all b128 VGPRs (fresh data overwrites any prior slow state)
           for off in range(4): sf.pop(ds_dest_base + off, None) if not is_serialized or off < 2 else None
     elif cat == 'vmem_rd':
-      vm_pend[i].append(issue_cycle + _VMEM_LATENCY)
-      vmem_drain_deadline[i] = issue_cycle + _VMEM_DRAIN_CYCLES
+      vmem[i].on_vmem_issue(issue_cycle + _VMEM_LATENCY)
+      vmem[i].set_drain_deadline(issue_cycle + _VMEM_DRAIN_CYCLES)
     elif cat == 'vmem_wr':
-      vm_pend[i].append(issue_cycle + _VMEM_LATENCY)
+      vmem[i].on_vmem_issue(issue_cycle + _VMEM_LATENCY)
       # Slow-fresh forwarding stall overlaps with VMEM execution: reduce drain by the slow-fresh extension
-      _drain = max(_VMEM_EXEC_MIN, _VMEM_DRAIN_CYCLES - valu_vmem_wr_slow_ext[i]) if _vmem_fwd_stall > 0 else _VMEM_DRAIN_CYCLES
-      vmem_drain_deadline[i] = issue_cycle + _drain
+      _drain = max(_VMEM_EXEC_MIN, _VMEM_DRAIN_CYCLES - vmem[i].wr_slow_ext) if _vmem_fwd_stall > 0 else _VMEM_DRAIN_CYCLES
+      vmem[i].set_drain_deadline(issue_cycle + _drain)
 
     # Track multi-cycle VALU (transcendental) completion for s_waitcnt_depctr, and trans pipeline occupancy
     if _is_trans:
@@ -741,10 +745,10 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
       _slow_extra = 8 if _slow_consume else 0
       valu_ds_wr_deadline[i] = issue_cycle + _VALU_DS_WR_FORWARD + _slow_extra
       valu_ds_rd_deadline[i] = issue_cycle + _VALU_DS_RD_FORWARD + _slow_extra
-      valu_vmem_wr_deadline[i] = issue_cycle + _VALU_VMEM_WR_FORWARD + _slow_extra
-      valu_vmem_wr_set_time[i] = issue_cycle
-      valu_vmem_wr_slow_ext[i] = _slow_extra
-      valu_vmem_rd_deadline[i] = issue_cycle + _VALU_VMEM_RD_FORWARD + _slow_extra
+      vmem[i].set_wr_deadline(issue_cycle + _VALU_VMEM_WR_FORWARD + _slow_extra)
+      vmem[i].set_wr_set_time(issue_cycle)
+      vmem[i].set_wr_slow_ext(_slow_extra)
+      vmem[i].set_rd_deadline(issue_cycle + _VALU_VMEM_RD_FORWARD + _slow_extra)
       # Track consecutive VGPR write patterns for VMEM store forwarding optimization
       n_written = len(set(vgpr_w_regs))
       is_selffwd = bool(vgpr_r_regs and set(vgpr_w_regs) & set(vgpr_r_regs))
