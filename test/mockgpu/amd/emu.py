@@ -148,7 +148,7 @@ _FIRST_INST_GAP = 2
 # TRANS32 deps (5-7): 0 — trans ALU runs in parallel with VALU. Pipeline occupancy enforced by trans_pipe_avail. Register deps by s_waitcnt_depctr.
 _INSTID_BASE_STALLS = (0, 4, 3, 2, 1, 0, 0, 0, 1, 1, 2, 3)
 _TRANS_PIPE_CYCLES = 4  # trans ALU pipeline occupancy: trans→trans must wait 4 cycles; trans→VALU = 1 cycle (parallel)
-_VOPD_PIPE_CYCLES = 2  # VOPD dual-issue occupancy: consecutive VOPDs need 2 extra cycles (HW validated: exp_chain [16]/[17])
+_VOPD_PIPE_CYCLES = 4  # VOPD dual-issue occupancy: consecutive VOPDs need 4 extra cycles (HW validated via brute-force sweep)
 _EXEC_WRITE_LATENCY = 24  # v_cmpx writes EXEC; s_cbranch_execz must wait for EXEC propagation (VALU→SQ path, HW validated: layernorm)
 _LDS_B128_EXTRA = 5       # extra LDS latency for b128 loads (4 VGPR dwords): HW validated layernorm [18] diff=-5
 _LDS_B128_VGPR_STAGGER = 17 # upper 2 VGPRs of SERIALIZED b128 load available 17cy after lds_complete (HW validated: layernorm [26] v[6] delta=9)
@@ -762,7 +762,8 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
     elif cat == 'waveend':
       wave_done[i] = True
     else:
-      ready[i] = max(issue_cycle + issue_cost, _trans_read_deadline)
+      # Trans VGPR read stall is absorbed by s_waitcnt_depctr, not VALU dispatch — don't hold the wave.
+      ready[i] = issue_cycle + issue_cost
 
     clock = issue_cycle + 1
     rr = (i + 1) % n
