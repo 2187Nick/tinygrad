@@ -130,6 +130,7 @@ _sqtt_debug_log: list[dict] = []  # populated by _simulate_sq_timing when _SQTT_
 from test.mockgpu.amd.sq_timing.constants import CONST
 from test.mockgpu.amd.sq_timing.ib_fetch import IbFetch
 from test.mockgpu.amd.sq_timing.lds import LdsPipe
+from test.mockgpu.amd.sq_timing.scalar import ScalarPipe
 from test.mockgpu.amd.sq_timing.sgpr import SgprScoreboard
 from test.mockgpu.amd.sq_timing.trans import TransPipe
 from test.mockgpu.amd.sq_timing.valu import VAluPipe
@@ -239,8 +240,11 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
   # vgpr_ready, vgpr_slow_fresh_until, vgpr_write_time. Pure state holder.
   valu = [VAluPipe(CONST) for _ in range(n)]
   has_delay_alu = [False] * n     # per-wave: has any s_delay_alu been seen (controls VGPR scoreboard activation)
-  exec_write_time = [0] * n      # per-wave: last cycle when EXEC was written (by v_cmpx)
-  scc_write_time = [0] * n       # per-wave: last cycle when SCC was written (by s_cmp/s_cmpk/SALU)
+  # Per-wave ScalarPipe (EMU_REWRITE_DESIGN §1.4 / §5 Step 6). Owns scc_write_time
+  # and exec_write_time. Pure state holder — SALU/cbranch/s_nop cost helpers stay
+  # in emu.py for now; Step 7 will land HW-confirmed constant fixes and may then
+  # refactor those helpers onto ScalarPipe.
+  scal = [ScalarPipe(CONST) for _ in range(n)]
   # Per-wave IB-fetch tracker (EMU_REWRITE_DESIGN.md §1.8 / §5 Step 2). Owns last_drain_stamp and
   # had_drain_nop. Reset at the top of each `_drain_zero_cost(i)` call to preserve scalar-per-call
   # semantics of the pre-refactor code (pure refactor — zero behaviour change).
@@ -556,9 +560,9 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
     if cat == 'branch' and isinstance(extra, tuple):
       reads_exec, reads_scc = extra
       if reads_exec:
-        issue_cycle = max(issue_cycle, exec_write_time[i] + _EXEC_WRITE_LATENCY)
+        issue_cycle = max(issue_cycle, scal[i].exec_write_time + _EXEC_WRITE_LATENCY)
       if reads_scc:
-        issue_cycle = max(issue_cycle, scc_write_time[i] + 2)
+        issue_cycle = max(issue_cycle, scal[i].scc_write_time + 2)
 
     # VGPR readiness: HW interlock enforces RAW deps on VALU-written VGPRs regardless of s_delay_alu coverage
     if cat == 'valu' and vgpr_r_regs:
@@ -792,12 +796,12 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
 
     # Track EXEC write time for v_cmpx → s_cbranch_execz/nz dependency
     if cat == 'valu' and kwargs.get('op') == InstOp.VALU1_WR_EXEC:
-      exec_write_time[i] = issue_cycle
+      scal[i].set_exec_write_time(issue_cycle)
 
     # Track SCC write time: SALU (s_cmp, s_cmpk, etc.) writes SCC for branch dependency
     if cat == 'salu':
-      scc_write_time[i] = issue_cycle
-      exec_write_time[i] = issue_cycle
+      scal[i].set_scc_write_time(issue_cycle)
+      scal[i].set_exec_write_time(issue_cycle)
 
     # Track VGPR write readiness: all VALU writes update scoreboard for RAW dependency tracking
     if cat == 'valu' and not _is_trans and vgpr_w_regs:
