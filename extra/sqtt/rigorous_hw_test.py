@@ -251,6 +251,16 @@ PROBE_KERNELS = {name: (_run_probe(f"custom_{name}"), 30) for name in [
 if os.environ.get("PROBE"):
   KERNELS.update(PROBE_KERNELS)
 
+# ─── 2026-04-18 microbench suite (extra/sqtt/rgp/microbench.py) ──────────────
+# Declarative microbench framework. Enable with MICROBENCH=1. Each registered
+# microbench runs via a generic dispatcher with max_attempts=100 (up from 30)
+# to account for 16-WG dispatches and traced-CU landing variance.
+if os.environ.get("MICROBENCH"):
+  from extra.sqtt.rgp.microbench import MICROBENCHES, _run_microbench
+  import extra.sqtt.rgp.microbench_demo  # noqa: F401 (registers demo microbenches)
+  for _mb_name in MICROBENCHES:
+    KERNELS[_mb_name] = (_run_microbench(_mb_name), 100)
+
 # ─── Capture mode ─────────────────────────────────────────────────────────────
 
 def do_capture():
