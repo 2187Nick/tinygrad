@@ -1,0 +1,9 @@
+#version 450
+// Mirrors tinygrad's custom_data_deps: load → v_add → store, 64 threads = 2 wave32.
+layout(local_size_x = 64) in;
+layout(set = 0, binding = 0) buffer B { float data[]; } buf;
+void main() {
+  uint i = gl_LocalInvocationID.x;
+  float v = buf.data[i] + 1.0;
+  buf.data[i] = v;
+}

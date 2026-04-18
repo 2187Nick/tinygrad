@@ -1,0 +1,1577 @@
+{
+  "file": "probe_cmp_chain.rgp",
+  "per_se": [
+    {
+      "se": 0,
+      "traced_cu": 3,
+      "waves": [
+        {
+          "wave": 0,
+          "simd": 2,
+          "cu": 10,
+          "time": 69566
+        },
+        {
+          "wave": 0,
+          "simd": 0,
+          "cu": 10,
+          "time": 69574
+        },
+        {
+          "wave": 0,
+          "simd": 2,
+          "cu": 11,
+          "time": 69582
+        },
+        {
+          "wave": 0,
+          "simd": 0,
+          "cu": 11,
+          "time": 69590
+        },
+        {
+          "wave": 0,
+          "simd": 3,
+          "cu": 0,
+          "time": 69598
+        },
+        {
+          "wave": 0,
+          "simd": 1,
+          "cu": 0,
+          "time": 69606
+        },
+        {
+          "wave": 0,
+          "simd": 3,
+          "cu": 1,
+          "time": 69614
+        },
+        {
+          "wave": 0,
+          "simd": 1,
+          "cu": 1,
+          "time": 69622
+        },
+        {
+          "wave": 0,
+          "simd": 3,
+          "cu": 2,
+          "time": 69630
+        },
+        {
+          "wave": 0,
+          "simd": 1,
+          "cu": 2,
+          "time": 69638
+        },
+        {
+          "wave": 0,
+          "simd": 3,
+          "cu": 3,
+          "time": 69646
+        },
+        {
+          "wave": 0,
+          "simd": 1,
+          "cu": 3,
+          "time": 69654
+        },
+        {
+          "wave": 0,
+          "simd": 3,
+          "cu": 8,
+          "time": 69662
+        },
+        {
+          "wave": 0,
+          "simd": 1,
+          "cu": 8,
+          "time": 69670
+        },
+        {
+          "wave": 0,
+          "simd": 3,
+          "cu": 9,
+          "time": 69678
+        },
+        {
+          "wave": 0,
+          "simd": 1,
+          "cu": 9,
+          "time": 69686
+        },
+        {
+          "wave": 0,
+          "simd": 3,
+          "cu": 10,
+          "time": 69694
+        },
+        {
+          "wave": 0,
+          "simd": 1,
+          "cu": 10,
+          "time": 69702
+        },
+        {
+          "wave": 0,
+          "simd": 3,
+          "cu": 11,
+          "time": 69710
+        },
+        {
+          "wave": 0,
+          "simd": 1,
+          "cu": 11,
+          "time": 69718
+        },
+        {
+          "wave": 0,
+          "simd": 2,
+          "cu": 0,
+          "time": 69726
+        },
+        {
+          "wave": 0,
+          "simd": 0,
+          "cu": 0,
+          "time": 69734
+        },
+        {
+          "wave": 0,
+          "simd": 2,
+          "cu": 1,
+          "time": 69742
+        },
+        {
+          "wave": 0,
+          "simd": 0,
+          "cu": 1,
+          "time": 69746
+        },
+        {
+          "wave": 0,
+          "simd": 2,
+          "cu": 2,
+          "time": 69754
+        },
+        {
+          "wave": 0,
+          "simd": 0,
+          "cu": 2,
+          "time": 69758
+        },
+        {
+          "wave": 0,
+          "simd": 2,
+          "cu": 3,
+          "time": 69766
+        },
+        {
+          "wave": 0,
+          "simd": 0,
+          "cu": 3,
+          "time": 69774
+        },
+        {
+          "wave": 0,
+          "simd": 2,
+          "cu": 8,
+          "time": 69782
+        },
+        {
+          "wave": 0,
+          "simd": 0,
+          "cu": 8,
+          "time": 69790
+        },
+        {
+          "wave": 0,
+          "simd": 2,
+          "cu": 9,
+          "time": 69798
+        },
+        {
+          "wave": 0,
+          "simd": 0,
+          "cu": 9,
+          "time": 69806
+        },
+        {
+          "wave": 1,
+          "simd": 2,
+          "cu": 10,
+          "time": 69814
+        },
+        {
+          "wave": 1,
+          "simd": 0,
+          "cu": 10,
+          "time": 69822
+        },
+        {
+          "wave": 1,
+          "simd": 2,
+          "cu": 11,
+          "time": 69830
+        },
+        {
+          "wave": 1,
+          "simd": 0,
+          "cu": 11,
+          "time": 69838
+        },
+        {
+          "wave": 1,
+          "simd": 3,
+          "cu": 0,
+          "time": 69846
+        },
+        {
+          "wave": 1,
+          "simd": 1,
+          "cu": 0,
+          "time": 69850
+        },
+        {
+          "wave": 1,
+          "simd": 3,
+          "cu": 1,
+          "time": 69858
+        },
+        {
+          "wave": 1,
+          "simd": 1,
+          "cu": 1,
+          "time": 69866
+        },
+        {
+          "wave": 1,
+          "simd": 3,
+          "cu": 2,
+          "time": 69874
+        },
+        {
+          "wave": 1,
+          "simd": 1,
+          "cu": 2,
+          "time": 69882
+        },
+        {
+          "wave": 1,
+          "simd": 3,
+          "cu": 3,
+          "time": 69890
+        }
+      ]
+    },
+    {
+      "se": 1,
+      "traced_cu": 3,
+      "waves": [
+        {
+          "wave": 0,
+          "simd": 2,
+          "cu": 10,
+          "time": 69696
+        },
+        {
+          "wave": 0,
+          "simd": 0,
+          "cu": 10,
+          "time": 69704
+        },
+        {
+          "wave": 0,
+          "simd": 2,
+          "cu": 11,
+          "time": 69712
+        },
+        {
+          "wave": 0,
+          "simd": 0,
+          "cu": 11,
+          "time": 69720
+        },
+        {
+          "wave": 0,
+          "simd": 3,
+          "cu": 0,
+          "time": 69728
+        },
+        {
+          "wave": 0,
+          "simd": 1,
+          "cu": 0,
+          "time": 69736
+        },
+        {
+          "wave": 0,
+          "simd": 3,
+          "cu": 1,
+          "time": 69744
+        },
+        {
+          "wave": 0,
+          "simd": 1,
+          "cu": 1,
+          "time": 69752
+        },
+        {
+          "wave": 0,
+          "simd": 3,
+          "cu": 2,
+          "time": 69760
+        },
+        {
+          "wave": 0,
+          "simd": 1,
+          "cu": 2,
+          "time": 69768
+        },
+        {
+          "wave": 0,
+          "simd": 3,
+          "cu": 3,
+          "time": 69776
+        },
+        {
+          "wave": 0,
+          "simd": 1,
+          "cu": 3,
+          "time": 69784
+        },
+        {
+          "wave": 0,
+          "simd": 3,
+          "cu": 8,
+          "time": 69792
+        },
+        {
+          "wave": 0,
+          "simd": 1,
+          "cu": 8,
+          "time": 69800
+        },
+        {
+          "wave": 0,
+          "simd": 3,
+          "cu": 9,
+          "time": 69808
+        },
+        {
+          "wave": 0,
+          "simd": 1,
+          "cu": 9,
+          "time": 69816
+        },
+        {
+          "wave": 0,
+          "simd": 3,
+          "cu": 10,
+          "time": 69824
+        },
+        {
+          "wave": 0,
+          "simd": 1,
+          "cu": 10,
+          "time": 69832
+        },
+        {
+          "wave": 0,
+          "simd": 3,
+          "cu": 11,
+          "time": 69840
+        },
+        {
+          "wave": 0,
+          "simd": 1,
+          "cu": 11,
+          "time": 69848
+        },
+        {
+          "wave": 0,
+          "simd": 2,
+          "cu": 0,
+          "time": 69856
+        },
+        {
+          "wave": 0,
+          "simd": 0,
+          "cu": 0,
+          "time": 69864
+        },
+        {
+          "wave": 0,
+          "simd": 2,
+          "cu": 1,
+          "time": 69872
+        },
+        {
+          "wave": 0,
+          "simd": 0,
+          "cu": 1,
+          "time": 69876
+        },
+        {
+          "wave": 0,
+          "simd": 2,
+          "cu": 2,
+          "time": 69884
+        },
+        {
+          "wave": 0,
+          "simd": 0,
+          "cu": 2,
+          "time": 69888
+        },
+        {
+          "wave": 0,
+          "simd": 2,
+          "cu": 3,
+          "time": 69896
+        },
+        {
+          "wave": 0,
+          "simd": 0,
+          "cu": 3,
+          "time": 69904
+        },
+        {
+          "wave": 0,
+          "simd": 2,
+          "cu": 8,
+          "time": 69912
+        },
+        {
+          "wave": 0,
+          "simd": 0,
+          "cu": 8,
+          "time": 69920
+        },
+        {
+          "wave": 0,
+          "simd": 2,
+          "cu": 9,
+          "time": 69924
+        },
+        {
+          "wave": 0,
+          "simd": 0,
+          "cu": 9,
+          "time": 69932
+        },
+        {
+          "wave": 1,
+          "simd": 2,
+          "cu": 10,
+          "time": 69940
+        },
+        {
+          "wave": 1,
+          "simd": 0,
+          "cu": 10,
+          "time": 69948
+        },
+        {
+          "wave": 1,
+          "simd": 2,
+          "cu": 11,
+          "time": 69956
+        },
+        {
+          "wave": 1,
+          "simd": 0,
+          "cu": 11,
+          "time": 69964
+        },
+        {
+          "wave": 1,
+          "simd": 3,
+          "cu": 0,
+          "time": 69972
+        },
+        {
+          "wave": 1,
+          "simd": 1,
+          "cu": 0,
+          "time": 69976
+        },
+        {
+          "wave": 1,
+          "simd": 3,
+          "cu": 1,
+          "time": 69980
+        },
+        {
+          "wave": 1,
+          "simd": 1,
+          "cu": 1,
+          "time": 69988
+        },
+        {
+          "wave": 1,
+          "simd": 3,
+          "cu": 2,
+          "time": 69996
+        },
+        {
+          "wave": 1,
+          "simd": 1,
+          "cu": 2,
+          "time": 70004
+        },
+        {
+          "wave": 1,
+          "simd": 3,
+          "cu": 3,
+          "time": 70012
+        }
+      ]
+    },
+    {
+      "se": 2,
+      "traced_cu": 3,
+      "waves": [
+        {
+          "wave": 0,
+          "simd": 2,
+          "cu": 10,
+          "time": 70269
+        },
+        {
+          "wave": 0,
+          "simd": 0,
+          "cu": 10,
+          "time": 70277
+        },
+        {
+          "wave": 0,
+          "simd": 2,
+          "cu": 11,
+          "time": 70285
+        },
+        {
+          "wave": 0,
+          "simd": 0,
+          "cu": 11,
+          "time": 70293
+        },
+        {
+          "wave": 0,
+          "simd": 3,
+          "cu": 0,
+          "time": 70301
+        },
+        {
+          "wave": 0,
+          "simd": 1,
+          "cu": 0,
+          "time": 70309
+        },
+        {
+          "wave": 0,
+          "simd": 3,
+          "cu": 1,
+          "time": 70317
+        },
+        {
+          "wave": 0,
+          "simd": 1,
+          "cu": 1,
+          "time": 70325
+        },
+        {
+          "wave": 0,
+          "simd": 3,
+          "cu": 2,
+          "time": 70333
+        },
+        {
+          "wave": 0,
+          "simd": 1,
+          "cu": 2,
+          "time": 70341
+        },
+        {
+          "wave": 0,
+          "simd": 3,
+          "cu": 3,
+          "time": 70349
+        },
+        {
+          "wave": 0,
+          "simd": 1,
+          "cu": 3,
+          "time": 70357
+        },
+        {
+          "wave": 0,
+          "simd": 3,
+          "cu": 8,
+          "time": 70365
+        },
+        {
+          "wave": 0,
+          "simd": 1,
+          "cu": 8,
+          "time": 70373
+        },
+        {
+          "wave": 0,
+          "simd": 3,
+          "cu": 9,
+          "time": 70381
+        },
+        {
+          "wave": 0,
+          "simd": 1,
+          "cu": 9,
+          "time": 70389
+        },
+        {
+          "wave": 0,
+          "simd": 3,
+          "cu": 10,
+          "time": 70397
+        },
+        {
+          "wave": 0,
+          "simd": 1,
+          "cu": 10,
+          "time": 70405
+        },
+        {
+          "wave": 0,
+          "simd": 3,
+          "cu": 11,
+          "time": 70413
+        },
+        {
+          "wave": 0,
+          "simd": 1,
+          "cu": 11,
+          "time": 70421
+        },
+        {
+          "wave": 0,
+          "simd": 2,
+          "cu": 0,
+          "time": 70429
+        },
+        {
+          "wave": 0,
+          "simd": 0,
+          "cu": 0,
+          "time": 70437
+        },
+        {
+          "wave": 0,
+          "simd": 2,
+          "cu": 1,
+          "time": 70445
+        },
+        {
+          "wave": 0,
+          "simd": 0,
+          "cu": 1,
+          "time": 70449
+        },
+        {
+          "wave": 0,
+          "simd": 2,
+          "cu": 2,
+          "time": 70457
+        },
+        {
+          "wave": 0,
+          "simd": 0,
+          "cu": 2,
+          "time": 70461
+        },
+        {
+          "wave": 0,
+          "simd": 2,
+          "cu": 3,
+          "time": 70469
+        },
+        {
+          "wave": 0,
+          "simd": 0,
+          "cu": 3,
+          "time": 70477
+        },
+        {
+          "wave": 0,
+          "simd": 2,
+          "cu": 8,
+          "time": 70485
+        },
+        {
+          "wave": 0,
+          "simd": 0,
+          "cu": 8,
+          "time": 70493
+        },
+        {
+          "wave": 0,
+          "simd": 2,
+          "cu": 9,
+          "time": 70501
+        },
+        {
+          "wave": 0,
+          "simd": 0,
+          "cu": 9,
+          "time": 70509
+        },
+        {
+          "wave": 1,
+          "simd": 2,
+          "cu": 10,
+          "time": 70517
+        },
+        {
+          "wave": 1,
+          "simd": 0,
+          "cu": 10,
+          "time": 70525
+        },
+        {
+          "wave": 1,
+          "simd": 2,
+          "cu": 11,
+          "time": 70533
+        },
+        {
+          "wave": 1,
+          "simd": 0,
+          "cu": 11,
+          "time": 70541
+        },
+        {
+          "wave": 1,
+          "simd": 3,
+          "cu": 0,
+          "time": 70549
+        },
+        {
+          "wave": 1,
+          "simd": 1,
+          "cu": 0,
+          "time": 70553
+        },
+        {
+          "wave": 1,
+          "simd": 3,
+          "cu": 1,
+          "time": 70561
+        },
+        {
+          "wave": 1,
+          "simd": 1,
+          "cu": 1,
+          "time": 70565
+        },
+        {
+          "wave": 1,
+          "simd": 3,
+          "cu": 2,
+          "time": 70573
+        },
+        {
+          "wave": 1,
+          "simd": 1,
+          "cu": 2,
+          "time": 70581
+        }
+      ]
+    },
+    {
+      "se": 3,
+      "traced_cu": 3,
+      "waves": [
+        {
+          "wave": 0,
+          "simd": 2,
+          "cu": 10,
+          "time": 69837
+        },
+        {
+          "wave": 0,
+          "simd": 0,
+          "cu": 10,
+          "time": 69845
+        },
+        {
+          "wave": 0,
+          "simd": 2,
+          "cu": 11,
+          "time": 69853
+        },
+        {
+          "wave": 0,
+          "simd": 0,
+          "cu": 11,
+          "time": 69861
+        },
+        {
+          "wave": 0,
+          "simd": 3,
+          "cu": 0,
+          "time": 69869
+        },
+        {
+          "wave": 0,
+          "simd": 1,
+          "cu": 0,
+          "time": 69877
+        },
+        {
+          "wave": 0,
+          "simd": 3,
+          "cu": 1,
+          "time": 69885
+        },
+        {
+          "wave": 0,
+          "simd": 1,
+          "cu": 1,
+          "time": 69893
+        },
+        {
+          "wave": 0,
+          "simd": 3,
+          "cu": 2,
+          "time": 69901
+        },
+        {
+          "wave": 0,
+          "simd": 1,
+          "cu": 2,
+          "time": 69909
+        },
+        {
+          "wave": 0,
+          "simd": 3,
+          "cu": 3,
+          "time": 69917
+        },
+        {
+          "wave": 0,
+          "simd": 1,
+          "cu": 3,
+          "time": 69925
+        },
+        {
+          "wave": 0,
+          "simd": 3,
+          "cu": 8,
+          "time": 69933
+        },
+        {
+          "wave": 0,
+          "simd": 1,
+          "cu": 8,
+          "time": 69937
+        },
+        {
+          "wave": 0,
+          "simd": 3,
+          "cu": 9,
+          "time": 69945
+        },
+        {
+          "wave": 0,
+          "simd": 1,
+          "cu": 9,
+          "time": 69953
+        },
+        {
+          "wave": 0,
+          "simd": 3,
+          "cu": 10,
+          "time": 69961
+        },
+        {
+          "wave": 0,
+          "simd": 1,
+          "cu": 10,
+          "time": 69969
+        },
+        {
+          "wave": 0,
+          "simd": 3,
+          "cu": 11,
+          "time": 69977
+        },
+        {
+          "wave": 0,
+          "simd": 1,
+          "cu": 11,
+          "time": 69985
+        },
+        {
+          "wave": 0,
+          "simd": 2,
+          "cu": 0,
+          "time": 69993
+        },
+        {
+          "wave": 0,
+          "simd": 0,
+          "cu": 0,
+          "time": 70001
+        },
+        {
+          "wave": 0,
+          "simd": 2,
+          "cu": 1,
+          "time": 70009
+        },
+        {
+          "wave": 0,
+          "simd": 0,
+          "cu": 1,
+          "time": 70013
+        },
+        {
+          "wave": 0,
+          "simd": 2,
+          "cu": 2,
+          "time": 70021
+        },
+        {
+          "wave": 0,
+          "simd": 0,
+          "cu": 2,
+          "time": 70025
+        },
+        {
+          "wave": 0,
+          "simd": 2,
+          "cu": 3,
+          "time": 70033
+        },
+        {
+          "wave": 0,
+          "simd": 0,
+          "cu": 3,
+          "time": 70041
+        },
+        {
+          "wave": 0,
+          "simd": 2,
+          "cu": 8,
+          "time": 70049
+        },
+        {
+          "wave": 0,
+          "simd": 0,
+          "cu": 8,
+          "time": 70057
+        },
+        {
+          "wave": 0,
+          "simd": 2,
+          "cu": 9,
+          "time": 70065
+        },
+        {
+          "wave": 0,
+          "simd": 0,
+          "cu": 9,
+          "time": 70073
+        },
+        {
+          "wave": 1,
+          "simd": 2,
+          "cu": 10,
+          "time": 70081
+        },
+        {
+          "wave": 1,
+          "simd": 0,
+          "cu": 10,
+          "time": 70089
+        },
+        {
+          "wave": 1,
+          "simd": 2,
+          "cu": 11,
+          "time": 70097
+        },
+        {
+          "wave": 1,
+          "simd": 0,
+          "cu": 11,
+          "time": 70105
+        },
+        {
+          "wave": 1,
+          "simd": 3,
+          "cu": 0,
+          "time": 70113
+        },
+        {
+          "wave": 1,
+          "simd": 1,
+          "cu": 0,
+          "time": 70117
+        },
+        {
+          "wave": 1,
+          "simd": 3,
+          "cu": 1,
+          "time": 70125
+        },
+        {
+          "wave": 1,
+          "simd": 1,
+          "cu": 1,
+          "time": 70133
+        },
+        {
+          "wave": 1,
+          "simd": 3,
+          "cu": 2,
+          "time": 70141
+        },
+        {
+          "wave": 1,
+          "simd": 1,
+          "cu": 2,
+          "time": 70149
+        }
+      ]
+    },
+    {
+      "se": 4,
+      "traced_cu": 3,
+      "waves": [
+        {
+          "wave": 0,
+          "simd": 0,
+          "cu": 9,
+          "time": 69783
+        },
+        {
+          "wave": 0,
+          "simd": 2,
+          "cu": 9,
+          "time": 69791
+        },
+        {
+          "wave": 0,
+          "simd": 0,
+          "cu": 10,
+          "time": 69799
+        },
+        {
+          "wave": 0,
+          "simd": 2,
+          "cu": 10,
+          "time": 69807
+        },
+        {
+          "wave": 0,
+          "simd": 0,
+          "cu": 11,
+          "time": 69815
+        },
+        {
+          "wave": 0,
+          "simd": 2,
+          "cu": 11,
+          "time": 69823
+        },
+        {
+          "wave": 0,
+          "simd": 1,
+          "cu": 0,
+          "time": 69831
+        },
+        {
+          "wave": 0,
+          "simd": 3,
+          "cu": 0,
+          "time": 69839
+        },
+        {
+          "wave": 0,
+          "simd": 1,
+          "cu": 1,
+          "time": 69847
+        },
+        {
+          "wave": 0,
+          "simd": 3,
+          "cu": 1,
+          "time": 69855
+        },
+        {
+          "wave": 0,
+          "simd": 1,
+          "cu": 2,
+          "time": 69863
+        },
+        {
+          "wave": 0,
+          "simd": 3,
+          "cu": 2,
+          "time": 69871
+        },
+        {
+          "wave": 0,
+          "simd": 1,
+          "cu": 3,
+          "time": 69879
+        },
+        {
+          "wave": 0,
+          "simd": 3,
+          "cu": 3,
+          "time": 69887
+        },
+        {
+          "wave": 0,
+          "simd": 1,
+          "cu": 8,
+          "time": 69895
+        },
+        {
+          "wave": 0,
+          "simd": 3,
+          "cu": 8,
+          "time": 69903
+        },
+        {
+          "wave": 0,
+          "simd": 1,
+          "cu": 9,
+          "time": 69911
+        },
+        {
+          "wave": 0,
+          "simd": 3,
+          "cu": 9,
+          "time": 69919
+        },
+        {
+          "wave": 0,
+          "simd": 1,
+          "cu": 10,
+          "time": 69927
+        },
+        {
+          "wave": 0,
+          "simd": 3,
+          "cu": 10,
+          "time": 69935
+        },
+        {
+          "wave": 0,
+          "simd": 1,
+          "cu": 11,
+          "time": 69943
+        },
+        {
+          "wave": 0,
+          "simd": 3,
+          "cu": 11,
+          "time": 69951
+        },
+        {
+          "wave": 0,
+          "simd": 0,
+          "cu": 0,
+          "time": 69959
+        },
+        {
+          "wave": 0,
+          "simd": 2,
+          "cu": 0,
+          "time": 69963
+        },
+        {
+          "wave": 0,
+          "simd": 0,
+          "cu": 1,
+          "time": 69971
+        },
+        {
+          "wave": 0,
+          "simd": 2,
+          "cu": 1,
+          "time": 69975
+        },
+        {
+          "wave": 0,
+          "simd": 0,
+          "cu": 2,
+          "time": 69983
+        },
+        {
+          "wave": 0,
+          "simd": 2,
+          "cu": 2,
+          "time": 69991
+        },
+        {
+          "wave": 0,
+          "simd": 0,
+          "cu": 3,
+          "time": 69999
+        },
+        {
+          "wave": 0,
+          "simd": 2,
+          "cu": 3,
+          "time": 70007
+        },
+        {
+          "wave": 0,
+          "simd": 0,
+          "cu": 8,
+          "time": 70015
+        },
+        {
+          "wave": 0,
+          "simd": 2,
+          "cu": 8,
+          "time": 70023
+        },
+        {
+          "wave": 1,
+          "simd": 0,
+          "cu": 9,
+          "time": 70031
+        },
+        {
+          "wave": 1,
+          "simd": 2,
+          "cu": 9,
+          "time": 70039
+        },
+        {
+          "wave": 1,
+          "simd": 0,
+          "cu": 10,
+          "time": 70047
+        },
+        {
+          "wave": 1,
+          "simd": 2,
+          "cu": 10,
+          "time": 70055
+        },
+        {
+          "wave": 1,
+          "simd": 0,
+          "cu": 11,
+          "time": 70063
+        },
+        {
+          "wave": 1,
+          "simd": 2,
+          "cu": 11,
+          "time": 70067
+        },
+        {
+          "wave": 1,
+          "simd": 1,
+          "cu": 0,
+          "time": 70071
+        },
+        {
+          "wave": 1,
+          "simd": 3,
+          "cu": 0,
+          "time": 70079
+        },
+        {
+          "wave": 1,
+          "simd": 1,
+          "cu": 1,
+          "time": 70087
+        },
+        {
+          "wave": 1,
+          "simd": 3,
+          "cu": 1,
+          "time": 70095
+        },
+        {
+          "wave": 1,
+          "simd": 1,
+          "cu": 2,
+          "time": 70103
+        }
+      ]
+    },
+    {
+      "se": 5,
+      "traced_cu": 3,
+      "waves": [
+        {
+          "wave": 0,
+          "simd": 0,
+          "cu": 9,
+          "time": 68831
+        },
+        {
+          "wave": 0,
+          "simd": 2,
+          "cu": 9,
+          "time": 68839
+        },
+        {
+          "wave": 0,
+          "simd": 0,
+          "cu": 10,
+          "time": 68847
+        },
+        {
+          "wave": 0,
+          "simd": 2,
+          "cu": 10,
+          "time": 68855
+        },
+        {
+          "wave": 0,
+          "simd": 0,
+          "cu": 11,
+          "time": 68863
+        },
+        {
+          "wave": 0,
+          "simd": 2,
+          "cu": 11,
+          "time": 68871
+        },
+        {
+          "wave": 0,
+          "simd": 1,
+          "cu": 0,
+          "time": 68879
+        },
+        {
+          "wave": 0,
+          "simd": 3,
+          "cu": 0,
+          "time": 68887
+        },
+        {
+          "wave": 0,
+          "simd": 1,
+          "cu": 1,
+          "time": 68895
+        },
+        {
+          "wave": 0,
+          "simd": 3,
+          "cu": 1,
+          "time": 68903
+        },
+        {
+          "wave": 0,
+          "simd": 1,
+          "cu": 2,
+          "time": 68911
+        },
+        {
+          "wave": 0,
+          "simd": 3,
+          "cu": 2,
+          "time": 68919
+        },
+        {
+          "wave": 0,
+          "simd": 1,
+          "cu": 3,
+          "time": 68927
+        },
+        {
+          "wave": 0,
+          "simd": 3,
+          "cu": 3,
+          "time": 68935
+        },
+        {
+          "wave": 0,
+          "simd": 1,
+          "cu": 8,
+          "time": 68943
+        },
+        {
+          "wave": 0,
+          "simd": 3,
+          "cu": 8,
+          "time": 68951
+        },
+        {
+          "wave": 0,
+          "simd": 1,
+          "cu": 9,
+          "time": 68959
+        },
+        {
+          "wave": 0,
+          "simd": 3,
+          "cu": 9,
+          "time": 68967
+        },
+        {
+          "wave": 0,
+          "simd": 1,
+          "cu": 10,
+          "time": 68975
+        },
+        {
+          "wave": 0,
+          "simd": 3,
+          "cu": 10,
+          "time": 68983
+        },
+        {
+          "wave": 0,
+          "simd": 1,
+          "cu": 11,
+          "time": 68991
+        },
+        {
+          "wave": 0,
+          "simd": 3,
+          "cu": 11,
+          "time": 68999
+        },
+        {
+          "wave": 0,
+          "simd": 0,
+          "cu": 0,
+          "time": 69007
+        },
+        {
+          "wave": 0,
+          "simd": 2,
+          "cu": 0,
+          "time": 69011
+        },
+        {
+          "wave": 0,
+          "simd": 0,
+          "cu": 1,
+          "time": 69019
+        },
+        {
+          "wave": 0,
+          "simd": 2,
+          "cu": 1,
+          "time": 69023
+        },
+        {
+          "wave": 0,
+          "simd": 0,
+          "cu": 2,
+          "time": 69031
+        },
+        {
+          "wave": 0,
+          "simd": 2,
+          "cu": 2,
+          "time": 69039
+        },
+        {
+          "wave": 0,
+          "simd": 0,
+          "cu": 3,
+          "time": 69047
+        },
+        {
+          "wave": 0,
+          "simd": 2,
+          "cu": 3,
+          "time": 69055
+        },
+        {
+          "wave": 0,
+          "simd": 0,
+          "cu": 8,
+          "time": 69063
+        },
+        {
+          "wave": 0,
+          "simd": 2,
+          "cu": 8,
+          "time": 69071
+        },
+        {
+          "wave": 1,
+          "simd": 0,
+          "cu": 9,
+          "time": 69079
+        },
+        {
+          "wave": 1,
+          "simd": 2,
+          "cu": 9,
+          "time": 69087
+        },
+        {
+          "wave": 1,
+          "simd": 0,
+          "cu": 10,
+          "time": 69095
+        },
+        {
+          "wave": 1,
+          "simd": 2,
+          "cu": 10,
+          "time": 69103
+        },
+        {
+          "wave": 1,
+          "simd": 0,
+          "cu": 11,
+          "time": 69111
+        },
+        {
+          "wave": 1,
+          "simd": 2,
+          "cu": 11,
+          "time": 69115
+        },
+        {
+          "wave": 1,
+          "simd": 1,
+          "cu": 0,
+          "time": 69123
+        },
+        {
+          "wave": 1,
+          "simd": 3,
+          "cu": 0,
+          "time": 69131
+        },
+        {
+          "wave": 1,
+          "simd": 1,
+          "cu": 1,
+          "time": 69139
+        },
+        {
+          "wave": 1,
+          "simd": 3,
+          "cu": 1,
+          "time": 69147
+        },
+        {
+          "wave": 1,
+          "simd": 1,
+          "cu": 2,
+          "time": 69155
+        }
+      ]
+    }
+  ]
+}

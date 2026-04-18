@@ -286,3 +286,69 @@ sudo DEV=AMD AM_RESET=1 VIZ=-2 PROFILE=1 SQTT=1 DEBUG=0 \
 - Branch: `master` at commit `0145c31b0` (pushed after this session's commits).
 - Uncommitted: VGPR bank infrastructure in `test/mockgpu/amd/emu.py` (behavior-neutral, ready to commit).
 - Both 2026-04-18 session revert paths have been applied; tree is stable at 293/321.
+
+
+## 2026-04-18 — RGP capture pipeline added (7900 XTX server)
+
+New directory: `extra/sqtt/rgp/` — Vulkan compute harness + GLSL probes + RADV
+(`MESA_VK_TRACE=rgp`) capture script + `.rgp` parser that reuses
+`extra/sqtt/rgptool.py` and `tinygrad/renderer/amd/sqtt.decode()`.
+
+### Shared-SIMD hypothesis — **falsified**
+
+The prior session's "per-wave SIMD-residency signal would unlock shared-SIMD
+VALU serialization" plan was tested against RGP data for all five probe
+kernels (`data_deps`, `probe_vmem_chain`, `probe_cmp_chain`,
+`probe_branch_cost`, `probe_exp_chain`) plus two controls
+(`probe_single_wave`, `probe_four_wave`).
+
+Cluster analysis (waves co-issued on same `(cu, simd)` within 200 ns):
+
+| kernel                | threads | waves/WG | 1-wave | 2-wave | 3-wave |
+|-----------------------|---------|----------|--------|--------|--------|
+| probe_single_wave     | 32      | 1        | 256    | –      | –      |
+| probe_data_deps       | 64      | 2        | 256    | **0**  | –      |
+| probe_vmem_chain      | 64      | 2        | 256    | **0**  | –      |
+| probe_cmp_chain       | 64      | 2        | 256    | **0**  | –      |
+| probe_branch_cost     | 64      | 2        | 256    | **0**  | –      |
+| probe_exp_chain       | 64      | 2        | 256    | **0**  | –      |
+| probe_four_wave       | 128     | 4        | –      | 64     | 128    |
+
+For 2-wave WGs, the two waves **always** land on different SIMDs (zero 2-wave
+co-issue clusters on the traced CUs). The "shared-SIMD serialization" model
+reverted in the earlier 2026-04-18 session is the correct decision — the
+contention it models does not exist on this HW for 2-wave WGs.
+
+### Implications for the remaining 28 mismatches
+
+Not SIMD-residency. The remaining root causes (per earlier analysis) are:
+- Wave-dependent SQ arbitration (W0 vs W1 bypass split in probe_cmp_chain /
+  probe_branch_cost).
+- Context-sensitive s_nop(15) decode (16 vs 20 cy).
+- exp_chain VOPD inter-pattern spacing (~12 mismatches).
+
+RGP can still help here via its **instruction-timing** and **HW-utilization**
+panes (GUI only) — the `.rgp` captures are committed for a team with display
+access to open and inspect.
+
+### Handoff artifacts (committed)
+
+```
+extra/sqtt/rgp/
+  vkrun.c / build.sh           Vulkan compute harness (C, libvulkan only)
+  shaders/*.comp               1/2/4-wave GLSL probes
+  capture_all.sh               runs all probes under MESA_VK_TRACE=rgp
+  parse_rgp.py                 .rgp → WAVESTART placement + time clustering
+  captures/*.rgp               7 captures (6 probes + 2 controls)
+  captures/*.waves.json        extracted wave metadata per .rgp
+  captures/_summary.txt        full parse_rgp output
+  README.md                    how to reproduce on another box
+```
+
+Reproduce on another 7900 XTX machine (Linux Mint / Ubuntu 24.04 equivalent):
+```
+sudo apt install -y libvulkan-dev glslang-tools spirv-tools vulkan-tools rocminfo rocm-smi
+cd extra/sqtt/rgp && ./build.sh && ./capture_all.sh
+```
+RGP GUI: download `RadeonDeveloperToolSuite-*.tgz` from GPUOpen → extract →
+run `./RadeonGPUProfiler` and open any `captures/*.rgp`.

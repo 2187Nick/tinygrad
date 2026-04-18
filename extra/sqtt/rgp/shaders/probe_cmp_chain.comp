@@ -1,0 +1,19 @@
+#version 450
+// Mirrors custom_probe_cmp_chain: chain of compares + selects to expose v_cmp →
+// s_cselect / v_cndmask SGPR write-port behavior. 64 threads = 2 wave32.
+layout(local_size_x = 64) in;
+layout(set = 0, binding = 0) buffer B { float data[]; } buf;
+void main() {
+  uint i = gl_LocalInvocationID.x;
+  float x = buf.data[i];
+  float acc = 0.0;
+  acc += (x > 0.5) ? 1.0 : 0.0;
+  acc += (x > 1.5) ? 2.0 : 0.0;
+  acc += (x > 2.5) ? 3.0 : 0.0;
+  acc += (x > 3.5) ? 4.0 : 0.0;
+  acc += (x > 4.5) ? 5.0 : 0.0;
+  acc += (x > 5.5) ? 6.0 : 0.0;
+  acc += (x > 6.5) ? 7.0 : 0.0;
+  acc += (x > 7.5) ? 8.0 : 0.0;
+  buf.data[i] = acc;
+}

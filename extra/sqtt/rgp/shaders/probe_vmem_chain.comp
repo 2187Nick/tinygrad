@@ -1,0 +1,12 @@
+#version 450
+// Mirrors tinygrad's custom_probe_vmem_chain: 64 threads = 2 wave32 in one WG,
+// back-to-back global stores to probe VMEM issue port serialization.
+layout(local_size_x = 64) in;
+layout(set = 0, binding = 0) buffer B { float data[]; } buf;
+void main() {
+  uint i = gl_LocalInvocationID.x;
+  buf.data[i       ] = 1.0;
+  buf.data[i +   64] = 2.0;
+  buf.data[i +  128] = 3.0;
+  buf.data[i +  192] = 4.0;
+}
