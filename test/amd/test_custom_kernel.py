@@ -270,6 +270,172 @@ def custom_probe_vmem_chain(A:UOp, arch:str) -> UOp:
   sink = UOp.sink(A.base, threads, arg=KernelInfo("custom_probe_vmem_chain"))
   return UOp(Ops.PROGRAM, src=(sink, UOp(Ops.DEVICE, arg="AMD"), UOp(Ops.LINEAR, src=tuple([UOp(Ops.INS, arg=x) for x in insts]))))
 
+# ──────────────────────────────────────────────────────────────────────────────
+# Parametric probes (2026-04-18) — isolate the hypotheses from MISMATCH_ANALYSIS.md
+# Each probe takes only A so it slots into rigorous_hw_test.py the same way as
+# the existing custom_probe_* kernels.
+# ──────────────────────────────────────────────────────────────────────────────
+
+def _probe_cold_start(A:UOp, arch:str, n:int, name:str) -> UOp:
+  """D1: no global_load. After s_waitcnt both waves exit within ~2cy and fight
+  the CU's VALU issue port. Wave 1's first VALU should slip by ~min(N, burst)."""
+  A = A.flatten()
+  threads = UOp.special(A.size, "lidx0")
+  k = Kernel(arch)
+  k.emit(s_load_b64(s[0:1], s[0:1], soffset=NULL))
+  k.emit(s_waitcnt_lgkmcnt(sdst=NULL, simm16=0))
+  # N back-to-back VALUs on freshly-allocated VGPRs — no VMEM, no LDS.
+  for i in range(n): k.emit(v_mov_b32_e32(v[2+i], float(i+1)))
+  k.emit(v_add_f32_e32(v[1], 1.0, v[2]))
+  k.emit(v_lshlrev_b32_e32(v[0], 2, v[0]))
+  k.emit(global_store_b32(addr=v[0], data=v[1], saddr=s[0:1]))
+  k.emit(s_endpgm())
+  insts = k.finalize()
+  sink = UOp.sink(A.base, threads, arg=KernelInfo(name))
+  return UOp(Ops.PROGRAM, src=(sink, UOp(Ops.DEVICE, arg="AMD"), UOp(Ops.LINEAR, src=tuple([UOp(Ops.INS, arg=x) for x in insts]))))
+
+def custom_probe_cold_start_n2(A:UOp, arch:str) -> UOp: return _probe_cold_start(A, arch, 2, "probe_cold_start_n2")
+def custom_probe_cold_start_n4(A:UOp, arch:str) -> UOp: return _probe_cold_start(A, arch, 4, "probe_cold_start_n4")
+def custom_probe_cold_start_n8(A:UOp, arch:str) -> UOp: return _probe_cold_start(A, arch, 8, "probe_cold_start_n8")
+
+def _probe_nop_chain(A:UOp, arch:str, n:int, name:str) -> UOp:
+  """B1: N consecutive s_nop(15) then a VALU. Expect first (n-1) nops = 16cy,
+  last nop = 20cy (pipeline resume). Contrast n=1 (isolated) vs n≥2 (chain)."""
+  A = A.flatten()
+  threads = UOp.special(A.size, "lidx0")
+  k = Kernel(arch)
+  k.emit(s_load_b64(s[0:1], s[0:1], soffset=NULL))
+  k.emit(s_waitcnt_lgkmcnt(sdst=NULL, simm16=0))
+  k.emit(v_lshlrev_b32_e32(v[0], 2, v[0]))
+  k.emit(global_load_b32(v[1], v[0], saddr=s[0:1]))
+  k.emit(s_waitcnt_vmcnt(sdst=NULL, simm16=0))
+  # N nops in a chain
+  for _ in range(n): k.emit(s_nop(15))
+  # Follow-up VALU so we can measure the last-nop stamp
+  k.emit(v_add_f32_e32(v[1], 1.0, v[1]))
+  k.emit(global_store_b32(addr=v[0], data=v[1], saddr=s[0:1]))
+  k.emit(s_endpgm())
+  insts = k.finalize()
+  sink = UOp.sink(A.base, threads, arg=KernelInfo(name))
+  return UOp(Ops.PROGRAM, src=(sink, UOp(Ops.DEVICE, arg="AMD"), UOp(Ops.LINEAR, src=tuple([UOp(Ops.INS, arg=x) for x in insts]))))
+
+def custom_probe_nop_chain_n1(A:UOp, arch:str) -> UOp: return _probe_nop_chain(A, arch, 1, "probe_nop_chain_n1")
+def custom_probe_nop_chain_n3(A:UOp, arch:str) -> UOp: return _probe_nop_chain(A, arch, 3, "probe_nop_chain_n3")
+def custom_probe_nop_chain_n5(A:UOp, arch:str) -> UOp: return _probe_nop_chain(A, arch, 5, "probe_nop_chain_n5")
+
+def _probe_store_bypass(A:UOp, arch:str, preload:bool, name:str) -> UOp:
+  """A4 (A1 vs A2): solo VALU→store with/without a prior global_load to warm
+  the VMEM scoreboard. Expect cold = 21cy, warm = 17cy for the store dt."""
+  A = A.flatten()
+  threads = UOp.special(A.size, "lidx0")
+  k = Kernel(arch)
+  k.emit(s_load_b64(s[0:1], s[0:1], soffset=NULL))
+  k.emit(s_waitcnt_lgkmcnt(sdst=NULL, simm16=0))
+  k.emit(v_lshlrev_b32_e32(v[0], 2, v[0]))
+  if preload:
+    k.emit(global_load_b32(v[2], v[0], saddr=s[0:1]))
+    k.emit(s_waitcnt_vmcnt(sdst=NULL, simm16=0))
+  k.emit(v_mov_b32_e32(v[1], 1.0))
+  k.emit(v_add_f32_e32(v[1], 1.0, v[1]))  # dt=1
+  k.emit(global_store_b32(addr=v[0], data=v[1], saddr=s[0:1]))  # measure this dt
+  k.emit(s_endpgm())
+  insts = k.finalize()
+  sink = UOp.sink(A.base, threads, arg=KernelInfo(name))
+  return UOp(Ops.PROGRAM, src=(sink, UOp(Ops.DEVICE, arg="AMD"), UOp(Ops.LINEAR, src=tuple([UOp(Ops.INS, arg=x) for x in insts]))))
+
+def custom_probe_store_cold(A:UOp, arch:str) -> UOp: return _probe_store_bypass(A, arch, False, "probe_store_cold")
+def custom_probe_store_warm(A:UOp, arch:str) -> UOp: return _probe_store_bypass(A, arch, True,  "probe_store_warm")
+
+def _probe_trans_pair(A:UOp, arch:str, spacing:int, name:str) -> UOp:
+  """F3: wave-pair TRANS-pipe interlock. Both waves run the same trans chain;
+  compare wave-0 vs wave-1 dt for v_log. spacing = #v_adds between v_exp/v_log."""
+  A = A.flatten()
+  threads = UOp.special(A.size, "lidx0")
+  k = Kernel(arch)
+  k.emit(s_load_b64(s[0:1], s[0:1], soffset=NULL))
+  k.emit(s_waitcnt_lgkmcnt(sdst=NULL, simm16=0))
+  k.emit(v_lshlrev_b32_e32(v[0], 2, v[0]))
+  k.emit(global_load_b32(v[1], v[0], saddr=s[0:1]))
+  k.emit(s_waitcnt_vmcnt(sdst=NULL, simm16=0))
+  k.emit(v_mov_b32_e32(v[2], 1.0))
+  k.emit(v_exp_f32_e32(v[2], v[2]))
+  for i in range(spacing): k.emit(v_add_f32_e32(v[3+i], 1.0, v[3+i]))
+  k.emit(v_log_f32_e32(v[2], v[2]))  # measure this dt — HW serializes vs sibling wave
+  k.emit(s_waitcnt(simm16=0))
+  k.emit(v_add_f32_e32(v[1], v[1], v[2]))
+  k.emit(global_store_b32(addr=v[0], data=v[1], saddr=s[0:1]))
+  k.emit(s_endpgm())
+  insts = k.finalize()
+  sink = UOp.sink(A.base, threads, arg=KernelInfo(name))
+  return UOp(Ops.PROGRAM, src=(sink, UOp(Ops.DEVICE, arg="AMD"), UOp(Ops.LINEAR, src=tuple([UOp(Ops.INS, arg=x) for x in insts]))))
+
+def custom_probe_trans_pair_tight(A:UOp, arch:str)  -> UOp: return _probe_trans_pair(A, arch, 0, "probe_trans_pair_tight")
+def custom_probe_trans_pair_spaced(A:UOp, arch:str) -> UOp: return _probe_trans_pair(A, arch, 4, "probe_trans_pair_spaced")
+
+def _probe_scalar_beat(A:UOp, arch:str, phase:int, name:str) -> UOp:
+  """E1: scalar-pipe 4-beat phase. Insert `phase` s_nop(0) before s_cmp → s_cbranch
+  NOT TAKEN. Expect the cbranch dt to oscillate with period 4 as phase varies."""
+  A = A.flatten()
+  threads = UOp.special(A.size, "lidx0")
+  k = Kernel(arch)
+  k.emit(s_load_b64(s[0:1], s[0:1], soffset=NULL))
+  k.emit(s_waitcnt_lgkmcnt(sdst=NULL, simm16=0))
+  k.emit(v_lshlrev_b32_e32(v[0], 2, v[0]))
+  k.emit(global_load_b32(v[1], v[0], saddr=s[0:1]))
+  k.emit(s_waitcnt_vmcnt(sdst=NULL, simm16=0))
+  k.emit(s_mov_b32(s[4], 0))
+  for _ in range(phase): k.emit(s_nop(0))
+  k.emit(s_cmp_eq_i32(s[4], 1))      # SCC = 0
+  k.emit(s_cbranch_scc1(), target="end")
+  k.emit(v_add_f32_e32(v[1], 1.0, v[1]))
+  k.emit(global_store_b32(addr=v[0], data=v[1], saddr=s[0:1]))
+  k.label("end")
+  k.emit(s_endpgm())
+  insts = k.finalize()
+  sink = UOp.sink(A.base, threads, arg=KernelInfo(name))
+  return UOp(Ops.PROGRAM, src=(sink, UOp(Ops.DEVICE, arg="AMD"), UOp(Ops.LINEAR, src=tuple([UOp(Ops.INS, arg=x) for x in insts]))))
+
+def custom_probe_scalar_beat_p0(A:UOp, arch:str) -> UOp: return _probe_scalar_beat(A, arch, 0, "probe_scalar_beat_p0")
+def custom_probe_scalar_beat_p1(A:UOp, arch:str) -> UOp: return _probe_scalar_beat(A, arch, 1, "probe_scalar_beat_p1")
+def custom_probe_scalar_beat_p2(A:UOp, arch:str) -> UOp: return _probe_scalar_beat(A, arch, 2, "probe_scalar_beat_p2")
+def custom_probe_scalar_beat_p3(A:UOp, arch:str) -> UOp: return _probe_scalar_beat(A, arch, 3, "probe_scalar_beat_p3")
+
+def _probe_vopd(A:UOp, arch:str, mode:str, name:str) -> UOp:
+  """C1: VOPD spacing. 'chain' = 4 back-to-back VOPDs; 'split' = 2+waitcnt+2;
+  'nodep' = 4 writing disjoint registers. VOPD uses r3.VOPDOp enum."""
+  A = A.flatten()
+  threads = UOp.special(A.size, "lidx0")
+  k = Kernel(arch)
+  k.emit(s_load_b64(s[0:1], s[0:1], soffset=NULL))
+  k.emit(s_waitcnt_lgkmcnt(sdst=NULL, simm16=0))
+  k.emit(v_lshlrev_b32_e32(v[0], 2, v[0]))
+  k.emit(global_load_b32(v[1], v[0], saddr=s[0:1]))
+  k.emit(s_waitcnt_vmcnt(sdst=NULL, simm16=0))
+  # Initialize VGPRs
+  for i in range(8): k.emit(v_mov_b32_e32(v[4+i], float(i+1)))
+  def vopd(x, y): return r3.VOPD(opx=r3.VOPDOp.V_DUAL_MUL_F32, opy=r3.VOPDOp.V_DUAL_MUL_F32,
+                                 vdstx=v[x],       srcx0=v[x+2], vsrcx1=v[x+4],
+                                 vdsty=v[y],       srcy0=v[y+2], vsrcy1=v[y+4])
+  if mode == "chain":
+    k.emit(vopd(4, 5)); k.emit(vopd(4, 5)); k.emit(vopd(4, 5)); k.emit(vopd(4, 5))
+  elif mode == "split":
+    k.emit(vopd(4, 5)); k.emit(vopd(4, 5))
+    k.emit(s_waitcnt_depctr(simm16=0xfffe))
+    k.emit(vopd(4, 5)); k.emit(vopd(4, 5))
+  elif mode == "nodep":
+    k.emit(vopd(4, 5)); k.emit(vopd(6, 7)); k.emit(vopd(8, 9)); k.emit(vopd(10, 11))
+  k.emit(s_waitcnt(simm16=0))
+  k.emit(v_add_f32_e32(v[1], v[4], v[1]))
+  k.emit(global_store_b32(addr=v[0], data=v[1], saddr=s[0:1]))
+  k.emit(s_endpgm())
+  insts = k.finalize()
+  sink = UOp.sink(A.base, threads, arg=KernelInfo(name))
+  return UOp(Ops.PROGRAM, src=(sink, UOp(Ops.DEVICE, arg="AMD"), UOp(Ops.LINEAR, src=tuple([UOp(Ops.INS, arg=x) for x in insts]))))
+
+def custom_probe_vopd_chain(A:UOp, arch:str) -> UOp: return _probe_vopd(A, arch, "chain", "probe_vopd_chain")
+def custom_probe_vopd_split(A:UOp, arch:str) -> UOp: return _probe_vopd(A, arch, "split", "probe_vopd_split")
+def custom_probe_vopd_nodep(A:UOp, arch:str) -> UOp: return _probe_vopd(A, arch, "nodep", "probe_vopd_nodep")
+
 @unittest.skipUnless(Device.DEFAULT == "AMD", "requires AMD device")
 class TestCustomKernel(unittest.TestCase):
   def setUp(self): self.arch = TARGET_TO_ARCH[Device["AMD"].arch]

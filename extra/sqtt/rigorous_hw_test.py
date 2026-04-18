@@ -218,6 +218,39 @@ KERNELS = {
   "probe_vmem_chain":  (_run_probe_vmem_chain, 30),
 }
 
+# ─── 2026-04-18 parametric probes ────────────────────────────────────────────
+# One-knob-per-kernel probes that isolate the hypotheses in
+# extra/sqtt/rgp/MISMATCH_ANALYSIS.md. Enable with PROBE=1.
+def _run_probe(fxn_name:str):
+  from test.amd import test_custom_kernel
+  from test.amd.helpers import TARGET_TO_ARCH
+  def _run():
+    arch = TARGET_TO_ARCH[Device["AMD"].arch]
+    fxn = getattr(test_custom_kernel, fxn_name)
+    a = Tensor.empty(64, dtype=dtypes.float32).contiguous().realize()
+    Device[Device.DEFAULT].synchronize()
+    _clear()
+    return Tensor.custom_kernel(a, fxn=functools.partial(fxn, arch=arch))[0].realize()
+  return _run
+
+PROBE_KERNELS = {name: (_run_probe(f"custom_{name}"), 30) for name in [
+  # D1 — shared VALU issuer cold-start slip
+  "probe_cold_start_n2", "probe_cold_start_n4", "probe_cold_start_n8",
+  # B1 — s_nop chain last-element +4
+  "probe_nop_chain_n1", "probe_nop_chain_n3", "probe_nop_chain_n5",
+  # A1/A2 — VMEM store bypass warm-vs-cold
+  "probe_store_cold", "probe_store_warm",
+  # F3 — wave-pair TRANS interlock
+  "probe_trans_pair_tight", "probe_trans_pair_spaced",
+  # E1 — scalar-pipe 4-beat phase
+  "probe_scalar_beat_p0", "probe_scalar_beat_p1", "probe_scalar_beat_p2", "probe_scalar_beat_p3",
+  # C1 — VOPD chain / split / independent
+  "probe_vopd_chain", "probe_vopd_split", "probe_vopd_nodep",
+]}
+
+if os.environ.get("PROBE"):
+  KERNELS.update(PROBE_KERNELS)
+
 # ─── Capture mode ─────────────────────────────────────────────────────────────
 
 def do_capture():
