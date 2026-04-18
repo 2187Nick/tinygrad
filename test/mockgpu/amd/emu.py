@@ -132,6 +132,7 @@ from test.mockgpu.amd.sq_timing.ib_fetch import IbFetch
 from test.mockgpu.amd.sq_timing.lds import LdsPipe
 from test.mockgpu.amd.sq_timing.sgpr import SgprScoreboard
 from test.mockgpu.amd.sq_timing.trans import TransPipe
+from test.mockgpu.amd.sq_timing.valu import VAluPipe
 from test.mockgpu.amd.sq_timing.vmem import VmemPipe
 _LDS_RD_LATENCY = CONST.LDS_RD_LATENCY
 _LDS_WR_LATENCY = CONST.LDS_WR_LATENCY
@@ -228,25 +229,18 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
   # valu_pend queue used by s_waitcnt_depctr. Pure state holder — logic stays
   # in emu.py for this step.
   trans = [TransPipe(CONST) for _ in range(n)]
-  vopd_pipe_avail = [0] * n      # VOPD dual-issue: when VOPD unit is free for next VOPD instruction
-  last_vopd_issue = [-1000] * n  # last VOPD issue cycle (for dual-issue pipeline warm/cold classification)
-  valu_issue_hist: list[list[int]] = [[] for _ in range(n)]  # last 4 non-trans VALU issue times (for time-based delay_alu)
   # Per-wave SGPR scoreboard (EMU_REWRITE_DESIGN §1.5 / §5 Step 5b). Owns
   # sgpr_write_time, sgpr_cmp_lit_read_ready/last_commit/hist, smem_sgpr_ready.
   # Pure state holder — logic (read_stall, pending_nonvcc_drain) stays in emu.py.
   sgpr = [SgprScoreboard(CONST) for _ in range(n)]
-  vgpr_ready: list[dict[int, int]] = [{} for _ in range(n)]  # VGPR readiness scoreboard (reg_idx → cycle when result available)
-  vgpr_slow_fresh_until: list[dict[int, int]] = [{} for _ in range(n)]  # VGPR slow-freshness: consuming before this cycle yields 9cy VALU latency
-  vgpr_write_time: list[dict[int, int]] = [{} for _ in range(n)]  # VGPR last VALU-write cycle (reg_idx → issue cycle) for VMEM addr forwarding
-  # VGPR bank cache (Seb-V): 4 banks indexed by reg%4, each has 3 read ports. Writes commit to bank cache with 1cy delay.
-  # bank_vopd_write_time[wave][bank] = last VOPD issue cycle that wrote to this bank (used for inter-VOPD bank port pressure).
-  bank_vopd_write_time: list[list[int]] = [[0] * 4 for _ in range(n)]
-  consecutive_single_valu = [0] * n   # non-trans non-VOPD VALU run-length (for VOPD dual-issue ramp detection)
+  # Per-wave VALU pipeline tracker (EMU_REWRITE_DESIGN §1.2 / §5 Step 5c). Owns
+  # valu_issue_hist, vopd_pipe_avail, last_vopd_issue, bank_vopd_write_time,
+  # consecutive_single_valu, consecutive_selffwd_vgprs, consecutive_vgprs_written,
+  # vgpr_ready, vgpr_slow_fresh_until, vgpr_write_time. Pure state holder.
+  valu = [VAluPipe(CONST) for _ in range(n)]
   has_delay_alu = [False] * n     # per-wave: has any s_delay_alu been seen (controls VGPR scoreboard activation)
   exec_write_time = [0] * n      # per-wave: last cycle when EXEC was written (by v_cmpx)
   scc_write_time = [0] * n       # per-wave: last cycle when SCC was written (by s_cmp/s_cmpk/SALU)
-  consecutive_selffwd_vgprs = [0] * n  # count of VGPRs written by consecutive self-forwarding non-VOPC VALUs
-  consecutive_vgprs_written = [0] * n  # count of VGPRs written by consecutive non-VOPC VALUs (any kind)
   # Per-wave IB-fetch tracker (EMU_REWRITE_DESIGN.md §1.8 / §5 Step 2). Owns last_drain_stamp and
   # had_drain_nop. Reset at the top of each `_drain_zero_cost(i)` call to preserve scalar-per-call
   # semantics of the pre-refactor code (pure refactor — zero behaviour change).
@@ -395,8 +389,9 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
           vmem[i].cap_wr_deadline(_residual)
           vmem[i].cap_rd_deadline(_residual)
           _wt_cap = _residual - _VALU_VMEM_ADDR_FORWARD
-          for _r in list(vgpr_write_time[i].keys()):
-            if vgpr_write_time[i][_r] > _wt_cap: vgpr_write_time[i][_r] = _wt_cap
+          _vwt = valu[i].vgpr_write_time_map()
+          for _r in list(_vwt.keys()):
+            if _vwt[_r] > _wt_cap: _vwt[_r] = _wt_cap
           # Prune completed SGPR writes: writes that have fully drained during the nop
           sgpr[i].replace_write_time({r: t for r, t in sgpr[i].write_time_map().items() if t + _SGPR_LATENCY >= nop_stamp})
           # Long nops invalidate burst state: the scheduling gap makes pre-nop burst stale
@@ -464,12 +459,12 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
           ne_bytes = next_extra[0] if isinstance(next_extra, tuple) else next_extra
           store_vgprs = max(1, (ne_bytes or 4) // 4) if ne_bytes else 1
           wr_eff = _vmem_wr_issue(vmem[i].wr_deadline, store_vgprs,
-                                                     consecutive_selffwd_vgprs[i], consecutive_vgprs_written[i])
+                                                     valu[i].consecutive_selffwd_vgprs, valu[i].consecutive_vgprs_written)
           if store_vgprs == 1 and _vmem_wr_bypass_active(i):
             wr_eff -= _VALU_VMEM_WR_BYPASS
           eff_ready = max(eff_ready, wr_eff)
           if isinstance(next_extra, tuple) and next_extra[1] is not None:
-            addr_wt = vgpr_write_time[i].get(next_extra[1], 0)
+            addr_wt = valu[i].vgpr_write_time_map().get(next_extra[1], 0)
             if addr_wt > 0: eff_ready = max(eff_ready, addr_wt + _VALU_VMEM_ADDR_FORWARD)
         elif next_cat == 'vmem_rd': eff_ready = max(eff_ready, vmem[i].rd_deadline)
         if eff_ready < best_cycle:
@@ -523,7 +518,7 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
     def _resolve_delay(instid):
       # VALU_DEP (1-4): time-based stall using actual VALU issue history
       if 1 <= instid <= 4:
-        vh = valu_issue_hist[i]
+        vh = valu[i].issue_hist()
         if instid <= len(vh): return max(0, vh[-instid] + 5 - issue_cycle)
         return 0  # not enough history — no real dependency
       # All other deps (TRANS32_DEP, SALU_CYCLE): use calibrated fixed stalls
@@ -567,7 +562,7 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
 
     # VGPR readiness: HW interlock enforces RAW deps on VALU-written VGPRs regardless of s_delay_alu coverage
     if cat == 'valu' and vgpr_r_regs:
-      vr = vgpr_ready[i]
+      vr = valu[i].vgpr_ready_map()
       for r in vgpr_r_regs:
         if r in vr: issue_cycle = max(issue_cycle, vr[r])
     # Enforce trans ALU pipeline occupancy: trans instructions wait for the trans unit to be free
@@ -585,13 +580,14 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
       issue_cycle = max(issue_cycle, trans[i].pipe_avail)
     # Enforce VOPD dual-issue occupancy: consecutive VOPDs need spacing
     if is_vopd:
-      issue_cycle = max(issue_cycle, vopd_pipe_avail[i])
+      issue_cycle = max(issue_cycle, valu[i].vopd_pipe_avail)
       # VGPR bank port pressure (Seb-V): after a VOPD, next VOPD within _VOPD_PIPE_CYCLES window
       # gets +1cy if it reads a bank the previous VOPD wrote (1cy bank-cache commit delay).
-      if not is_vopd_lit and last_vopd_issue[i] >= 0 and issue_cycle - last_vopd_issue[i] <= _VOPD_PIPE_CYCLES:
+      if not is_vopd_lit and valu[i].last_vopd_issue >= 0 and issue_cycle - valu[i].last_vopd_issue <= _VOPD_PIPE_CYCLES:
         read_banks = {r & 3 for r in (vgpr_r_regs or ())}
+        _bank_wt = valu[i].bank_vopd_write_time()
         for b in read_banks:
-          if bank_vopd_write_time[i][b] == last_vopd_issue[i]:
+          if _bank_wt[b] == valu[i].last_vopd_issue:
             issue_cycle += 1
             break
 
@@ -610,14 +606,14 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
       vmem_bytes = extra[0] if isinstance(extra, tuple) else extra
       store_vgprs = max(1, (vmem_bytes or 4) // 4) if vmem_bytes else 1
       wr_deadline = _vmem_wr_issue(vmem[i].wr_deadline, store_vgprs,
-                                                     consecutive_selffwd_vgprs[i], consecutive_vgprs_written[i])
+                                                     valu[i].consecutive_selffwd_vgprs, valu[i].consecutive_vgprs_written)
       # Inter-wave VMEM bypass: another wave schedulable ≥4cy before deadline → SQ pipelines forwarding (21→17cy)
       if store_vgprs == 1 and _vmem_wr_bypass_active(i):
         wr_deadline -= _VALU_VMEM_WR_BYPASS
       issue_cycle = max(issue_cycle, wr_deadline)
       # Per-operand address VGPR forwarding: recently-written addr VGPRs need extra cycles to reach AGU
       if isinstance(extra, tuple) and extra[1] is not None:
-        addr_wt = vgpr_write_time[i].get(extra[1], 0)
+        addr_wt = valu[i].vgpr_write_time_map().get(extra[1], 0)
         if addr_wt > 0: issue_cycle = max(issue_cycle, addr_wt + _VALU_VMEM_ADDR_FORWARD)
       _vmem_fwd_stall = issue_cycle - pre_fwd_cycle
     elif cat == 'vmem_rd':
@@ -646,7 +642,7 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
              "ready": ready[i], "clock": clock}
       if cat == 'valu':
         dbg["sgpr_write_time"] = dict(sgpr[i].write_time_map())
-        dbg["vgpr_stall"] = {r: vgpr_ready[i].get(r, 0) for r in (vgpr_r_regs or ())}
+        dbg["vgpr_stall"] = {r: valu[i].vgpr_ready_map().get(r, 0) for r in (vgpr_r_regs or ())}
         dbg["sgpr_r_regs"] = sgpr_r_regs
         dbg["cond_sgpr"] = cond_sgpr
         dbg["has_delay_alu"] = has_delay_alu[i]
@@ -656,7 +652,7 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
         dbg["vmem_wr_set_time"] = vmem[i].wr_set_time
         dbg["vmem_drain_deadline"] = vmem[i].drain_deadline
         dbg["bypass_active"] = store_vgprs == 1 and _vmem_wr_bypass_active(i)
-        dbg["valu_hist"] = list(valu_issue_hist[i])
+        dbg["valu_hist"] = list(valu[i].issue_hist())
         # Log other waves' state for bypass analysis
         for j in range(n):
           if j == i: continue
@@ -668,7 +664,7 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
           dbg[f"w{j}_cat"] = jcat
           dbg[f"w{j}_vmem_drain"] = vmem[j].drain_deadline
           dbg[f"w{j}_pc_idx"] = pc[j]
-          dbg[f"w{j}_valu_hist"] = list(valu_issue_hist[j])
+          dbg[f"w{j}_valu_hist"] = list(valu[j].issue_hist())
           dbg[f"w{j}_vmem_wr_deadline"] = vmem[j].wr_deadline
       if cat == 'nop': dbg["vmem_drain_deadline"] = vmem[i].drain_deadline
       if cat == 'branch': dbg["op"] = str(kwargs.get('op', ''))
@@ -691,12 +687,12 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
         lds_complete, is_serialized = lds.on_ds_read_issue(i, issue_cycle, ds_bytes=ds_bytes)
         # b128 VGPR stagger: upper 2 VGPRs of SERIALIZED b128 loads have extended latency
         # Only the 2nd+ b128 load in a consecutive pair gets stagger (HW validated: layernorm 1st load v[2],v[3] no stagger)
-        # Note: VGPR-scoreboard state (vgpr_ready / vgpr_slow_fresh_until) stays here in emu.py — it belongs
-        # to VAluPipe (EMU_REWRITE_DESIGN §1.2, Step 5). LdsPipe only reports `is_serialized`.
+        # VGPR-scoreboard state (vgpr_ready / vgpr_slow_fresh_until) lives on VAluPipe
+        # (EMU_REWRITE_DESIGN §1.2, Step 5c). LdsPipe only reports `is_serialized`.
         if ds_bytes >= 16 and ds_dest_base is not None:
-          sf = vgpr_slow_fresh_until[i]
+          sf = valu[i].vgpr_slow_fresh_map()
           if is_serialized:
-            vr = vgpr_ready[i]
+            vr = valu[i].vgpr_ready_map()
             for off in (2, 3):
               stagger_ready = lds_complete + _LDS_B128_VGPR_STAGGER
               vr[ds_dest_base + off] = max(vr.get(ds_dest_base + off, 0), stagger_ready)
@@ -727,24 +723,25 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
     # Track VOPD pipeline occupancy: next VOPD must wait for the dual-issue slot
     if is_vopd:
       # VOPD_LIT → VOPD_LIT pipelines at 1cy; VOPD→VOPD uses full _VOPD_PIPE_CYCLES
-      vopd_pipe_avail[i] = issue_cycle + (1 if is_vopd_lit else _VOPD_PIPE_CYCLES)
-      last_vopd_issue[i] = issue_cycle
+      valu[i].set_vopd_pipe_avail(issue_cycle + (1 if is_vopd_lit else _VOPD_PIPE_CYCLES))
+      valu[i].set_last_vopd_issue(issue_cycle)
       # Track per-bank write time for inter-VOPD bank port pressure (Seb-V write-commit 1cy delay).
       if isinstance(vgpr_w_regs, (tuple, list)) and vgpr_w_regs:
-        for r in vgpr_w_regs: bank_vopd_write_time[i][r & 3] = issue_cycle
+        for r in vgpr_w_regs: valu[i].set_bank_vopd_write_time(r & 3, issue_cycle)
 
     # Track consecutive single-issue (non-VOPD non-trans) VALU run-length for dual-issue ramp (Seb-V).
     # VOPD after a chain of singles needs extra cycles to ramp the dual-issue pipeline.
     if cat == 'valu' and not _is_trans and not is_vopd:
-      consecutive_single_valu[i] += 1
+      valu[i].inc_consecutive_single_valu()
     elif cat != 'valu' or is_vopd:
-      consecutive_single_valu[i] = 0
+      valu[i].set_consecutive_single_valu(0)
 
     # Track last VALU for DS/VMEM forwarding stall (skip VOPC/VOP3_SDST — writes VCC/SGPR not VGPR)
     if cat == 'valu' and vgpr_w_regs:
       # Slow-fresh VALU extends forwarding deadlines: result arrives later, shifting all forwarding paths
       # The extension is 2×(lat-5) because the SQ pipeline detects both the issue stall AND the late write-back
-      _slow_consume = not _is_trans and vgpr_r_regs and any(issue_cycle <= vgpr_slow_fresh_until[i].get(r, 0) for r in vgpr_r_regs)
+      _sf_map = valu[i].vgpr_slow_fresh_map()
+      _slow_consume = not _is_trans and vgpr_r_regs and any(issue_cycle <= _sf_map.get(r, 0) for r in vgpr_r_regs)
       _slow_extra = 8 if _slow_consume else 0
       valu_ds_wr_deadline[i] = issue_cycle + _VALU_DS_WR_FORWARD + _slow_extra
       valu_ds_rd_deadline[i] = issue_cycle + _VALU_DS_RD_FORWARD + _slow_extra
@@ -756,17 +753,17 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
       n_written = len(set(vgpr_w_regs))
       is_selffwd = bool(vgpr_r_regs and set(vgpr_w_regs) & set(vgpr_r_regs))
       if is_selffwd:
-        consecutive_selffwd_vgprs[i] += n_written
+        valu[i].add_consecutive_selffwd_vgprs(n_written)
       else:
-        consecutive_selffwd_vgprs[i] = 0
-      consecutive_vgprs_written[i] += n_written
+        valu[i].set_consecutive_selffwd_vgprs(0)
+      valu[i].add_consecutive_vgprs_written(n_written)
     elif cat == 'valu':  # VOPC/VOP3_SDST — no VGPR writes, breaks forwarding chain
-      consecutive_selffwd_vgprs[i] = 0
-      consecutive_vgprs_written[i] = 0
+      valu[i].set_consecutive_selffwd_vgprs(0)
+      valu[i].set_consecutive_vgprs_written(0)
 
     # Track VALU issue times for time-based delay_alu (non-trans only)
     if cat == 'valu' and not _is_trans:
-      vh = valu_issue_hist[i]
+      vh = valu[i].issue_hist()
       vh.append(issue_cycle)
       if len(vh) > 4: vh.pop(0)
 
@@ -804,8 +801,8 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
 
     # Track VGPR write readiness: all VALU writes update scoreboard for RAW dependency tracking
     if cat == 'valu' and not _is_trans and vgpr_w_regs:
-      vr = vgpr_ready[i]
-      sf = vgpr_slow_fresh_until[i]
+      vr = valu[i].vgpr_ready_map()
+      sf = valu[i].vgpr_slow_fresh_map()
       # Check if any source VGPR is "slow-fresh" — consumed while register file data is still settling from b128 stagger
       slow_consume = vgpr_r_regs and any(issue_cycle <= sf.get(r, 0) for r in vgpr_r_regs)
       # VALU with no VGPR reads (e.g. v_mov with constant) has 1-cycle latency (no register file read needed)
@@ -827,7 +824,7 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
 
     # Track per-VGPR write times for VMEM address forwarding (all non-trans VALU writes)
     if cat == 'valu' and not _is_trans and vgpr_w_regs:
-      vwt = vgpr_write_time[i]
+      vwt = valu[i].vgpr_write_time_map()
       for r in vgpr_w_regs: vwt[r] = issue_cycle
 
     # Track VALU burst
