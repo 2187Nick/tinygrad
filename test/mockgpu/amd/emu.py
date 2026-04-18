@@ -140,7 +140,7 @@ _VMEM_EXEC_MIN = 8         # minimum VMEM execution time after forwarding stall 
 _TRANS_PIPELINE_LATENCY = 27 # transcendental unit result latency (v_exp, v_log, v_rcp, etc.) — depctr waits for this
 _TRANS_PIPELINE_LATENCY_SQRT = 31 # v_sqrt/v_rsq have longer latency (HW validated: depctr after v_sqrt = L-6=25 → L=31)
 _SGPR_LATENCY = 4   # VALU SGPR write-to-read latency: HW enforces without explicit S_DELAY_ALU hints
-_CNDMASK_SGPR_LATENCY = 4  # v_cndmask condition SGPR: same as standard SGPR (HW validated: probe_sgpr_cmps gap=4 sufficient)
+_CNDMASK_SGPR_LATENCY = 4  # v_cndmask sgpr source uses standard SGPR latency
 _WAVESTART_GAP = 1
 _FIRST_INST_GAP = 2
 # S_DELAY_ALU INSTID → base stall cycles for single-wave (0=NO_DEP, 1-4=VALU_DEP, 5-7=TRANS32_DEP, 8=FMA_ACCUM, 9-11=SALU_CYCLE)
@@ -349,6 +349,7 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
           else:
             # After non-drain event (VALU/etc): stamp includes +1 overhead
             nop_stamp = nop_start + nop_cycles + 1
+            had_drain_nop = True  # next VALU stamps 1cy after nop (IB resume), same as drain path
           timed.append((nop_stamp, wid, pkt_cls, kwargs))
           ready[i] = nop_stamp
           last_drain_stamp = nop_stamp  # chain: next nop starts at this stamp
