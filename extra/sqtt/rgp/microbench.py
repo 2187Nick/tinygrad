@@ -33,6 +33,7 @@ from typing import Callable, Iterable, Any
 
 from tinygrad import Tensor, Device, dtypes
 from tinygrad.uop.ops import UOp, Ops, KernelInfo
+from tinygrad.dtype import AddrSpace
 from tinygrad.renderer.amd.dsl import s, v, NULL
 from tinygrad.runtime.autogen.amd.rdna3.ins import (
   s_load_b64, s_waitcnt_lgkmcnt, s_waitcnt_vmcnt, v_lshlrev_b32_e32,
@@ -156,6 +157,8 @@ def _build_program_uop(mb: MicroBench, A: UOp, arch: str) -> UOp:
   """Build the Ops.PROGRAM UOp for a registered microbench.
 
   Signature matches custom_* kernels so it plugs into Tensor.custom_kernel.
+  If `mb.extra["lds_size"]` is set (bytes), an Ops.DEFINE_LOCAL is added to the
+  sink so LDS is allocated for the microbench.
   """
   A = A.flatten()
   threads = UOp.special(A.size, "lidx0")
@@ -164,7 +167,12 @@ def _build_program_uop(mb: MicroBench, A: UOp, arch: str) -> UOp:
   mb.body(k)
   (mb.epilogue_builder or _standard_epilogue)(k)
   insts = k.finalize()
-  sink = UOp.sink(A.base, threads, arg=KernelInfo(mb.name))
+  lds_size = mb.extra.get("lds_size", 0)
+  if lds_size:
+    lds = UOp(Ops.DEFINE_LOCAL, dtypes.uint8.ptr(size=lds_size, addrspace=AddrSpace.LOCAL), (), "lds")
+    sink = UOp.sink(A.base, lds, threads, arg=KernelInfo(mb.name))
+  else:
+    sink = UOp.sink(A.base, threads, arg=KernelInfo(mb.name))
   return UOp(Ops.PROGRAM, src=(
     sink,
     UOp(Ops.DEVICE, arg="AMD"),

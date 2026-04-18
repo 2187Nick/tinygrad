@@ -257,7 +257,10 @@ if os.environ.get("PROBE"):
 # to account for 16-WG dispatches and traced-CU landing variance.
 if os.environ.get("MICROBENCH"):
   from extra.sqtt.rgp.microbench import MICROBENCHES, _run_microbench
-  import extra.sqtt.rgp.microbench_demo  # noqa: F401 (registers demo microbenches)
+  import extra.sqtt.rgp.microbench_demo   # noqa: F401 — 12 demos (mb_sanity, mb_nop*_solo, mb_vopd_indep_n4)
+  import extra.sqtt.rgp.batch_a_valu      # noqa: F401 — 24 kernels (A.1/A.2/A.3)
+  import extra.sqtt.rgp.batch_a_cmp_salu  # noqa: F401 — 26 kernels (A.4/A.5/A.6)
+  import extra.sqtt.rgp.batch_a_sys       # noqa: F401 — 36 kernels (A.7/A.8/A.9/A.10)
   for _mb_name in MICROBENCHES:
     KERNELS[_mb_name] = (_run_microbench(_mb_name), 100)
 
