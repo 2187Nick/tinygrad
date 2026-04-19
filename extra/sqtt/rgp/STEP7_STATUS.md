@@ -51,17 +51,50 @@ delays are cascade effects.
 ## Recommended Step 7 rework
 
 The 12 C-group mismatches are a **cndmask-forwarding** problem, not a VOPD
-problem. The fix needs to live in `SgprScoreboard.read_stall` — the first
+problem — but see the update below: the Batch B cndmask sweep did **not**
+confirm the "first-use +3cy" hypothesis.
+
+### 2026-04-19 UPDATE — Batch B cndmask sweep analysis
+
+Analyzed modal-across-16-waves for all cndmask probes:
+
+| Capture | cndmask dts (modal) | Notes |
+|---|---|---|
+| `mb_vcmp_cndmask_k1` | [1] | 1 cmp → 1 cndmask |
+| `mb_vcmp_cndmask_k2` | [1, 1] | 2 cmps → 2 cndmasks |
+| `mb_vcmp_cndmask_k4` | [1, 1, 1, 1] | 4 cmps → 4 cndmasks (all dt=1) |
+| `mb_vcmp_cndmask_k8` | [1, 1, ...] | 8 cmps → 8 cndmasks (all dt=1) |
+| `mb_cndmask_sgpr_fresh_n4` | [1, 1, **2**, 1] | 4-chain, pos-3 spike |
+| `mb_vcmp_after_cndmask_chain` | [1, 1, **2**, 1] | same pos-3 spike |
+| `mb_cndmask_sgpr_stale_n4` (nop drain) | [1, 1, 1, 1] | drain-then-cndmask |
+| `mb_vcmp_spaced_cndmask` | [1] (after s_nop(4)) | 1 cmp → nop → 1 cndmask |
+| `mb_vcmp_interleave_cndmask` | [1, 1, 1, 1] | alternating cmp/cndmask |
+
+**Falsified:** the "first cndmask pays 3-4cy, tapering to 1cy" hypothesis is
+**not** supported. HW shows cndmask→cndmask throughput is a clean **1cy**,
+with only a minor 2cy spike at position 3 of a 4-chain (likely the LIT v_cmp
+completion-buffer depth-2 artifact already modeled in `_CMP_LIT_WB_LATENCY`).
+
+The 12 exp_chain C-group mismatches must therefore stem from a different
+mechanism — candidates:
+- **VOPD-context** sgpr forwarding (cndmask→VOPD, not cndmask→cndmask)
+- The 2cy pos-3 spike compounding through longer chains
+- A VCC-implicit dependency path (VOPD writes VCC, next cndmask reads it)
+
+Fix #1 as originally designed (SgprScoreboard tiering) would regress the
+Batch B k-sweep kernels since they're currently matching at 1cy. **Do not
+land tiering**. Next investigation: inspect exp_chain's precise token pattern
+around each of the 12 mismatches to identify what the VOPDs read — if any
+consume an SGPR written by a prior cndmask/VOPD, that's the next hypothesis.
+
+### Original hypothesis (superseded by the update above)
+
+The fix needs to live in `SgprScoreboard.read_stall` — the first
 `v_cndmask_b32_e64` that reads a just-written SGPR (from a chain of v_cmps)
 pays an extra ~3-4cy that tapers on subsequent cndmasks. Current emu models
 SGPR-read latency as a constant `_SGPR_LATENCY = 4` or `_CNDMASK_SGPR_LATENCY = 4`;
 the HW data suggests it's **tiered** — first consumer pays full 4, subsequent
 consumers of the same chain pay 1.
-
-To test this cleanly: we already captured `mb_vcmp_cndmask_k{1,2,4,8}` and
-`mb_cndmask_sgpr_k_sweep` in Batch B. Those probes sweep exactly the right
-axis (K v_cmps → K cndmasks). Analyze them modal-across-16-waves to extract
-the latency function before attempting the fix.
 
 ## The cleanest HW-confirmed fixes still on the table
 
@@ -76,10 +109,14 @@ decoupled them):
    `probe_cmp_chain/probe_vmem_chain` by 3 tokens on current pkls (wave-noise).
    Net −2. Park.
 
-3. **Trans→trans RAW same-VGPR 4cy** — `TransPipe.trans_read_stall` currently
+3. **Trans→trans RAW same-VGPR 4cy** — ~~`TransPipe.trans_read_stall` currently
    uses 27/31cy for all trans-vgpr reads; HW shows 4cy when the reader is
-   also a trans op. Batch B `mb_trans_raw_exp_log` confirmed v_log dt=4 after
-   v_exp (RAW on v[1]).
+   also a trans op.~~ **2026-04-19 UPDATE:** already in emu. trans→trans
+   stalls only on `trans[i].pipe_avail` (4cy via `TRANS_PIPE_CYCLES`), and
+   commit `e62be6e28` intentionally dropped the 27/31cy path for non-trans
+   readers (s_waitcnt_depctr absorbs it). Batch B `mb_trans_raw_exp_log`
+   confirms the prediction (HW=4cy). The `_trans_read_deadline` local in
+   emu.py:578-582 is harmless dead code. **Nothing to change.**
 
 4. **CBranch_scc1 not-taken 8/13 context-sensitive** — `ScalarPipe.cbranch_cost`.
    Batch A probes showed:
@@ -93,9 +130,10 @@ out to be cross-subsystem anyway).
 
 ## What to do next
 
-1. **Analyze `mb_vcmp_cndmask_k{1,2,4,8}`** Batch B captures to extract the
-   SGPR-first-use latency curve.
-2. **Land fix #3 (Trans RAW 4cy)** first — isolated, won't cross-perturb.
+1. ~~**Analyze `mb_vcmp_cndmask_k{1,2,4,8}`**~~ — DONE 2026-04-19. Hypothesis
+   falsified; see the update block above. Chained cndmasks run at 1cy.
+2. ~~**Land fix #3 (Trans RAW 4cy)** first — isolated, won't cross-perturb.~~
+   Already in emu (see updated fix #3 entry).
 3. **Land fix #4 (cbranch context-sensitive)** — also isolated.
 4. **Design cndmask-first-use fix** from the Batch B curve; land as fix #1.
 5. **Final validation**: capture Batch B again against the fixed emu, confirm
