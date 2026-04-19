@@ -215,6 +215,37 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
   if not n: return []
   if _SQTT_DEBUG: _sqtt_debug_log.clear()
 
+  # Pre-pass: for each wave, for each instruction index, compute the length of the
+  # containing "same-reg RAW chain". A chain runs while each consecutive VALU reads
+  # a VGPR written by the immediately-preceding VALU (no gap VGPRs). Used to detect
+  # LONG chains (HW wave 1+ stall on chain depth ≥ 10 saturates the issue queue)
+  # vs SHORT chains (all waves bypass). See mb_f1_valu_fmac_n16 vs mb_valu_add_n4.
+  long_raw_chain: list[list[bool]] = []
+  for wid in wave_ids:
+    events = wave_events[wid]
+    seg_len = [0] * len(events)
+    p = 0
+    while p < len(events):
+      _, _, cat_p, ex_p = events[p]
+      if cat_p != 'valu' or not isinstance(ex_p, tuple) or len(ex_p) < 5:
+        p += 1; continue
+      vw_p = ex_p[3] if len(ex_p) > 4 else ()
+      # Start a chain at p. Count consecutive same-reg RAWs forward.
+      end = p + 1
+      prev_w = set(vw_p or ())
+      while end < len(events):
+        _, _, cat_e, ex_e = events[end]
+        if cat_e != 'valu' or not isinstance(ex_e, tuple) or len(ex_e) < 5: break
+        vw_e = ex_e[3] if len(ex_e) > 4 else ()
+        vr_e = ex_e[4] if len(ex_e) > 4 else ()
+        if not (prev_w & set(vr_e or ())): break
+        prev_w = set(vw_e or ())
+        end += 1
+      L = end - p
+      for q in range(p, end): seg_len[q] = L
+      p = end if end > p else p + 1
+    long_raw_chain.append([L >= 10 for L in seg_len])
+
   # Per-wave state
   pc = [0] * n
   ready = [0] * n
@@ -670,8 +701,15 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
     # mb_e1_valu_add_n8 shows waves 4+ stall. Conservative wave-credit rule:
     # wave i ≥ 1 stalls on RAW chain of depth ≥ 4 (shorter chains preserved;
     # HW mb_valu_add_n1/n2/n4 show all waves dt=1).
+    # Long-chain gate: pre-pass flagged positions in same-reg RAW chains of length
+    # ≥10. For those, wave 1+ stalls on every RAW continuation (HW mb_valu_add_n16,
+    # mb_f1_valu_fmac_n{10,12,16}, mb_e1_valu_add_n{10,12,24} unanimous dt=5).
+    # Short chains (≤9) fall back to the backward-depth≥4 rule so n≤4 and n=5-7
+    # short chains remain at dt=1 for all waves.
+    _in_long_chain = (i < len(long_raw_chain) and pc[i] < len(long_raw_chain[i])
+                      and long_raw_chain[i][pc[i]])
     if (cat == 'valu' and vgpr_r_regs and i > 0
-        and valu[i].raw_chain_depth >= 4):
+        and (valu[i].raw_chain_depth >= 4 or _in_long_chain)):
       _vwt_raw = valu[i].vgpr_write_time_map()
       _vh_raw = valu[i].issue_hist()
       _last_valu_issue = _vh_raw[-1] if _vh_raw else -1
