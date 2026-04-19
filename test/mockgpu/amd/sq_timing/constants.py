@@ -33,6 +33,7 @@ class TimingConstants:
   VALU_VMEM_WR_BYPASS: int = 4       # inter-wave VMEM_WR overlap: 21→17cy (data_deps, probe_branch_cost)
   VALU_VMEM_ADDR_FORWARD: int = 27   # VALU→VMEM address VGPR forward (lds_sync=27)
   VALU_VMEM_RD_FORWARD: int = 22     # VALU→VMEM_RD forward
+  VALU_VMEM_RD_BYPASS: int = 4       # inter-wave VMEM_RD bypass savings (22→18) — mirrors WR_BYPASS
 
   # ── Trans pipe ───────────────────────────────────────────────────────────
   TRANS_PIPE_CYCLES: int = 4         # trans→trans occupancy; trans→VALU=1

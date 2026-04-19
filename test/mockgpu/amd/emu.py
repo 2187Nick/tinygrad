@@ -147,6 +147,7 @@ _VALU_VMEM_WR_FORWARD = CONST.VALU_VMEM_WR_FORWARD
 _VALU_VMEM_WR_BYPASS = CONST.VALU_VMEM_WR_BYPASS
 _VALU_VMEM_ADDR_FORWARD = CONST.VALU_VMEM_ADDR_FORWARD
 _VALU_VMEM_RD_FORWARD = CONST.VALU_VMEM_RD_FORWARD
+_VALU_VMEM_RD_BYPASS = CONST.VALU_VMEM_RD_BYPASS
 _VMEM_DRAIN_CYCLES = CONST.VMEM_DRAIN_CYCLES
 _VMEM_EXEC_MIN = CONST.VMEM_EXEC_MIN
 _TRANS_PIPELINE_LATENCY = CONST.TRANS_PIPELINE_LATENCY
@@ -291,6 +292,21 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
       elif jcat == 'ds_rd': j_eff = max(j_eff, valu_ds_rd_deadline[j])
       elif jcat == 'vmem_rd': j_eff = max(j_eff, vmem[j].rd_deadline)
       if j_eff <= reduced: return True
+    return False
+
+  def _vmem_rd_bypass_active(i: int) -> bool:
+    """Inter-wave VMEM read forwarding bypass (22→18 cycles).
+    HW: 2-wave probe_branch_cost keeps 22cy forward; 16+ wave microbenches drop to 18cy.
+    The SQ overlaps address-setup with another wave's work — fires when the simulation
+    has ≥4 waves running (the threshold that distinguishes small probes from many-wave
+    kernels)."""
+    if vmem[i].rd_deadline == 0: return False
+    if n < 4: return False
+    # Any peer wave that isn't barrier-blocked or done participates
+    for j in range(n):
+      if j == i or at_barrier[j] or wave_done[j]: continue
+      if pc[j] >= len(wave_events[wave_ids[j]]): continue
+      return True
     return False
 
   # Phase 1: Emit WAVESTART events at fixed offsets
@@ -703,7 +719,12 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
       _vmem_fwd_stall = issue_cycle - pre_fwd_cycle
     elif cat == 'vmem_rd':
       pre_fwd_cycle = issue_cycle
-      issue_cycle = max(issue_cycle, vmem[i].rd_deadline)
+      rd_deadline = vmem[i].rd_deadline
+      # Inter-wave VMEM_RD bypass: mirrors store bypass. HW 2-wave probe_branch_cost=22cy,
+      # HW 16-wave microbench v_shift→gload=18cy. Other waves schedulable ≥4cy early → overlap.
+      if _vmem_rd_bypass_active(i):
+        rd_deadline -= _VALU_VMEM_RD_BYPASS
+      issue_cycle = max(issue_cycle, rd_deadline)
       _vmem_fwd_stall = issue_cycle - pre_fwd_cycle
 
     # Barrier arrival penalty: non-first waves incur +1 cycle
