@@ -664,9 +664,20 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
           scal[i].consume_drain_branch()
 
     # VGPR RAW dispatch: SQTT stamps at DISPATCH, not completion. HW back-to-back
-    # v_add_f32(v[1],1.0,v[1]) chains measure dt=1cy (mb_valu_add_n4 unanimous). The
-    # 5cy result latency is pipeline-internal; operand bypass hands off without an
-    # SQTT-visible stall.
+    # v_add_f32(v[1],1.0,v[1]) chains measure dt=1cy for wave 0 (mb_valu_add_nN
+    # wave 0 unanimous). But waves 1+ pay 4cy extra once the chain is deep enough
+    # — mb_valu_add_n16 wave 1-15 unanimous dt=5 from the 2nd add onwards, and
+    # mb_e1_valu_add_n8 shows waves 4+ stall. Conservative wave-credit rule:
+    # wave i ≥ 1 stalls on RAW chain of depth ≥ 4 (shorter chains preserved;
+    # HW mb_valu_add_n1/n2/n4 show all waves dt=1).
+    if (cat == 'valu' and vgpr_r_regs and i > 0
+        and valu[i].raw_chain_depth >= 4):
+      _vwt_raw = valu[i].vgpr_write_time_map()
+      _vh_raw = valu[i].issue_hist()
+      _last_valu_issue = _vh_raw[-1] if _vh_raw else -1
+      # RAW continuation: a source reg was written by the immediately-previous VALU
+      if _last_valu_issue > 0 and any(_vwt_raw.get(r, -1) == _last_valu_issue for r in vgpr_r_regs):
+        issue_cycle = max(issue_cycle, _last_valu_issue + 5)
     # Enforce trans ALU pipeline occupancy: trans instructions wait for the trans unit to be free
     _is_trans = cat == 'valu' and pkt_cls is INST and kwargs.get('op') == InstOp.VALUT_4
     # Trans-written VGPR readiness: non-trans VALU must wait for full trans writeback (27/31 cycles)
@@ -926,6 +937,18 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
     # Track VALU issue times for time-based delay_alu (non-trans only)
     if cat == 'valu' and not _is_trans:
       vh = valu[i].issue_hist()
+      # Before appending this issue, track RAW chain depth (same-reg RAW on the
+      # IMMEDIATELY previous VALU). A continuation bumps chain depth; anything
+      # else resets. Used by the wave-credit stall above.
+      _prev_valu_issue = vh[-1] if vh else -1
+      if vgpr_r_regs and _prev_valu_issue > 0:
+        _vwt_chain = valu[i].vgpr_write_time_map()
+        if any(_vwt_chain.get(r, -1) == _prev_valu_issue for r in vgpr_r_regs):
+          valu[i].inc_raw_chain_depth()
+        else:
+          valu[i].set_raw_chain_depth(0)
+      else:
+        valu[i].set_raw_chain_depth(0)
       vh.append(issue_cycle)
       if len(vh) > 4: vh.pop(0)
 

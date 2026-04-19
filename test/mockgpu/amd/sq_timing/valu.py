@@ -113,6 +113,11 @@ class VAluPipe:
   def last_cndmask_issue(self) -> int: return self._last_cndmask_issue
   def set_last_cndmask_issue(self, cycle: int) -> None: self._last_cndmask_issue = cycle
 
+  @property
+  def raw_chain_depth(self) -> int: return getattr(self, '_raw_chain_depth', 0)
+  def set_raw_chain_depth(self, v: int) -> None: self._raw_chain_depth = v
+  def inc_raw_chain_depth(self) -> None: self._raw_chain_depth = getattr(self, '_raw_chain_depth', 0) + 1
+
   # ── VGPR scoreboard (ready / slow-fresh / write-time) ──────────────────────
   def vgpr_ready_map(self) -> dict[int, int]:
     """Return the raw VGPR readiness dict (caller may read/pop/write)."""
