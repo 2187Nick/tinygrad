@@ -36,10 +36,18 @@ class SgprScoreboard:
     # (exp_chain [33-36] confirms: depctr-drain + VOPD + cmp chain shifts SGPR read-ready by ~3cy
     # vs a VALU-prefix cmp chain like exp_chain [8-11]). Consumed on first cmp_lit A[n] update.
     self._next_cmp_lit_phase_offset: int = 0
+    # `in_phase_shifted_chain`: set True when the phase_offset is consumed by a cmp_lit.
+    # Stays True through subsequent cmp_lit + cndmask-nonvcc issues, resets on any other
+    # VALU (including VOPD) or drain. Used to gate the VOPD-after-cndmask-chain +2cy rule.
+    self._in_phase_shifted_chain: bool = False
 
   @property
   def next_cmp_lit_phase_offset(self) -> int: return self._next_cmp_lit_phase_offset
   def set_next_cmp_lit_phase_offset(self, v: int) -> None: self._next_cmp_lit_phase_offset = v
+
+  @property
+  def in_phase_shifted_chain(self) -> bool: return self._in_phase_shifted_chain
+  def set_in_phase_shifted_chain(self, v: bool) -> None: self._in_phase_shifted_chain = v
 
   # ── Write-time scoreboard ──────────────────────────────────────────────────
   def write_time_map(self) -> dict[int, int]:

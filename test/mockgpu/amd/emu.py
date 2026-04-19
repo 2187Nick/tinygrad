@@ -598,6 +598,12 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
     # Enforce VOPD dual-issue occupancy: consecutive VOPDs need spacing
     if is_vopd:
       issue_cycle = max(issue_cycle, valu[i].vopd_pipe_avail)
+      # VOPD-after-phase-shifted-cndmask-chain +2cy: HW exp_chain [37], [61] show VOPD
+      # following a cndmask chain that consumed a phase-shifted cmp_lit chain pays +2cy
+      # dual-issue warm-up. Only fires when in_phase_shifted_chain is active to avoid
+      # false-positives on [16], [47] where the chain is not post-depctr.
+      if sgpr[i].in_phase_shifted_chain:
+        issue_cycle += 2
       # VGPR bank port pressure (Seb-V): after a VOPD, next VOPD within _VOPD_PIPE_CYCLES window
       # gets +1cy if it reads a bank the previous VOPD wrote (1cy bank-cache commit delay).
       if not is_vopd_lit and valu[i].last_vopd_issue >= 0 and issue_cycle - valu[i].last_vopd_issue <= _VOPD_PIPE_CYCLES:
@@ -800,7 +806,9 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
       # across the chain via prev_C chaining, not re-added per cmp.
       _nonvcc_writes = [r for r in sgpr_w_regs if r != 106]
       _phase_offset = sgpr[i].next_cmp_lit_phase_offset if _nonvcc_writes else 0
-      if _phase_offset > 0: sgpr[i].set_next_cmp_lit_phase_offset(0)
+      if _phase_offset > 0:
+        sgpr[i].set_next_cmp_lit_phase_offset(0)
+        sgpr[i].set_in_phase_shifted_chain(True)  # mark chain as post-depctr for VOPD-warmup rule
       W = issue_cycle + _CMP_LIT_WB_LATENCY
       prev_C = sgpr[i].cmp_lit_last_commit
       C = max(W, prev_C + _SGPR_COMMIT_GAP) if prev_C else W
@@ -811,6 +819,15 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
       cmp_hist = sgpr[i].cmp_lit_hist()
       cmp_hist.append(issue_cycle)
       if len(cmp_hist) > 3: cmp_hist.pop(0)
+    elif cat == 'valu':
+      # Reset the phase-shifted-chain flag on a VALU that is neither cmp_lit nor any cndmask.
+      # Chain builders (cmp_lit writes) and consumers (cndmask of any kind — VCC or non-VCC)
+      # keep the chain alive. A VOPD or other VALU breaks it (after consuming the +2cy rule
+      # at the VOPD issue site above).
+      # Cndmask detector: reads SGPR 106 (VCC) or has cond_sgpr set (non-VCC condition).
+      _is_any_cndmask = (cond_sgpr >= 0) or (sgpr_r_regs and 106 in sgpr_r_regs)
+      if not _is_any_cndmask and not is_cmp_lit:
+        sgpr[i].set_in_phase_shifted_chain(False)
     elif cat == 'valu' and not is_cmp_lit:
       # Non-LIT-v_cmp VALU resets the LIT chain (commit buffer drains when out of chain)
       if sgpr[i].cmp_lit_hist(): sgpr[i].clear_cmp_lit_hist()
