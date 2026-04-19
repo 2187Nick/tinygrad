@@ -121,6 +121,15 @@ over-predicts by 4cy, similar to V_ADDSUB→GSTORE wave-variance.
    from 4 to 1 for chained VOPDs. Earlier attempts (2026-04-18 session)
    regressed exp_chain [51-52] — needs careful chain-state tracking.
 
+   **Attempted 2026-04-19** (reverted): Added `post_drain_vopd_chain`
+   flag on VAluPipe, set after waitcnt/depctr. VOPDs in this state use
+   `last_vopd_issue + 1`. Result: closed `mb_c3_vopd_wait_vopd_chain`
+   ±2 (83%→100%) but regressed exp_chain [51,52,54] because the
+   VOPD_LIT→v_cmp transition after a long DRAM-staggered chain wants
+   a 4cy tail that the chain rule prevents. Net: −2 exact (330→328).
+   The right fix needs a "VOPD→non-VOPD transition tail" model that
+   the current emu doesn't have — out of scope for this pass.
+
 2. **b128 store forwarding from VOPD** (C.5 mb_c5_b128_store_vopd_seed,
    where [18]). VOPD-written VGPRs have different forwarding latency
    than plain VALU-written VGPRs (likely 17cy not 21cy). This is the
