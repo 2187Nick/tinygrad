@@ -386,9 +386,14 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
         continue
       if cat == 'depctr':
         # s_waitcnt_depctr: stall until pending multi-cycle VALU (transcendental) ops complete
+        _initial_ready = ready[i]
         stall_until = ready[i]
         if trans[i].valu_pending():
           stall_until = max(stall_until, max(trans[i].valu_pending()))
+        # Empty/no-stall s_waitcnt_depctr still costs ~3cy on HW (scalar-pipe decode overhead).
+        # mb_waitcnt_depctr_4095 measures dt=3 from prev VALU when there's no trans pending.
+        if stall_until == _initial_ready:
+          stall_until = _initial_ready + 2
         timed.append((stall_until, wid, pkt_cls, kwargs))
         ready[i] = stall_until + 1
         ib[i].set_drain(stall_until)
