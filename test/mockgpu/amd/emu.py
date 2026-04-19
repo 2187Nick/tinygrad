@@ -758,14 +758,18 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
       # Trans→scalar visibility: scalar path (waitcnt, s_nop) stalls until trans pipeline clears
       trans[i].set_scalar_ready(issue_cycle + _TRANS_PIPE_CYCLES - 1)
 
-    # Track VOPD pipeline occupancy: next VOPD must wait for the dual-issue slot
+    # Track VOPD pipeline occupancy: next VOPD must wait for the dual-issue slot.
+    # Batch D finding: non-self-fwd VOPD → VOPD chains at 1cy (confirmed
+    # mb_d3_vopd_chain{2,4}_then_vcmp). Self-fwd VOPDs (read+write same VGPR)
+    # force next to wait 4cy because the register-file bypass pipeline needs to settle
+    # (confirmed exp_chain [16]→[17] both self-fwd at HW=4cy).
     if is_vopd:
-      # VOPD_LIT → VOPD_LIT pipelines at 1cy; VOPD→VOPD uses full _VOPD_PIPE_CYCLES.
-      # If this VOPD paid the phase-warmup (+2cy), the next VOPD in the pair only waits 2cy
-      # (HW exp_chain [37]→[38] shows dt=2 after a phase-warmed VOPD, not the full 4cy).
+      _vopd_selffwd = (isinstance(vgpr_r_regs, (tuple, list)) and isinstance(vgpr_w_regs, (tuple, list))
+                       and bool(set(vgpr_r_regs) & set(vgpr_w_regs)))
       if is_vopd_lit: _pipe_gap = 1
       elif _vopd_paid_phase_warmup: _pipe_gap = 2
-      else: _pipe_gap = _VOPD_PIPE_CYCLES
+      elif _vopd_selffwd: _pipe_gap = _VOPD_PIPE_CYCLES
+      else: _pipe_gap = 1  # non-self-fwd VOPD chains at 1cy (HW confirmed by Batch D)
       valu[i].set_vopd_pipe_avail(issue_cycle + _pipe_gap)
       valu[i].set_last_vopd_issue(issue_cycle)
       # Track per-bank write time for inter-VOPD bank port pressure (Seb-V write-commit 1cy delay).
