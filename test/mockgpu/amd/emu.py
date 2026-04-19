@@ -600,6 +600,12 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
       # latency is ~2cy (HW mb_vopd_dualmov_sgpr_{pair,chain_n4}), not the 4cy standard latency.
       _is_vopd_mov_only = kwargs.get('vopd_mov_only', False)
       _mov_only_latency = 2
+      # Immediate-predecessor bypass: when a cndmask (or other VALU) reads an SGPR written
+      # by the very previous instruction (issued at ready[i]-1), HW forwards at +1cy rather
+      # than the full SGPR_LATENCY. HW mb_vcmp_interleave_cndmask shows cmp→cndmask pairs
+      # (same SGPR) at dt=1 each. Applies only to non-LIT cmp writes (LIT uses the
+      # completion buffer path) and when we're not in a phase-shifted chain.
+      _pre_stall_issue = issue_cycle
       for r in sgpr_r_regs:
         # VCC (r=106) bypasses the LIT completion buffer — HW exp_chain [56] cndmask_b32_e64
         # reading VCC_LO after a VCC-writing v_cmp_lit uses standard SGPR latency (~+4cy),
@@ -610,6 +616,11 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
           if _is_cndmask_nonvcc and r == cond_sgpr: lat = _CNDMASK_SGPR_LATENCY
           elif _is_vopd_mov_only: lat = _mov_only_latency
           else: lat = _SGPR_LATENCY
+          # Immediate-predecessor bypass: if the SGPR was written by the inst at pre_stall-1
+          # (i.e. directly the previous dispatch), HW uses 1cy bypass.
+          if (_swt[r] == _pre_stall_issue - 1 and not sgpr[i].in_phase_shifted_chain
+              and r not in _cmp_lit_rr):
+            lat = min(lat, 1)
           issue_cycle = max(issue_cycle, _swt[r] + lat)
         if r in _smem_rr:
           issue_cycle = max(issue_cycle, _smem_rr[r])
@@ -928,6 +939,21 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
       C = max(W, prev_C + _gap) if prev_C else W
       C += _phase_offset  # phase shift lifts C uniformly for this chain entry
       A = C + 1
+      # Interleaved cmp→cndmask bypass: when the NEXT inst is a cndmask that reads this
+      # cmp's SGPR, HW forwards via direct bypass at I+1 instead of the full completion
+      # buffer latency. HW mb_vcmp_interleave_cndmask (cmp,cndmask,cmp,cndmask...) shows
+      # each pair at dt=1. Only applies when phase_shift_armed/offset are inactive
+      # (exp_chain phase-shifted chains still need the buffer + GAP=1 model).
+      _next_pc = pc[i] + 1
+      if (_next_pc < len(wave_events[wid]) and not sgpr[i].in_phase_shifted_chain
+          and _phase_offset == 0):
+        _nxt_cls, _nxt_kw, _nxt_cat, _nxt_extra = wave_events[wid][_next_pc]
+        if _nxt_cat == 'valu' and isinstance(_nxt_extra, tuple) and len(_nxt_extra) >= 10 and _nxt_extra[9]:
+          # Next is a cndmask. Check if it reads any of our writes.
+          _nxt_sgpr_r = _nxt_extra[2]
+          if _nxt_sgpr_r and any(r in sgpr_w_regs for r in _nxt_sgpr_r):
+            # Single-hop bypass for the writes that will be consumed immediately.
+            A = min(A, issue_cycle + 1)
       sgpr[i].set_cmp_lit_last_commit(C)
       for r in sgpr_w_regs: sgpr[i].set_cmp_lit_read_ready(r, A)
       cmp_hist = sgpr[i].cmp_lit_hist()
