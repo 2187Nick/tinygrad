@@ -6,8 +6,8 @@ $1,000 bounty: Make tinygrad's software GPU emulator produce cycle-accurate inst
 ## 2026-04-19 — Batch E + Batch F + wave-credit RAW + long-chain lookahead
 
 ### Current state (after 363 total kernels × 65384 comparison tokens):
-- **Total MODAL:  60519/65384 exact (92.6%), 62554/65384 ±2 (95.7%)**
-- **Total strict: 51227/65384 exact (78.3%), 56066/65384 ±2 (85.7%)**
+- **Total MODAL:  61190/65384 exact (93.6%), 62697/65384 ±2 (95.9%)**
+- **Total strict: 51843/65384 exact (79.3%), 56153/65384 ±2 (85.9%)**
 - **Reference MODAL: 339/340 exact (99.7%), 340/340 ±2 (100.0%)** (unchanged)
 - **Reference strict: 327/340 exact (96.2%)** (unchanged)
 - All 11 SQTT profiler + custom kernel tests pass.
@@ -54,6 +54,20 @@ $1,000 bounty: Make tinygrad's software GPU emulator produce cycle-accurate inst
    chain continuation. Captures HW mb_f4_{exp,log,rcp,rsq,sqrt}_chain_n8
    pattern where waves 4-15 queue behind the first 4 on the trans pipe.
    Individual gain: f4_*_chain_n8 strict 48-52% → ~60-65%.
+
+8. **s_nop(0) drain propagation (commit `d4a800ad`)** — single-cycle s_nop(0)
+   else-branch never called ib[i].set_drain, so consecutive s_nop(0)s all
+   stamped at the same cycle (EMU dt=0 vs HW dt=1 unanimous). Fix: stamp
+   at max(nop_start, ready[i]) and set_drain(stamp+1). Individual gain:
+   mb_e2_store_after_longnop 16% → 92.5% strict; mb_e3_extra_waitcnt_nop16_vmov
+   17% → 93.5% strict. +528 total strict, +528 total MODAL.
+
+9. **v_mul_lo_u32 / v_mul_hi_u32 are 4cy pipelined (commit `32a201d0`)** —
+   decoder now tags these via op_name; VALU issue path enforces 4cy pipe
+   occupancy via a new int_mul_pipe_avail tracker. HW mb_e4_vmul_lo_u32_n4
+   and mb_f6_vmul_hi_chain_n4 confirm dt=4 unanimous. NOT applied to
+   v_mad_u32_u24 / *_u24 variants (those pipeline at 1cy). Individual
+   gain: mul_hi 41% → 72% strict, mul_lo 43% → 70% strict. +88 total strict.
 
 ### Wave-variance (stochastic scheduler) — Phase 0 & 1 landed
 
