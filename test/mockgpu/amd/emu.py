@@ -639,10 +639,11 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
       # VOPD-after-phase-shifted-cndmask-chain floor: HW exp_chain [37], [61] show VOPD
       # following a cndmask chain that consumed a phase-shifted cmp_lit chain pipelines
       # no sooner than last_cndmask_issue + 3. Only fires when in_phase_shifted_chain is
-      # active (post-depctr) — non-phase-shifted chains ([16], [47]) pipeline tighter.
-      # paid_warmup is set regardless of whether the floor bumped: the next VOPD uses
-      # pipe_gap=2 (warmup-tight) instead of 4 (self-fwd), matching HW [38] dt=2.
-      if sgpr[i].in_phase_shifted_chain:
+      # active (post-depctr) AND the chain has ≥4 cndmasks — shorter chains ([23-25])
+      # pipeline tight at dt=1 (HW exp_chain [26]). Non-phase-shifted chains ([16], [47])
+      # also pipeline tighter. paid_warmup is set regardless of whether the floor bumped:
+      # the next VOPD uses pipe_gap=2 (warmup-tight) instead of 4 (self-fwd), matching HW [38] dt=2.
+      if sgpr[i].in_phase_shifted_chain and valu[i].cndmask_cluster_vgprs >= 4:
         issue_cycle = max(issue_cycle, valu[i].last_cndmask_issue + 3)
         _vopd_paid_phase_warmup = True
       # VGPR bank port pressure (Seb-V): after a VOPD, next VOPD within _VOPD_PIPE_CYCLES window

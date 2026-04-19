@@ -3,6 +3,137 @@
 ## Bounty Goal
 $1,000 bounty: Make tinygrad's software GPU emulator produce cycle-accurate instruction timing matching real AMD 7900 XTX hardware, validated via SQTT (Shader Queue Thread Trace).
 
+## 2026-04-19 — Handoff to 7900 XTX Server
+
+### Current state: **337/340 exact (99.1%), 340/340 ±2 (100.0%)**
+
+All 10 reference kernels at 100% ±2. Only 3 exact mismatches remain — all in
+exp_chain, all within ±2cy of HW. 9 of 10 kernels at 100% exact.
+
+### Per-kernel (2026-04-19 end-of-session)
+
+| Kernel | Exact | Total | Rate | ±2 Rate |
+|------------------|-------|-------|--------|---------|
+| data_deps | 10 | 10 | 100.0% | 100.0% |
+| elementwise | 16 | 16 | 100.0% | 100.0% |
+| plus | 13 | 13 | 100.0% | 100.0% |
+| where | 19 | 19 | 100.0% | 100.0% |
+| cast | 14 | 14 | 100.0% | 100.0% |
+| probe_sgpr_cmps | 64 | 64 | 100.0% | 100.0% |
+| probe_cmp_chain | 44 | 44 | 100.0% | 100.0% |
+| probe_branch_cost| 26 | 26 | 100.0% | 100.0% |
+| probe_vmem_chain | 22 | 22 | 100.0% | 100.0% |
+| **exp_chain** | **109** | **112** | **97.3%** | **100.0%** |
+| **TOTAL** | **337** | **340** | **99.1%** | **100.0%** |
+
+### Remaining 3 mismatches (all exp_chain wave 0, all ±2)
+
+Exact HW vs EMU dt values:
+
+1. **[26] VOPD V_DUAL_MUL_F32**: HW=1 EMU=3 (diff=+2)
+   - Root cause: emu doesn't model the 768cy HW SMEM stall at [25].
+     `s_delay_alu` VALU_DEP_3 stalls 2cy in emu because `valu_issue_hist`
+     hasn't cleared, but HW's 768cy wait naturally resolves the delay_alu
+     to 0cy.
+   - Fix needs: either simulate the SMEM stall (complex — needs SMEM
+     latency model tied to wave scheduling) or invalidate stale
+     `valu_issue_hist` entries after long idle gaps.
+
+2. **[56] v_cndmask_b32_e64 VCC_LO**: HW=1 EMU=3 (diff=+2)
+   - Root cause: cndmask reads VCC via LIT v_cmp completion buffer
+     (`cmp_lit_read_ready[106] = A[VCC] = I + 6cy`) but HW exp_chain [56]
+     shows cndmask reading VCC at write_time[106]+4cy (standard SGPR
+     latency) rather than through the completion buffer.
+   - Investigated fix: skip `_cmp_lit_rr[106]` in cndmask SGPR read,
+     fall through to standard latency. **Tradeoff problem**: this makes
+     [56] exact (+1) but breaks [57] (±2 → outside ±2) because [57]
+     reads `cmp_lit_rr[0] = 275729` (derived from phase-shifted C chain)
+     while HW [57] needs s[0] available at 275726. Net: 338 exact but
+     339 ±2 — loses the 100% ±2 milestone. Reverted.
+   - See analysis below for a 2-part fix that should land both.
+
+3. **[57] v_cndmask_b32_e64 s[0]**: HW=3 EMU=4 (diff=+1)
+   - Root cause: chain 2's A[0] is too high by 1cy. Current model applies
+     phase_offset=+3 from the depctr[48] to chain 2's first non-VCC
+     cmp_lit [53], but HW chain 2 appears to have already decayed
+     phase_offset by the time cmp_lit issues (due to 719cy intervening
+     SMEM wait).
+
+### Proposed fix for [56]+[57] (should land 339/340 exact, keeps 100% ±2)
+
+Two-part change verified by hand-simulation against the HW trace:
+
+1. **VCC-skip in cmp_lit_read_ready lookup**:
+   ```python
+   # In emu.py ~line 577:
+   if r != 106 and r in _cmp_lit_rr:  # skip VCC for standard SGPR_LATENCY path
+     issue_cycle = max(issue_cycle, _cmp_lit_rr[r])
+   elif r in _swt:
+     ...
+   ```
+   HW exp_chain [56] proves cndmask→VCC uses standard latency, not the
+   completion buffer A[VCC]. Single-line change.
+
+2. **Add `phase_shift_armed` state + clear phase_offset on waitcnt drain**:
+   - Add to `SgprScoreboard`: `_phase_shift_armed: bool = False` with
+     `phase_shift_armed` property + `set_phase_shift_armed(v)` setter.
+   - At depctr handler (emu.py ~line 377): also set `phase_shift_armed=True`
+     alongside `next_cmp_lit_phase_offset=3`.
+   - At waitcnt handler (emu.py ~line 331) that actually stalls (lgkmcnt
+     or vmcnt drain): clear `next_cmp_lit_phase_offset` to 0. **Keep**
+     `phase_shift_armed` (persists through drain).
+   - At cmp_lit handler (emu.py ~line 881): consume `phase_shift_armed`
+     to set `in_phase_shifted_chain=True` on first cmp_lit (regardless
+     of VCC or non-VCC). Phase_offset consumption stays gated on
+     `_nonvcc_writes`.
+
+   Hand-simulation trace (matches HW exactly):
+   - Chain 1 (no intervening waitcnt): phase_offset=3 preserved →
+     A[0]=274945 ✓, A[1]=274946 ✓, A[2]=274947 ✓
+   - Chain 2 (719cy waitcnt drains phase_offset, armed keeps gap=1):
+     A[0]=275726 ✓, A[1]=275727 ✓, A[2]=275728 ✓
+   - With VCC-skip: [56]=write_time[106]+4=275723 ✓, [57-60] all ✓
+
+   Result: 339/340 exact (99.7%), 340/340 ±2 (100%). Only [26] remains.
+
+### [26] is fundamentally blocked without SMEM-stall modeling
+
+The 768cy gap between HW [24] and [25] is an implicit SMEM wait that emu
+doesn't simulate. Fixing needs either:
+- Full SMEM latency model tied to the instruction stream's s_load_b64
+  pipeline (complex — interacts with clause boundaries, dependent SGPR
+  reads, wave sequencing).
+- Heuristic: invalidate `valu_issue_hist` entries older than N cycles
+  so that s_delay_alu VALU_DEP_3 resolves to 0 after long idle gaps.
+  Simpler, but needs tuning on the other kernels to avoid regressions.
+
+Neither is time-critical — [26] is already within ±2 (matches 100% ±2
+milestone). Leave as known-limitation unless 99.7% → 100% becomes a
+bounty requirement.
+
+### Working tree state at handoff
+- Branch: `master` at commit `0990eb1b2` (floor-based VOPD rule).
+- Uncommitted: chain-length gate added to VOPD floor rule (harmless
+  robustness — ≥4 cndmasks required for the +3 floor to fire; current
+  firing chains [37], [61] have 4 and 5 cndmasks respectively so no
+  behavior change). Ready to commit.
+- Tests: 337/340 exact, 340/340 ±2 confirmed green after all edits.
+
+### Recommended next session starting point
+
+Implement the 2-part fix above:
+1. Add `_phase_shift_armed` to `test/mockgpu/amd/sq_timing/sgpr.py`.
+2. Wire it through depctr / waitcnt / cmp_lit handlers in emu.py.
+3. Apply VCC-skip (1-line change in cmp_lit_rr lookup).
+4. Run `rigorous_hw_test.py --compare` — expect 339/340 exact.
+5. If regressions on other kernels, check probe_sgpr_cmps [16] and
+   probe_cmp_chain chain behavior (those don't use LIT v_cmps so should
+   be unaffected, but verify).
+
+Parked: [26] SMEM-stall model (architectural, out of easy reach).
+
+---
+
 ## Open Tasks (resume here next session)
 
 Status as of 2026-04-19 end-of-session. 10 tracked tasks total — 4 completed
