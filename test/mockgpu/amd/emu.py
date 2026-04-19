@@ -1315,6 +1315,15 @@ def _init_sqtt_encoder(entry_pc: int):
       # cond_sgpr/VCC reads, but VOP3 2-source ops like v_add_f32_e64 can have src2
       # populated by the assembler and misfire that heuristic.
       is_cndmask = 'CNDMASK' in op_name
+      # FMAC / MAC / FMAAK / FMAMK: vdst is an implicit source (accumulator).
+      # Add it to vgpr_r so RAW dep tracking sees the accumulator chain. HW
+      # mb_f1_valu_fmac_n16 confirms dt=5 stalls kick in on waves 1+ exactly
+      # like v_add_n16, which only works if fmac's chain is detected as RAW.
+      if ('FMAC' in op_name or 'FMAMK' in op_name or 'FMAAK' in op_name or
+          ('_MAC' in op_name and 'FMAC' not in op_name)):
+        if hasattr(inst, 'vdst'):
+          o = getattr(inst.vdst, 'offset', -1)
+          if o >= 256 and (o - 256) not in vgpr_r: vgpr_r.append(o - 256)
       reg_info = (is_vopc, tuple(sgpr_w), tuple(sgpr_r), tuple(vgpr_w), tuple(vgpr_r), issubclass(inst_type, _VOPD), cond_sgpr,
                   issubclass(inst_type, _VOPD_LIT), issubclass(inst_type, _CMP_LIT), is_cndmask)
       # For VOPD: detect "MOV-only" pairs (V_DUAL_MOV_B32 on both lanes). These don't use the vsrc1
