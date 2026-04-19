@@ -733,6 +733,13 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
       tvr = trans[i].vgpr_ready_map()
       for r in vgpr_r_regs:
         if r in tvr: _trans_read_deadline = max(_trans_read_deadline, tvr[r])
+    # Integer 32-bit multiply (v_mul_lo_u32 / v_mul_hi_u32 / v_mad_u32_u24 /
+    # *_i32) is a 4-cycle pipeline op — HW mb_e4_vmul_lo_u32_n4 and
+    # mb_f6_vmul_hi_chain_n4 show dt=4 unanimous across waves 0-5 on chain
+    # continuations. Enforce pipe occupancy mirroring trans_pipe_avail.
+    _is_int_mul32 = cat == 'valu' and kwargs.get('int_mul32', False)
+    if _is_int_mul32:
+      issue_cycle = max(issue_cycle, valu[i].int_mul_pipe_avail)
     if _is_trans:
       _pre_trans_issue = issue_cycle
       issue_cycle = max(issue_cycle, trans[i].pipe_avail)
@@ -916,6 +923,9 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
       trans[i].set_pipe_avail(issue_cycle + _TRANS_PIPE_CYCLES)
       # Trans→scalar visibility: scalar path (waitcnt, s_nop) stalls until trans pipeline clears
       trans[i].set_scalar_ready(issue_cycle + _TRANS_PIPE_CYCLES - 1)
+    # Update int-mul pipe availability (4cy throughput).
+    if _is_int_mul32:
+      valu[i].set_int_mul_pipe_avail(issue_cycle + 4)
 
     # Track VOPD pipeline occupancy: next VOPD must wait for the dual-issue slot.
     # Batch D finding: non-self-fwd VOPD → VOPD chains at 1cy (confirmed
@@ -1330,6 +1340,16 @@ def _init_sqtt_encoder(entry_pc: int):
       # cond_sgpr/VCC reads, but VOP3 2-source ops like v_add_f32_e64 can have src2
       # populated by the assembler and misfire that heuristic.
       is_cndmask = 'CNDMASK' in op_name
+      # Integer 32-bit multiply is a 4-cycle pipeline op on RDNA3 (not 1cy like f32
+      # mul). HW mb_e4_vmul_lo_u32_n4 / mb_f6_vmul_hi_chain_n4 show dt=4 unanimous
+      # between consecutive int-muls on the first 6 waves.
+      # 4cy pipeline: v_mul_lo_u32 / v_mul_hi_u32 / i32 variants. HW measured dt=4
+      # on chain continuations. NOT v_mad_u32_u24 (measured dt=1) and NOT *_u24
+      # variants — those pipeline at 1cy like regular ALU.
+      is_int_mul32 = any(p in op_name for p in (
+          'V_MUL_LO_U32', 'V_MUL_HI_U32', 'V_MUL_LO_I32', 'V_MUL_HI_I32'))
+      # Guard against false match on U32_U24 variants (those are 1cy).
+      if is_int_mul32 and '_U24' in op_name: is_int_mul32 = False
       # FMAC / MAC / FMAAK / FMAMK: vdst is an implicit source (accumulator).
       # Add it to vgpr_r so RAW dep tracking sees the accumulator chain. HW
       # mb_f1_valu_fmac_n16 confirms dt=5 stalls kick in on waves 1+ exactly
@@ -1349,6 +1369,7 @@ def _init_sqtt_encoder(entry_pc: int):
         opx_name = inst.opx.name if hasattr(inst, 'opx') and hasattr(inst.opx, 'name') else ""
         opy_name = inst.opy.name if hasattr(inst, 'opy') and hasattr(inst.opy, 'name') else ""
         _kw_extras['vopd_mov_only'] = opx_name == 'V_DUAL_MOV_B32' and opy_name == 'V_DUAL_MOV_B32'
+      if is_int_mul32: _kw_extras['int_mul32'] = True
       if op is None: events.append((VALUINST, {'wave': w, **_kw_extras}, 'valu', reg_info))
       else:
         kw = {'wave': w, 'op': op, **_kw_extras}
@@ -1425,7 +1446,7 @@ def _init_sqtt_encoder(entry_pc: int):
     prev_time = 0
     for ts, _, pkt_cls, kwargs in timed:
       delta = max(ts - prev_time, 0)
-      enc_kwargs = {k: v for k, v in kwargs.items() if k not in ('trans_name', 'vopd_mov_only')}
+      enc_kwargs = {k: v for k, v in kwargs.items() if k not in ('trans_name', 'vopd_mov_only', 'int_mul32')}
       _emit_with_delta(nibbles, pkt_cls, delta=delta, **enc_kwargs)
       prev_time = max(ts, prev_time)  # actual encoded time; clamped deltas (delta=0) don't advance time
     # Pad to 32-byte alignment

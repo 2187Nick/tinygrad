@@ -118,6 +118,10 @@ class VAluPipe:
   def set_raw_chain_depth(self, v: int) -> None: self._raw_chain_depth = v
   def inc_raw_chain_depth(self) -> None: self._raw_chain_depth = getattr(self, '_raw_chain_depth', 0) + 1
 
+  @property
+  def int_mul_pipe_avail(self) -> int: return getattr(self, '_int_mul_pipe_avail', 0)
+  def set_int_mul_pipe_avail(self, cycle: int) -> None: self._int_mul_pipe_avail = cycle
+
   # ── VGPR scoreboard (ready / slow-fresh / write-time) ──────────────────────
   def vgpr_ready_map(self) -> dict[int, int]:
     """Return the raw VGPR readiness dict (caller may read/pop/write)."""
