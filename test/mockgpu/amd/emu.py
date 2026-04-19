@@ -360,6 +360,11 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
         sv = sorted(vmem[i].vm_pending())
         if vm_th < len(sv):
           stall_until = max(stall_until, sv[len(sv) - vm_th - 1])
+        # Empty/no-stall s_waitcnt still costs ~3cy on HW (scalar-pipe decode + SQ handoff).
+        # mb_waitcnt_empty_barrier measures dt=3 from prev VALU to empty s_waitcnt.
+        # Apply only when neither lgkm nor vm actually stalled (and trans pipe clean).
+        if stall_until == _initial_ready:
+          stall_until = _initial_ready + 2  # +3cy total from prev dispatch (ready adds +1 after)
         timed.append((stall_until, wid, pkt_cls, kwargs))
         ready[i] = stall_until + 1  # waitcnt occupies the stall_until cycle; next issue at +1
         ib[i].set_drain(stall_until)  # nop after waitcnt starts at stall_until (no +1 gap)
