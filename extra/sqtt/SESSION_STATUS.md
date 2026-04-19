@@ -3,6 +3,33 @@
 ## Bounty Goal
 $1,000 bounty: Make tinygrad's software GPU emulator produce cycle-accurate instruction timing matching real AMD 7900 XTX hardware, validated via SQTT (Shader Queue Thread Trace).
 
+## Open Tasks (resume here next session)
+
+Status as of 2026-04-19 end-of-session. 10 tracked tasks total — 4 completed
+this session, 6 pending.
+
+| # | Status | Task |
+|---|---|---|
+| 20 | ✅ completed | Batch A+B emu accuracy sweep (26883/32746 = 82.1%) |
+| 21 | ✅ completed | Design Batch C kernels for remaining 17 (28 kernels captured) |
+| 22 | ✅ completed | Extend scalar-pipe phase model (+5 reference via heuristics) |
+| 24 | ✅ completed | Post-drain VOPD pipe reset investigation (reverted — wrong model) |
+| 25 | ✅ completed | **Create ScalarPipe state machine module** (standalone, commit `87f0d237c`) |
+| 26 | ⏳ pending | **Unit tests for ScalarPipe state machine** (next step) |
+| 27 | ⏳ pending | Shadow-wire state machine in emu (compute deltas, don't apply) |
+| 28 | ⏳ pending | Migrate flag-based rules to state machine (one at a time) |
+| 29 | ⏳ pending | Phase A: Stochastic wave scheduler (after Phase B stabilizes) |
+| 23 | ⏳ pending | **Push to 100% non-DRAM accuracy** (parent goal — Phases A+B) |
+
+### Next session starting point
+
+Pick up at **task #26**: write unit tests for `test/mockgpu/amd/sq_timing/
+scalar_phase.py`. Feed actual exp_chain token streams through
+`ScalarPhaseMachine.advance()` and verify the `(phase_shifted, chain,
+chain_position)` trajectory matches what HW behavior implies.
+
+Then task #27 (shadow-wire), #28 (migrate rules), then phase A (#29).
+
 ## Current Accuracy: 330/340 exact (97.1%), 339/340 ±2 (99.7%)
 
 All SQTT tests pass (encoder, map, examples, timing, E2E). 8/8 bounty
