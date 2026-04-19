@@ -32,6 +32,11 @@ class VAluPipe:
       self-forwarding non-VOPC VALUs (for VMEM store forwarding).
     - `consecutive_vgprs_written`: count of VGPRs written by consecutive
       non-VOPC VALUs.
+    - `cndmask_cluster_vgprs`: count of VGPRs written by a cndmask chain
+      (V_CNDMASK_* ops). Unlike `consecutive_vgprs_written`, VOPCs don't
+      break this cluster — HW `where` kernel [18] shows cmp-interleaved
+      cndmask writes feed a subsequent b128 store at `deadline` (no
+      width_extra, no scatter +1). Any non-cndmask non-VOPC VALU resets.
     - `vgpr_ready[reg]`: VGPR readiness scoreboard (reg → cycle when
       result is available).
     - `vgpr_slow_fresh_until[reg]`: VGPR slow-freshness window end —
@@ -48,6 +53,7 @@ class VAluPipe:
     self._consecutive_single_valu = 0
     self._consecutive_selffwd_vgprs = 0
     self._consecutive_vgprs_written = 0
+    self._cndmask_cluster_vgprs = 0
     self._vgpr_ready: dict[int, int] = {}
     self._vgpr_slow_fresh_until: dict[int, int] = {}
     self._vgpr_write_time: dict[int, int] = {}
@@ -88,6 +94,11 @@ class VAluPipe:
   def consecutive_vgprs_written(self) -> int: return self._consecutive_vgprs_written
   def set_consecutive_vgprs_written(self, v: int) -> None: self._consecutive_vgprs_written = v
   def add_consecutive_vgprs_written(self, v: int) -> None: self._consecutive_vgprs_written += v
+
+  @property
+  def cndmask_cluster_vgprs(self) -> int: return self._cndmask_cluster_vgprs
+  def set_cndmask_cluster_vgprs(self, v: int) -> None: self._cndmask_cluster_vgprs = v
+  def add_cndmask_cluster_vgprs(self, v: int) -> None: self._cndmask_cluster_vgprs += v
 
   # ── VGPR scoreboard (ready / slow-fresh / write-time) ──────────────────────
   def vgpr_ready_map(self) -> dict[int, int]:

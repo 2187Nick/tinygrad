@@ -195,11 +195,14 @@ def _get_issue_cost(pkt_cls, kwargs) -> int:
     return _INSTOP_ISSUE_COST.get(op, 1)
   return 1
 
-def _vmem_wr_issue(deadline: int, store_vgprs: int, selffwd_vgprs: int, vgprs_written: int) -> int:
+def _vmem_wr_issue(deadline: int, store_vgprs: int, selffwd_vgprs: int, vgprs_written: int,
+                   cndmask_cluster_vgprs: int = 0) -> int:
   """Compute VMEM store issue deadline based on VALU forwarding pattern."""
   width_extra = max(0, store_vgprs - 1)
   if selffwd_vgprs >= store_vgprs and store_vgprs > 1:
     return deadline - 1  # pipeline batch: all data VGPRs from consecutive self-fwd VALUs
+  if cndmask_cluster_vgprs >= store_vgprs and store_vgprs > 1:
+    return deadline  # cndmask chain (cmp-interleaved) feeds store cleanly — no width_extra/scatter
   if vgprs_written >= store_vgprs:
     return deadline + width_extra  # all data VGPRs from consecutive non-VOPC VALUs
   return deadline + width_extra + 1  # scattered writes (VOPCs broke chain) — extra gather cycle
@@ -480,7 +483,8 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
           ne_bytes = next_extra[0] if isinstance(next_extra, tuple) else next_extra
           store_vgprs = max(1, (ne_bytes or 4) // 4) if ne_bytes else 1
           wr_eff = _vmem_wr_issue(vmem[i].wr_deadline, store_vgprs,
-                                                     valu[i].consecutive_selffwd_vgprs, valu[i].consecutive_vgprs_written)
+                                                     valu[i].consecutive_selffwd_vgprs, valu[i].consecutive_vgprs_written,
+                                                     valu[i].cndmask_cluster_vgprs)
           if store_vgprs == 1 and _vmem_wr_bypass_active(i):
             wr_eff -= _VALU_VMEM_WR_BYPASS
           eff_ready = max(eff_ready, wr_eff)
@@ -512,10 +516,13 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
     # Shared resources (LDS port, barrier) have their own trackers (cu_lds_available, at_barrier).
     issue_cycle = ready[i]
 
-    # Extract VALU register info from extra tuple: (is_vopc, sgpr_writes, sgpr_reads, vgpr_writes, vgpr_reads, is_vopd, cond_sgpr, is_vopd_lit, is_cmp_lit)
+    # Extract VALU register info from extra tuple: (is_vopc, sgpr_writes, sgpr_reads, vgpr_writes, vgpr_reads, is_vopd, cond_sgpr, is_vopd_lit, is_cmp_lit, is_cndmask)
     is_vopd_lit = False
     is_cmp_lit = False
-    if isinstance(extra, tuple) and len(extra) == 9:
+    is_cndmask = False
+    if isinstance(extra, tuple) and len(extra) == 10:
+      is_vopc, sgpr_w_regs, sgpr_r_regs, vgpr_w_regs, vgpr_r_regs, is_vopd, cond_sgpr, is_vopd_lit, is_cmp_lit, is_cndmask = extra
+    elif isinstance(extra, tuple) and len(extra) == 9:
       is_vopc, sgpr_w_regs, sgpr_r_regs, vgpr_w_regs, vgpr_r_regs, is_vopd, cond_sgpr, is_vopd_lit, is_cmp_lit = extra
     elif isinstance(extra, tuple) and len(extra) == 8:
       is_vopc, sgpr_w_regs, sgpr_r_regs, vgpr_w_regs, vgpr_r_regs, is_vopd, cond_sgpr, is_vopd_lit = extra
@@ -666,7 +673,8 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
       vmem_bytes = extra[0] if isinstance(extra, tuple) else extra
       store_vgprs = max(1, (vmem_bytes or 4) // 4) if vmem_bytes else 1
       wr_deadline = _vmem_wr_issue(vmem[i].wr_deadline, store_vgprs,
-                                                     valu[i].consecutive_selffwd_vgprs, valu[i].consecutive_vgprs_written)
+                                                     valu[i].consecutive_selffwd_vgprs, valu[i].consecutive_vgprs_written,
+                                                     valu[i].cndmask_cluster_vgprs)
       # Inter-wave VMEM bypass: another wave schedulable ≥4cy before deadline → SQ pipelines forwarding (21→17cy)
       if store_vgprs == 1 and _vmem_wr_bypass_active(i):
         wr_deadline -= _VALU_VMEM_WR_BYPASS
@@ -826,9 +834,14 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
       else:
         valu[i].set_consecutive_selffwd_vgprs(0)
       valu[i].add_consecutive_vgprs_written(n_written)
+      # Cndmask cluster: accumulate on cndmask VGPR writes; any non-cndmask non-VOPC VALU
+      # that writes a VGPR breaks the cluster. VOPCs are kept (handled in elif below).
+      if is_cndmask: valu[i].add_cndmask_cluster_vgprs(n_written)
+      else: valu[i].set_cndmask_cluster_vgprs(0)
     elif cat == 'valu':  # VOPC/VOP3_SDST — no VGPR writes, breaks forwarding chain
       valu[i].set_consecutive_selffwd_vgprs(0)
       valu[i].set_consecutive_vgprs_written(0)
+      # VOPCs DO NOT reset cndmask_cluster_vgprs — they're expected between cndmasks.
 
     # Track VALU issue times for time-based delay_alu (non-trans only)
     if cat == 'valu' and not _is_trans:
@@ -1136,8 +1149,13 @@ def _init_sqtt_encoder(entry_pc: int):
         if hasattr(inst, fn):
           o = getattr(getattr(inst, fn), 'offset', -1)
           if o >= 256: vgpr_r.append(o - 256)
+      # Reliable cndmask detector: any op whose name contains "CNDMASK" (V_CNDMASK_B32_E32/E64,
+      # V_DUAL_CNDMASK_B32, V_CNDMASK_B16_E64). Previously we inferred cndmask from
+      # cond_sgpr/VCC reads, but VOP3 2-source ops like v_add_f32_e64 can have src2
+      # populated by the assembler and misfire that heuristic.
+      is_cndmask = 'CNDMASK' in op_name
       reg_info = (is_vopc, tuple(sgpr_w), tuple(sgpr_r), tuple(vgpr_w), tuple(vgpr_r), issubclass(inst_type, _VOPD), cond_sgpr,
-                  issubclass(inst_type, _VOPD_LIT), issubclass(inst_type, _CMP_LIT))
+                  issubclass(inst_type, _VOPD_LIT), issubclass(inst_type, _CMP_LIT), is_cndmask)
       # For VOPD: detect "MOV-only" pairs (V_DUAL_MOV_B32 on both lanes). These don't use the vsrc1
       # lanes even though the decoder reports v[0] there — the encoding slot is filled by the assembler
       # with a dummy value. HW (Batch C mb_vopd_dualmov_sgpr_*) shows these pipeline at 1cy.
