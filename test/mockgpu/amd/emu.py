@@ -332,6 +332,7 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
         simm16 = extra
         lgkm_th = (simm16 >> 4) & 0x3f
         vm_th = (simm16 >> 10) & 0x3f
+        _initial_ready = ready[i]
         stall_until = ready[i]
         # Trans→scalar stall: scalar path waits for trans pipeline to clear
         stall_until = max(stall_until, trans[i].scalar_ready)
@@ -350,6 +351,12 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
         # First cndmask chain after vmcnt drain pays SGPR bank port pressure on 3rd-SGPR-cndmask.
         # probe_sgpr_cmps [16] (1st chain) = {2, 5}; [31] (2nd chain, after s_nop drain) = {1, 1}.
         if vm_th < len(sv): sgpr[i].mark_first_cndmask_chain_pending()
+        # A drain-effective waitcnt absorbs the post-depctr cmp_lit phase-offset (+3cy) —
+        # chain-2 in exp_chain [53-57] has a 719cy vmcnt wait and HW A[0] is at
+        # write_time+3 (no +3 offset left). `phase_shift_armed` stays set so the chain still
+        # uses GAP=1 once cmp_lit reactivates it.
+        if stall_until > _initial_ready:
+          sgpr[i].set_next_cmp_lit_phase_offset(0)
         pc[i] += 1
         # Prune completed ops
         lds.prune(i, stall_until)
@@ -375,6 +382,10 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
         sgpr[i].set_cmp_lit_last_commit(0)
         sgpr[i].clear_cmp_lit_read_ready()
         sgpr[i].set_next_cmp_lit_phase_offset(3)
+        # Arm the phase-shifted chain flag. Survives subsequent waitcnt drain
+        # (drain clears the +3 offset but leaves GAP=1 applicable — HW exp_chain
+        # chain-2 [53-57] after 719cy vmcnt wait).
+        sgpr[i].set_phase_shift_armed(True)
         continue
       if cat == 'nop':
         # s_nop(N): stalls IB for N+1 cycles.
@@ -570,7 +581,10 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
       _swt = sgpr[i].write_time_map()
       _smem_rr = sgpr[i].smem_ready_map()
       for r in sgpr_r_regs:
-        if r in _cmp_lit_rr:  # LIT v_cmp writer: completion-buffer A[n] overrides standard latency
+        # VCC (r=106) bypasses the LIT completion buffer — HW exp_chain [56] cndmask_b32_e64
+        # reading VCC_LO after a VCC-writing v_cmp_lit uses standard SGPR latency (~+4cy),
+        # not A[VCC] = I+6cy. Applies only to explicit VCC reads (r==106).
+        if r != 106 and r in _cmp_lit_rr:  # LIT v_cmp writer: completion-buffer A[n] overrides standard latency
           issue_cycle = max(issue_cycle, _cmp_lit_rr[r])
         elif r in _swt:
           lat = _CNDMASK_SGPR_LATENCY if (_is_cndmask_nonvcc and r == cond_sgpr) else _SGPR_LATENCY
@@ -808,6 +822,11 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
       # Track per-bank write time for inter-VOPD bank port pressure (Seb-V write-commit 1cy delay).
       if isinstance(vgpr_w_regs, (tuple, list)) and vgpr_w_regs:
         for r in vgpr_w_regs: valu[i].set_bank_vopd_write_time(r & 3, issue_cycle)
+      # VOPD_LIT between depctr and cmp_lit-chain drains the scalar-pipe phase offset:
+      # HW exp_chain chain-4 ([48] depctr → [50-51] VOPD_LIT → [52+] cmp_lit) has no +3
+      # offset on A[0], while chain-3 ([27] depctr → [28] plain VOPD → [29+] cmp_lit) does.
+      # `phase_shift_armed` stays set so GAP=1 still applies once cmp_lit reactivates it.
+      if is_vopd_lit: sgpr[i].set_next_cmp_lit_phase_offset(0)
 
     # Track consecutive single-issue (non-VOPD non-trans) VALU run-length for dual-issue ramp (Seb-V).
     # VOPD after a chain of singles needs extra cycles to ramp the dual-issue pipeline.
@@ -873,6 +892,11 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
       if _phase_offset > 0:
         sgpr[i].set_next_cmp_lit_phase_offset(0)
         sgpr[i].set_in_phase_shifted_chain(True)  # mark chain as post-depctr for VOPD-warmup rule
+      # phase_shift_armed preserves GAP=1 across a waitcnt drain that absorbed the offset
+      # (exp_chain chain-2 [53-57]). Fire regardless of VCC/non-VCC, consume on first cmp_lit.
+      if sgpr[i].phase_shift_armed:
+        sgpr[i].set_phase_shift_armed(False)
+        sgpr[i].set_in_phase_shifted_chain(True)
       W = issue_cycle + _CMP_LIT_WB_LATENCY
       prev_C = sgpr[i].cmp_lit_last_commit
       # Phase-shifted chains use COMMIT_GAP=1 (HW exp_chain [35],[36],[58] show subsequent

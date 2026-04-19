@@ -40,6 +40,11 @@ class SgprScoreboard:
     # Stays True through subsequent cmp_lit + cndmask-nonvcc issues, resets on any other
     # VALU (including VOPD) or drain. Used to gate the VOPD-after-cndmask-chain +2cy rule.
     self._in_phase_shifted_chain: bool = False
+    # `phase_shift_armed`: set alongside `next_cmp_lit_phase_offset` at depctr. Survives
+    # intervening waitcnt-drain (which clears the phase_offset) so a later cmp_lit still
+    # activates `in_phase_shifted_chain` (GAP=1) even when the offset itself was absorbed
+    # by the drain. Consumed on first cmp_lit issue. Fixes exp_chain chain-2 [53-57].
+    self._phase_shift_armed: bool = False
     # Consecutive-cndmask streak counter. Increments on every cndmask issue, resets on
     # non-cndmask VALU or drain. Used to detect 4th+ cndmask in a chain reading vanilla
     # (non-cmp_lit-rr) SGPR — probe_sgpr_cmps [16] shows +1cy port pressure at streak≥3.
@@ -56,6 +61,10 @@ class SgprScoreboard:
   @property
   def in_phase_shifted_chain(self) -> bool: return self._in_phase_shifted_chain
   def set_in_phase_shifted_chain(self, v: bool) -> None: self._in_phase_shifted_chain = v
+
+  @property
+  def phase_shift_armed(self) -> bool: return self._phase_shift_armed
+  def set_phase_shift_armed(self, v: bool) -> None: self._phase_shift_armed = v
 
   @property
   def cndmask_streak(self) -> int: return self._cndmask_streak
