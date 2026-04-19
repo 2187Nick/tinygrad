@@ -269,6 +269,7 @@ if os.environ.get("MICROBENCH"):
   import extra.sqtt.rgp.batch_b_vgpr_sgpr   # noqa: F401 — 39 kernels (B.2 VGPR + B.4 SGPR fwd)
   import extra.sqtt.rgp.batch_b_vopd_trans  # noqa: F401 — 55 kernels (B.3 VOPD + B.5 Trans)
   import extra.sqtt.rgp.batch_c_phase       # noqa: F401 — 28 kernels (C.1-C.5 phase-model probes)
+  import extra.sqtt.rgp.batch_d_vopd_tail   # noqa: F401 — 18 kernels (D.1-D.3 VOPD→non-VOPD tails)
   # Kernels that crash under PYTHON_REMU (compare-only skip; HW capture OK).
   _MB_SKIP = set()
   for _mb_name in MICROBENCHES:
