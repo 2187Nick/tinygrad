@@ -77,6 +77,10 @@ class VAluPipe:
   def last_vopd_issue(self) -> int: return self._last_vopd_issue
   def set_last_vopd_issue(self, cycle: int) -> None: self._last_vopd_issue = cycle
 
+  @property
+  def last_vopd_writes(self) -> frozenset: return getattr(self, '_last_vopd_writes', frozenset())
+  def set_last_vopd_writes(self, regs: frozenset) -> None: self._last_vopd_writes = regs
+
   def bank_vopd_write_time(self) -> list[int]:
     """Return the raw 4-element VOPD bank-write-time list (caller may read/write index)."""
     return self._bank_vopd_write_time

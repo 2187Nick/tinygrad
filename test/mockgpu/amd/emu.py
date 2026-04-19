@@ -681,7 +681,15 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
       # regardless of producer VOPD's pipe_avail. HW mb_vopd_dualmov_{sgpr_pair,sgpr_chain_n4,
       # lit_pair,all_lit_chain_n4} and mix variants all show 1cy unanimous (16/16 waves).
       _vopd_mov_only = kwargs.get('vopd_mov_only', False)
+      # Same-write-set bypass: a self-fwd VOPD following another self-fwd VOPD that wrote
+      # the SAME VGPR set reuses the pipe slot at 1cy — the write-back-settling path was
+      # already primed (HW mb_vopd_bank_conflict_{src,dst}).
+      _curr_writes_vopd = frozenset(vgpr_w_regs) if isinstance(vgpr_w_regs, (tuple, list)) else frozenset()
+      _same_write_set = (valu[i].last_vopd_issue >= 0 and _curr_writes_vopd
+                         and _curr_writes_vopd == valu[i].last_vopd_writes)
       if _vopd_mov_only and valu[i].last_vopd_issue >= 0:
+        issue_cycle = max(issue_cycle, valu[i].last_vopd_issue + 1)
+      elif _same_write_set:
         issue_cycle = max(issue_cycle, valu[i].last_vopd_issue + 1)
       else:
         issue_cycle = max(issue_cycle, valu[i].vopd_pipe_avail)
@@ -846,12 +854,20 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
     if is_vopd:
       _vopd_selffwd = (isinstance(vgpr_r_regs, (tuple, list)) and isinstance(vgpr_w_regs, (tuple, list))
                        and bool(set(vgpr_r_regs) & set(vgpr_w_regs)))
+      # Same-write-set bypass: when a self-fwd VOPD writes the SAME VGPRs as the previous
+      # VOPD, the pipe slot is reused and the self-fwd 4cy cost isn't re-paid. HW
+      # mb_vopd_bank_conflict_{src,dst} confirms 1cy for consecutive self-fwd VOPDs
+      # writing v[4],v[5],v[4],v[5]... whereas exp_chain [16-17] (self-fwd writing
+      # DIFFERENT VGPRs v[0,1] then v[2,3]) measures 4cy.
+      _curr_writes = frozenset(vgpr_w_regs) if isinstance(vgpr_w_regs, (tuple, list)) else frozenset()
+      _same_write_set = _vopd_selffwd and _curr_writes and _curr_writes == valu[i].last_vopd_writes
       if is_vopd_lit: _pipe_gap = 1
       elif _vopd_paid_phase_warmup: _pipe_gap = 2
-      elif _vopd_selffwd: _pipe_gap = _VOPD_PIPE_CYCLES
-      else: _pipe_gap = 1  # non-self-fwd VOPD chains at 1cy (HW confirmed by Batch D)
+      elif _vopd_selffwd and not _same_write_set: _pipe_gap = _VOPD_PIPE_CYCLES
+      else: _pipe_gap = 1  # non-self-fwd OR same-write-set VOPD chains at 1cy (HW Batch D + bank_conflict)
       valu[i].set_vopd_pipe_avail(issue_cycle + _pipe_gap)
       valu[i].set_last_vopd_issue(issue_cycle)
+      valu[i].set_last_vopd_writes(_curr_writes)
       # Track per-bank write time for inter-VOPD bank port pressure (Seb-V write-commit 1cy delay).
       if isinstance(vgpr_w_regs, (tuple, list)) and vgpr_w_regs:
         for r in vgpr_w_regs: valu[i].set_bank_vopd_write_time(r & 3, issue_cycle)
