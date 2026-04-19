@@ -7,7 +7,7 @@ $1,000 bounty: Make tinygrad's software GPU emulator produce cycle-accurate inst
 
 ### Current state:
 - **Reference: 339/340 exact (99.7%), 340/340 ±2 (100.0%)** (+2 exact from 337)
-- **Microbench (A+B+C+D, 318 kernels): 41072/44126 exact (93.1%), 42724/44126 ±2 (96.8%)** (+4230 exact from 36842)
+- **Microbench (A+B+C+D, 318 kernels): 41184/44126 exact (93.3%), 42724/44126 ±2 (96.8%)** (+4342 exact from 36842)
 - All 8 bounty tests still pass.
 
 ### What landed this continuation session
@@ -29,6 +29,9 @@ $1,000 bounty: Make tinygrad's software GPU emulator produce cycle-accurate inst
 5. **Remove VOPD bank-port rule entirely** (commit `9e061f4d6`) — +96 microbench exact
    - Subsequent evidence (mb_vopd_chain_n4_raw) showed even real-RAW VOPD chains at 1cy.
    - The bank-port rule had no confirming HW case; removed it.
+6. **VOPD MOV-only SGPR latency=2** (commit `27eaeeeb2`) — +112 microbench exact
+   - HW mb_vopd_dualmov_sgpr_{pair,chain_n4} shows VOPD MOV reads SGPRs at ~2cy after
+     the writer, not the standard 4cy. The decoder gathers operands via a late stage.
 
 ### Microbench gap breakdown (what's left)
 
