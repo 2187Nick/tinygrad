@@ -6,9 +6,27 @@ $1,000 bounty: Make tinygrad's software GPU emulator produce cycle-accurate inst
 ## 2026-04-19 — Reference 99.7% + Microbench +4230 exact (session continuation)
 
 ### Current state:
-- **Reference: 339/340 exact (99.7%), 340/340 ±2 (100.0%)** (+2 exact from 337)
-- **Microbench (A+B+C+D, 318 kernels): 41456/44126 exact (93.9%), 42836/44126 ±2 (97.1%)** (+4614 exact from 36842)
+- **Reference MODAL: 339/340 exact (99.7%), 340/340 ±2 (100.0%)** (+2 from 337)
+- **Reference strict (MODAL=0): 327/340 exact (96.2%)** (+8 from 319)
+- **Microbench MODAL: 41458/44126 exact (94.0%), 42836/44126 ±2 (97.1%)** (+4616 from 36842)
+- **Microbench strict: 35293/44126 exact (80.0%)** (+1246 from 34047)
 - All 8 bounty tests still pass.
+
+### Wave-variance (stochastic scheduler) — Phase 0 & 1 landed
+
+See `extra/sqtt/STOCHASTIC_SCHEDULER_PLAN.md` for the full design.
+
+- **Phase 0 (measurement)**: `analyze_wave_variance.py` classifies all HW
+  per-wave dt variance. 963 variant tokens across 269 captures, 89%
+  tractable (BIMODAL / CLUSTERED / LINEAR), 10% CHAOTIC. Dominant pattern:
+  "wave 0 wins arbitration, wave N pays" at contention points.
+- **Phase 1 (first rule)**: per-wave `s_cbranch_scc` split — wave 0 issues
+  -1cy early, wave 1+ pays +1cy. Calibrated against HW probe_branch_cost
+  W0=8, W1=10 directly. Commit `19d7f151d`. Result: +1246 strict microbench,
+  +8 strict reference, MODAL preserved.
+
+Next sessions: extend same per-wave pattern to VMEM store bypass and
+VGPR RAW dispatch (needs chain-length-aware gate — docs in plan).
 
 ### What landed this continuation session
 
