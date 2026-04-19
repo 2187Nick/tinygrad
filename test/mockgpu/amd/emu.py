@@ -596,6 +596,7 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
     if _is_trans:
       issue_cycle = max(issue_cycle, trans[i].pipe_avail)
     # Enforce VOPD dual-issue occupancy: consecutive VOPDs need spacing
+    _vopd_paid_phase_warmup = False  # tracks whether this VOPD paid the +2cy phase-warmup (for pair-follow-up)
     if is_vopd:
       issue_cycle = max(issue_cycle, valu[i].vopd_pipe_avail)
       # VOPD-after-phase-shifted-cndmask-chain +2cy: HW exp_chain [37], [61] show VOPD
@@ -604,6 +605,7 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
       # false-positives on [16], [47] where the chain is not post-depctr.
       if sgpr[i].in_phase_shifted_chain:
         issue_cycle += 2
+        _vopd_paid_phase_warmup = True
       # VGPR bank port pressure (Seb-V): after a VOPD, next VOPD within _VOPD_PIPE_CYCLES window
       # gets +1cy if it reads a bank the previous VOPD wrote (1cy bank-cache commit delay).
       if not is_vopd_lit and valu[i].last_vopd_issue >= 0 and issue_cycle - valu[i].last_vopd_issue <= _VOPD_PIPE_CYCLES:
@@ -745,8 +747,13 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
 
     # Track VOPD pipeline occupancy: next VOPD must wait for the dual-issue slot
     if is_vopd:
-      # VOPD_LIT → VOPD_LIT pipelines at 1cy; VOPD→VOPD uses full _VOPD_PIPE_CYCLES
-      valu[i].set_vopd_pipe_avail(issue_cycle + (1 if is_vopd_lit else _VOPD_PIPE_CYCLES))
+      # VOPD_LIT → VOPD_LIT pipelines at 1cy; VOPD→VOPD uses full _VOPD_PIPE_CYCLES.
+      # If this VOPD paid the phase-warmup (+2cy), the next VOPD in the pair only waits 2cy
+      # (HW exp_chain [37]→[38] shows dt=2 after a phase-warmed VOPD, not the full 4cy).
+      if is_vopd_lit: _pipe_gap = 1
+      elif _vopd_paid_phase_warmup: _pipe_gap = 2
+      else: _pipe_gap = _VOPD_PIPE_CYCLES
+      valu[i].set_vopd_pipe_avail(issue_cycle + _pipe_gap)
       valu[i].set_last_vopd_issue(issue_cycle)
       # Track per-bank write time for inter-VOPD bank port pressure (Seb-V write-commit 1cy delay).
       if isinstance(vgpr_w_regs, (tuple, list)) and vgpr_w_regs:
@@ -811,7 +818,11 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
         sgpr[i].set_in_phase_shifted_chain(True)  # mark chain as post-depctr for VOPD-warmup rule
       W = issue_cycle + _CMP_LIT_WB_LATENCY
       prev_C = sgpr[i].cmp_lit_last_commit
-      C = max(W, prev_C + _SGPR_COMMIT_GAP) if prev_C else W
+      # Phase-shifted chains use COMMIT_GAP=1 (HW exp_chain [35],[36],[58] show subsequent
+      # cndmask reads pipeline at 1cy dt not 2cy — the scalar-pipe phase allows tighter
+      # commit-buffer packing). Non-shifted chains keep the standard GAP=2.
+      _gap = 1 if sgpr[i].in_phase_shifted_chain else _SGPR_COMMIT_GAP
+      C = max(W, prev_C + _gap) if prev_C else W
       C += _phase_offset  # phase shift lifts C uniformly for this chain entry
       A = C + 1
       sgpr[i].set_cmp_lit_last_commit(C)
