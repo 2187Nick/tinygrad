@@ -37,6 +37,10 @@ class VAluPipe:
       break this cluster — HW `where` kernel [18] shows cmp-interleaved
       cndmask writes feed a subsequent b128 store at `deadline` (no
       width_extra, no scatter +1). Any non-cndmask non-VOPC VALU resets.
+    - `last_cndmask_issue`: issue cycle of the most recent cndmask VALU
+      (-1000 init). Used by the phase-shifted-chain VOPD floor rule:
+      post-depctr VOPD after a cndmask chain pipelines no sooner than
+      last_cndmask_issue + 3 (HW exp_chain [37], [61]).
     - `vgpr_ready[reg]`: VGPR readiness scoreboard (reg → cycle when
       result is available).
     - `vgpr_slow_fresh_until[reg]`: VGPR slow-freshness window end —
@@ -54,6 +58,7 @@ class VAluPipe:
     self._consecutive_selffwd_vgprs = 0
     self._consecutive_vgprs_written = 0
     self._cndmask_cluster_vgprs = 0
+    self._last_cndmask_issue = -1000
     self._vgpr_ready: dict[int, int] = {}
     self._vgpr_slow_fresh_until: dict[int, int] = {}
     self._vgpr_write_time: dict[int, int] = {}
@@ -99,6 +104,10 @@ class VAluPipe:
   def cndmask_cluster_vgprs(self) -> int: return self._cndmask_cluster_vgprs
   def set_cndmask_cluster_vgprs(self, v: int) -> None: self._cndmask_cluster_vgprs = v
   def add_cndmask_cluster_vgprs(self, v: int) -> None: self._cndmask_cluster_vgprs += v
+
+  @property
+  def last_cndmask_issue(self) -> int: return self._last_cndmask_issue
+  def set_last_cndmask_issue(self, cycle: int) -> None: self._last_cndmask_issue = cycle
 
   # ── VGPR scoreboard (ready / slow-fresh / write-time) ──────────────────────
   def vgpr_ready_map(self) -> dict[int, int]:

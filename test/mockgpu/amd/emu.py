@@ -636,12 +636,14 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
         issue_cycle = max(issue_cycle, valu[i].last_vopd_issue + 1)
       else:
         issue_cycle = max(issue_cycle, valu[i].vopd_pipe_avail)
-      # VOPD-after-phase-shifted-cndmask-chain +2cy: HW exp_chain [37], [61] show VOPD
-      # following a cndmask chain that consumed a phase-shifted cmp_lit chain pays +2cy
-      # dual-issue warm-up. Only fires when in_phase_shifted_chain is active to avoid
-      # false-positives on [16], [47] where the chain is not post-depctr.
+      # VOPD-after-phase-shifted-cndmask-chain floor: HW exp_chain [37], [61] show VOPD
+      # following a cndmask chain that consumed a phase-shifted cmp_lit chain pipelines
+      # no sooner than last_cndmask_issue + 3. Only fires when in_phase_shifted_chain is
+      # active (post-depctr) — non-phase-shifted chains ([16], [47]) pipeline tighter.
+      # paid_warmup is set regardless of whether the floor bumped: the next VOPD uses
+      # pipe_gap=2 (warmup-tight) instead of 4 (self-fwd), matching HW [38] dt=2.
       if sgpr[i].in_phase_shifted_chain:
-        issue_cycle += 2
+        issue_cycle = max(issue_cycle, valu[i].last_cndmask_issue + 3)
         _vopd_paid_phase_warmup = True
       # VGPR bank port pressure (Seb-V): after a VOPD, next VOPD within _VOPD_PIPE_CYCLES window
       # gets +1cy if it reads a bank the previous VOPD wrote (1cy bank-cache commit delay).
@@ -836,7 +838,9 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
       valu[i].add_consecutive_vgprs_written(n_written)
       # Cndmask cluster: accumulate on cndmask VGPR writes; any non-cndmask non-VOPC VALU
       # that writes a VGPR breaks the cluster. VOPCs are kept (handled in elif below).
-      if is_cndmask: valu[i].add_cndmask_cluster_vgprs(n_written)
+      if is_cndmask:
+        valu[i].add_cndmask_cluster_vgprs(n_written)
+        valu[i].set_last_cndmask_issue(issue_cycle)
       else: valu[i].set_cndmask_cluster_vgprs(0)
     elif cat == 'valu':  # VOPC/VOP3_SDST — no VGPR writes, breaks forwarding chain
       valu[i].set_consecutive_selffwd_vgprs(0)
