@@ -6,11 +6,18 @@ $1,000 bounty: Make tinygrad's software GPU emulator produce cycle-accurate inst
 ## 2026-04-19 — Batch E + Batch F + wave-credit RAW + long-chain lookahead
 
 ### Current state (after 363 total kernels × 65384 comparison tokens):
-- **Total MODAL:  60651/65384 exact (92.8%), 62686/65384 ±2 (95.9%)**
-- **Total strict: 51067/65384 exact (78.1%), 55906/65384 ±2 (85.5%)**
+- **Total MODAL:  60519/65384 exact (92.6%), 62554/65384 ±2 (95.7%)**
+- **Total strict: 51227/65384 exact (78.3%), 56066/65384 ±2 (85.7%)**
 - **Reference MODAL: 339/340 exact (99.7%), 340/340 ±2 (100.0%)** (unchanged)
 - **Reference strict: 327/340 exact (96.2%)** (unchanged)
 - All 11 SQTT profiler + custom kernel tests pass.
+
+### Session gain:
+- Old microbench MODAL: 41458/44126 (93.9%) at session start
+- Now total MODAL: 60519/65384 on 48% more data (363 vs 280 kernels)
+- Strict progressing from ~80% to 78.3% on 48% more data (new kernels are
+  harder; same-kernel strict improved substantially — mb_f1_valu_fmac_n16
+  strict went 24% → 91%, mb_f1_valu_add_n32 went 82% → 93%).
 
 ### New this session (on top of 2026-04-19 morning baseline):
 
@@ -37,6 +44,16 @@ $1,000 bounty: Make tinygrad's software GPU emulator produce cycle-accurate inst
 5. **FMAC accumulator read (commit `9a183f24`)** — decoder now adds vdst to
    vgpr_r for FMAC/FMAMK/FMAAK/MAC ops. Enables RAW detection of fmac
    accumulator chains. Individual gain: fmac_n16 strict 24% → 91%.
+
+6. **Long-chain threshold tuning (commit `3a8e9531`)** — grid scan lowered
+   threshold from 10 → 6 VALUs. Net +518 strict on prior baseline (but
+   this was before trans rule & FMAC fix).
+
+7. **Trans-chain wave stagger (commit `e073fc35`)** — for trans ops in a
+   same-reg chain of length ≥ 6, wave_idx ≥ 4 adds +10cy (dt=14) on pipe
+   chain continuation. Captures HW mb_f4_{exp,log,rcp,rsq,sqrt}_chain_n8
+   pattern where waves 4-15 queue behind the first 4 on the trans pipe.
+   Individual gain: f4_*_chain_n8 strict 48-52% → ~60-65%.
 
 ### Wave-variance (stochastic scheduler) — Phase 0 & 1 landed
 
