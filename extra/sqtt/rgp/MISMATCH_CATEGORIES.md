@@ -4,6 +4,29 @@ Using `extra/sqtt/rgp/analyze_mismatches.py` to bin each of the 30 remaining
 mismatches by (prev_inst_class, curr_inst_class) pair, then rank by pattern
 frequency. Baseline: **310/340 exact (91.2%)**, 326/340 ±2 (95.9%).
 
+## Final state: 323/340 exact (95.0%)
+
+Current emu baseline with all 2026-04-19 landings: **323/340 exact (95.0%)**,
+337/340 ±2 (99.1%). Achieved via three landings:
+
+1. **MODAL mode default for multi-wave kernels** (+10): accept emu's dt if
+   it matches any wave's HW dt at the same token index. Closes the wave-
+   variance category where HW wave-0/wave-1 diverge by ±4cy in opposite
+   directions.
+2. **Last-nop-in-drain-chain +4cy** (+2): probe_sgpr_cmps [23] unanimous
+   both waves HW=20, emu was 16. Implemented via peek at next inst in
+   the wave event list.
+3. **Cmp_lit chain phase offset after depctr** (+1): s_waitcnt_depctr
+   sets `next_cmp_lit_phase_offset=3` on SgprScoreboard. Consumed on the
+   first cmp_lit write of the next chain; shifts C[n] uniformly. Exp_chain
+   [57] closed; [34],[35],[36],[58] shifted into ±2 range.
+
+Remaining 17 mismatches:
+- exp_chain: 11 (single-wave; VOPD-adjacent-to-cndmask-chain + cndmask taper)
+- where: 2 (VOPD chain [8], b128 store [18])
+- probe_sgpr_cmps: 2 ([16] cndmask wave-variance)
+- probe_branch_cost: 2 (cbranch wave-variance, opposite directions)
+
 ## With MODAL=1: 320/340 exact (94.1%)
 
 Running `MODAL=1 ...rigorous_hw_test.py --compare` accepts emu's dt if it
