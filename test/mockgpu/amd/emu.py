@@ -598,7 +598,15 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
     # Enforce VOPD dual-issue occupancy: consecutive VOPDs need spacing
     _vopd_paid_phase_warmup = False  # tracks whether this VOPD paid the +2cy phase-warmup (for pair-follow-up)
     if is_vopd:
-      issue_cycle = max(issue_cycle, valu[i].vopd_pipe_avail)
+      # Batch C finding: VOPD MOV-only (V_DUAL_MOV_B32 on both lanes) doesn't actually use the
+      # vsrc1 slots — the encoding slot is dummy-filled by the assembler. These pipeline at 1cy
+      # regardless of producer VOPD's pipe_avail. HW mb_vopd_dualmov_{sgpr_pair,sgpr_chain_n4,
+      # lit_pair,all_lit_chain_n4} and mix variants all show 1cy unanimous (16/16 waves).
+      _vopd_mov_only = kwargs.get('vopd_mov_only', False)
+      if _vopd_mov_only and valu[i].last_vopd_issue >= 0:
+        issue_cycle = max(issue_cycle, valu[i].last_vopd_issue + 1)
+      else:
+        issue_cycle = max(issue_cycle, valu[i].vopd_pipe_avail)
       # VOPD-after-phase-shifted-cndmask-chain +2cy: HW exp_chain [37], [61] show VOPD
       # following a cndmask chain that consumed a phase-shifted cmp_lit chain pays +2cy
       # dual-issue warm-up. Only fires when in_phase_shifted_chain is active to avoid
@@ -608,7 +616,9 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
         _vopd_paid_phase_warmup = True
       # VGPR bank port pressure (Seb-V): after a VOPD, next VOPD within _VOPD_PIPE_CYCLES window
       # gets +1cy if it reads a bank the previous VOPD wrote (1cy bank-cache commit delay).
-      if not is_vopd_lit and valu[i].last_vopd_issue >= 0 and issue_cycle - valu[i].last_vopd_issue <= _VOPD_PIPE_CYCLES:
+      # Skipped for MOV-only VOPDs — their vsrc1 reads are dummies (decoder artifact) so bank
+      # conflict doesn't apply. HW where [8] confirms: VOPD(MOV) after VOPD(MOV) = 1cy.
+      if not is_vopd_lit and not _vopd_mov_only and valu[i].last_vopd_issue >= 0 and issue_cycle - valu[i].last_vopd_issue <= _VOPD_PIPE_CYCLES:
         read_banks = {r & 3 for r in (vgpr_r_regs or ())}
         _bank_wt = valu[i].bank_vopd_write_time()
         for b in read_banks:
@@ -1095,9 +1105,17 @@ def _init_sqtt_encoder(entry_pc: int):
           if o >= 256: vgpr_r.append(o - 256)
       reg_info = (is_vopc, tuple(sgpr_w), tuple(sgpr_r), tuple(vgpr_w), tuple(vgpr_r), issubclass(inst_type, _VOPD), cond_sgpr,
                   issubclass(inst_type, _VOPD_LIT), issubclass(inst_type, _CMP_LIT))
-      if op is None: events.append((VALUINST, {'wave': w}, 'valu', reg_info))
+      # For VOPD: detect "MOV-only" pairs (V_DUAL_MOV_B32 on both lanes). These don't use the vsrc1
+      # lanes even though the decoder reports v[0] there — the encoding slot is filled by the assembler
+      # with a dummy value. HW (Batch C mb_vopd_dualmov_sgpr_*) shows these pipeline at 1cy.
+      _kw_extras = {}
+      if issubclass(inst_type, _VOPD):
+        opx_name = inst.opx.name if hasattr(inst, 'opx') and hasattr(inst.opx, 'name') else ""
+        opy_name = inst.opy.name if hasattr(inst, 'opy') and hasattr(inst.opy, 'name') else ""
+        _kw_extras['vopd_mov_only'] = opx_name == 'V_DUAL_MOV_B32' and opy_name == 'V_DUAL_MOV_B32'
+      if op is None: events.append((VALUINST, {'wave': w, **_kw_extras}, 'valu', reg_info))
       else:
-        kw = {'wave': w, 'op': op}
+        kw = {'wave': w, 'op': op, **_kw_extras}
         if op == InstOp.VALUT_4: kw['trans_name'] = op_name
         events.append((INST, kw, 'valu', reg_info))
       return
@@ -1171,7 +1189,7 @@ def _init_sqtt_encoder(entry_pc: int):
     prev_time = 0
     for ts, _, pkt_cls, kwargs in timed:
       delta = max(ts - prev_time, 0)
-      enc_kwargs = {k: v for k, v in kwargs.items() if k != 'trans_name'}
+      enc_kwargs = {k: v for k, v in kwargs.items() if k not in ('trans_name', 'vopd_mov_only')}
       _emit_with_delta(nibbles, pkt_cls, delta=delta, **enc_kwargs)
       prev_time = max(ts, prev_time)  # actual encoded time; clamped deltas (delta=0) don't advance time
     # Pad to 32-byte alignment
