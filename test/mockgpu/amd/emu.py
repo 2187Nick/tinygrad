@@ -343,6 +343,7 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
         timed.append((stall_until, wid, pkt_cls, kwargs))
         ready[i] = stall_until + 1  # waitcnt occupies the stall_until cycle; next issue at +1
         ib[i].set_drain(stall_until)  # nop after waitcnt starts at stall_until (no +1 gap)
+        scal[i].mark_drain()  # first s_cbranch_scc after waitcnt drain pays +1cy (probe_branch_cost [7])
         pc[i] += 1
         # Prune completed ops
         lds.prune(i, stall_until)
@@ -576,6 +577,12 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
         issue_cycle = max(issue_cycle, scal[i].exec_write_time + _EXEC_WRITE_LATENCY)
       if reads_scc:
         issue_cycle = max(issue_cycle, scal[i].scc_write_time + 2)
+        # First s_cbranch_scc after a waitcnt/depctr/nop drain pays +1cy warm-up.
+        # HW probe_branch_cost [7] varies {8,10} across waves; landing at 10 matches MODAL
+        # (accepts any HW wave dt). Later branches without intervening drain are stable at 9.
+        if scal[i].first_branch_after_drain:
+          issue_cycle += 1
+          scal[i].consume_drain_branch()
 
     # VGPR readiness: HW interlock enforces RAW deps on VALU-written VGPRs regardless of s_delay_alu coverage
     if cat == 'valu' and vgpr_r_regs:

@@ -33,13 +33,18 @@ class ScalarPipe:
     self._c = const
     self._scc_write_time: int = 0
     self._exec_write_time: int = 0
+    self._first_branch_after_drain: bool = False
 
   # ── Read-only accessors ────────────────────────────────────────────────────
   @property
   def scc_write_time(self) -> int: return self._scc_write_time
   @property
   def exec_write_time(self) -> int: return self._exec_write_time
+  @property
+  def first_branch_after_drain(self) -> bool: return self._first_branch_after_drain
 
   # ── Mutations routed through methods so future steps can swap logic ────────
   def set_scc_write_time(self, cycle: int) -> None: self._scc_write_time = cycle
   def set_exec_write_time(self, cycle: int) -> None: self._exec_write_time = cycle
+  def mark_drain(self) -> None: self._first_branch_after_drain = True
+  def consume_drain_branch(self) -> None: self._first_branch_after_drain = False
