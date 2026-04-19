@@ -3,9 +3,59 @@
 ## Bounty Goal
 $1,000 bounty: Make tinygrad's software GPU emulator produce cycle-accurate instruction timing matching real AMD 7900 XTX hardware, validated via SQTT (Shader Queue Thread Trace).
 
-## 2026-04-19 — Handoff to 7900 XTX Server
+## 2026-04-19 — Reference 99.7% + Microbench +4230 exact (session continuation)
 
-### Current state: **337/340 exact (99.1%), 340/340 ±2 (100.0%)**
+### Current state:
+- **Reference: 339/340 exact (99.7%), 340/340 ±2 (100.0%)** (+2 exact from 337)
+- **Microbench (A+B+C+D, 318 kernels): 41072/44126 exact (93.1%), 42724/44126 ±2 (96.8%)** (+4230 exact from 36842)
+- All 8 bounty tests still pass.
+
+### What landed this continuation session
+
+1. **exp_chain [56]+[57] 3-part fix** (commit `2b4675daf`) — +2 reference exact
+   - VCC-skip in cmp_lit completion buffer: r=106 uses standard SGPR latency, not A[VCC]=I+6
+   - `phase_shift_armed` state: survives waitcnt drain to keep GAP=1 for chain-2
+   - VOPD_LIT drains the post-depctr phase offset: chain-4 cmp_lits start fresh because
+     the VOPD_LIT between depctr [48] and cmp_lit [52] consumes the literal scalar-pipe slot
+2. **Inter-wave VMEM_RD bypass** (commit `cf2c4cd2a`) — +3202 microbench exact
+   - Mirrors the store bypass for reads: n ≥ 4 peer waves → 22→18cy forwarding
+   - HW 2-wave probe_branch_cost measures 22cy; 16+-wave microbenches measure 18cy
+3. **Remove VGPR RAW dispatch stall** (commit `2ed0cce38`) — +112 microbench exact
+   - SQTT stamps at DISPATCH, not completion. HW mb_valu_add_n4 back-to-back
+     v_add_f32(v[1],1.0,v[1]) measures dt=1cy. Compiler s_delay_alu still stalls explicitly.
+4. **Gate VOPD bank-port rule on actual RAW** (commit `f4d271293`) — +818 microbench exact
+   - The +1cy "read bank collides with prev write bank" rule fired for truly independent
+     VOPDs too. HW mb_vopd_indep_n4 measures 1cy between disjoint-VGPR VOPDs.
+5. **Remove VOPD bank-port rule entirely** (commit `9e061f4d6`) — +96 microbench exact
+   - Subsequent evidence (mb_vopd_chain_n4_raw) showed even real-RAW VOPD chains at 1cy.
+   - The bank-port rule had no confirming HW case; removed it.
+
+### Microbench gap breakdown (what's left)
+
+Remaining 3054 microbench exact-mismatches (6.9%). Top 15 kernels by missing count:
+
+| Kernel | Missing | Total |
+|---|---|---|
+| mb_vcmp_interleave_cndmask | 80 | 249 |
+| mb_vmem_store_b32_chain_n4 | 58 | 256 |
+| mb_vopd_dualmov_sgpr_pair | 48 | 157 |
+| mb_vopd_dualmov_sgpr_chain_n4 | 48 | 186 |
+| mb_snop_mixed_values | 48 | 144 |
+| mb_c5_b128_store_after_cndmask | 48 | 357 |
+| mb_c4_depctr_chain_n3 | 48 | 312 |
+| mb_c2_depctr_cmp3_cnd3_vopd | 48 | 327 |
+| mb_waitcnt_empty_barrier / depctr_4095 | 32 each | 112 |
+| (lots of 32-missing kernels in VOPD/VCMP/SNOP families) | 32 | varies |
+
+Most remaining are:
+- **Interleaved cmp→cndmask bypass (1cy, not completion-buffer 6cy)** — mb_vcmp_interleave_cndmask
+- **VOPD MOV-only first-in-chain (1cy, not 2cy)** — VOPD MOV-only fast-path needs widening to apply on first VOPD too
+- **Store timing context-sensitivity** — HW varies 17/20/22 based on producer pattern
+- **Wave-variance** — some HW waves land at dt=1 (matches EMU), others at 3/5; MODAL catches it, strict doesn't
+
+### Prior state (end of overnight session — 2026-04-19 first commits)
+
+**337/340 exact (99.1%), 340/340 ±2 (100.0%)**
 
 All 10 reference kernels at 100% ±2. Only 3 exact mismatches remain — all in
 exp_chain, all within ±2cy of HW. 9 of 10 kernels at 100% exact.
