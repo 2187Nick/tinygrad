@@ -135,4 +135,79 @@ the remaining CHAOTIC patterns:
 ### 2026-04-19 session start
 - Plan doc created. Starting Phase 0 measurement.
 
-(Updates below; newest last.)
+### Phase 0 — Measurement done (analyze_wave_variance.py, STOCHASTIC_FINGERPRINTS.md)
+
+Across 269 HW captures, classified 963 tokens with per-wave variance:
+- **CLUSTERED**: 657 (68.2%) — N≤4 distinct dts per token
+- **BIMODAL**: 143 (14.8%) — two dts, ~50/50 split
+- **CHAOTIC**: 101 (10.5%) — >4 distinct dts, no clean pattern
+- **LINEAR**: 62 (6.4%) — dt increases monotonically with wave_idx
+
+**~89% is tractable** with simple wave-index rules. 10% chaotic needs a full
+arbitration simulator.
+
+Dominant pattern observed: **"wave 0 wins, wave N pays"**. Examples:
+- `probe_branch_cost [7]`: W0=8, W1=10 (±2cy wave arbitration)
+- `mb_sanity_n4 [7-8]`: wave 0-6 mostly dt=1, wave 7+ at dt=5
+- `mb_vcmp_cndmask_k8 [5]`: wave 0 dt=1, wave 2 dt=23, wave 3 dt=41
+  (each wave's startup grows ~20cy from queueing behind earlier waves)
+
+### Phase 1 — First per-wave rule landed (commit `19d7f151d`)
+
+**s_cbranch_scc after drain split by wave index:**
+- Wave 0: issue -1cy (wins scalar-pipe arbitration slot)
+- Wave 1+: issue +1cy (queued behind wave 0)
+
+Replaces the uniform +1cy warm-up. Calibrated against HW probe_branch_cost
+[7] which shows W0=8, W1=10 directly.
+
+**Impact** (wrt session baseline of 34047 strict / 41456 MODAL):
+- Reference MODAL: 339/340 (unchanged)
+- Reference strict: 319/340 → **327/340 (+8)**
+- Microbench MODAL: 41456 → 41458 (+2)
+- Microbench strict: 34047 → **35293 (+1246)**
+- Bounty tests: 8/8 pass
+
+This validates the approach. Same per-wave split pattern applies to other
+contention points.
+
+### Remaining high-ROI patterns (for future sessions)
+
+Top strict-mode offenders post-Phase 1:
+
+| Kernel | Strict missing | HW pattern |
+|---|---|---|
+| mb_valu_add_n16 | 218 | Long RAW chain: wave 0 dt=1 sustained; waves 1-15 dt=5 sustained (queue contention grows with chain length) |
+| mb_vmem_store_b32_chain_n4 | 123 | Store + interleaved VALU, heavy wave variance in store dt (17-26cy) |
+| mb_vcmp_cndmask_k8 | 88 | Wave-launch startup stagger at [5]: W0=1cy, W1=3cy, W2=23cy, W3=41cy |
+| mb_valu_fmac_n8 / mb_valu_add_n8 | 85 each | Similar to n16 but shorter chains — contention doesn't always saturate |
+
+**Tried & reverted:** Gating the VGPR RAW stall on `i > 0` (wave 0 gets bypass,
+wave 1+ pays 5cy). Works for mb_valu_add_n16 (long chain) but regresses
+mb_valu_add_n4 where HW shows ALL waves at dt=1 (short chain doesn't saturate
+the queue). Need chain-length-aware model — not a simple per-wave binary.
+
+### Architecture sketch for the next ~20% gap
+
+1. **Per-wave arbitration credits model** in `_simulate_sq_timing`:
+   - Each wave gets a `vgpr_forward_credit` that starts at N and drains with
+     each VALU issue, refills via pipeline flush. When credit hits 0, wave
+     stalls to 5cy latency; while credit > 0, wave bypasses at 1cy.
+   - Wave 0 always starts with full credit because it issues first.
+   - Later waves start with reduced credit proportional to their launch delay.
+2. **VMEM store wave-partitioned bypass** — replace the current binary
+   `_vmem_wr_bypass_active` with a per-wave check: wave 0 always fast (17cy),
+   wave N pays `5 + (wave_idx * stagger)`cy.
+3. **Startup stagger calibration** — add `WAVE_LAUNCH_STAGGER=20` constant
+   modelling the wave-index-proportional post-vmcnt-drain delay observed in
+   mb_vcmp_cndmask_k8 [5].
+
+Estimated potential gain from items 1+2+3: another +2000-3000 strict exact.
+
+### Summary of what this session achieved
+
+- Built classifier tool (`analyze_wave_variance.py`)
+- Produced HW fingerprint report (`STOCHASTIC_FINGERPRINTS.md`)
+- Landed first per-wave rule: +1246 strict microbench, +8 strict reference
+- Identified the architectural approach for the remaining ~90% of variance
+- Documented the next concrete steps for future sessions

@@ -666,10 +666,7 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
     # VGPR RAW dispatch: SQTT stamps at DISPATCH, not completion. HW back-to-back
     # v_add_f32(v[1],1.0,v[1]) chains measure dt=1cy (mb_valu_add_n4 unanimous). The
     # 5cy result latency is pipeline-internal; operand bypass hands off without an
-    # SQTT-visible stall. Compiler s_delay_alu hints still stall explicitly when
-    # needed — those are applied via `has_delay_alu`/`_resolve_delay` above.
-    # (Prior model forced a 5cy VALU→VALU stall here; that over-counted by 4cy per
-    # instruction in every RAW chain and is the root of ~700 microbench mismatches.)
+    # SQTT-visible stall.
     # Enforce trans ALU pipeline occupancy: trans instructions wait for the trans unit to be free
     _is_trans = cat == 'valu' and pkt_cls is INST and kwargs.get('op') == InstOp.VALUT_4
     # Trans-written VGPR readiness: non-trans VALU must wait for full trans writeback (27/31 cycles)
