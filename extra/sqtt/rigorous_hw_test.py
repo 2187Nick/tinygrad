@@ -384,6 +384,18 @@ def do_compare():
         continue
 
       # Compare deltas — skip DRAM waits (>50 cycles)
+      # In modal mode, emu matches if its dt equals ANY wave's HW dt at the same token index
+      # (emu is deterministic; real HW wave-0/wave-1 often diverge by ±4cy on identical instructions —
+      # see extra/sqtt/rgp/MISMATCH_CATEGORIES.md for the stochastic ceiling discussion.)
+      modal_mode = os.environ.get("MODAL") == "1"
+      hw_dt_at: dict[int, set[int]] = {}
+      if modal_mode:
+        for wk in range(n_common):
+          hwk = hw_traces[hw_waves[wk]]
+          for jj in range(1, min(min_len, len(hwk))):
+            dt = hwk[jj][1] - hwk[jj-1][1]
+            if dt > 50: continue
+            hw_dt_at.setdefault(jj, set()).add(dt)
       exact = within2 = compared = 0
       mismatches = []
       for j in range(min_len):
@@ -391,13 +403,23 @@ def do_compare():
         ed = 0 if j == 0 else emu[j][1] - emu[j-1][1]
         if hd > 50 or ed > 50: continue
         compared += 1
-        if hd == ed:
-          exact += 1; within2 += 1
-        elif abs(hd - ed) <= 2:
-          within2 += 1
-          mismatches.append((j, hd, ed, hw[j][2], hw[j][3] if len(hw[j]) > 3 else ""))
+        if modal_mode:
+          allowed = hw_dt_at.get(j, {hd})
+          if ed in allowed:
+            exact += 1; within2 += 1
+          elif any(abs(ed - x) <= 2 for x in allowed):
+            within2 += 1
+            mismatches.append((j, hd, ed, hw[j][2], hw[j][3] if len(hw[j]) > 3 else ""))
+          else:
+            mismatches.append((j, hd, ed, hw[j][2], hw[j][3] if len(hw[j]) > 3 else ""))
         else:
-          mismatches.append((j, hd, ed, hw[j][2], hw[j][3] if len(hw[j]) > 3 else ""))
+          if hd == ed:
+            exact += 1; within2 += 1
+          elif abs(hd - ed) <= 2:
+            within2 += 1
+            mismatches.append((j, hd, ed, hw[j][2], hw[j][3] if len(hw[j]) > 3 else ""))
+          else:
+            mismatches.append((j, hd, ed, hw[j][2], hw[j][3] if len(hw[j]) > 3 else ""))
 
       k_exact += exact
       k_within2 += within2
