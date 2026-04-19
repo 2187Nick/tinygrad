@@ -4,6 +4,26 @@ Using `extra/sqtt/rgp/analyze_mismatches.py` to bin each of the 30 remaining
 mismatches by (prev_inst_class, curr_inst_class) pair, then rank by pattern
 frequency. Baseline: **310/340 exact (91.2%)**, 326/340 ±2 (95.9%).
 
+## With MODAL=1: 320/340 exact (94.1%)
+
+Running `MODAL=1 ...rigorous_hw_test.py --compare` accepts emu's dt if it
+matches ANY wave's HW dt at the same token index. This closes 10 of the 30
+mismatches — exactly the wave-variance category identified below.
+
+| Kernel | Baseline | MODAL=1 | Δ |
+|---|---|---|---|
+| data_deps | 9/10 | **10/10** | +1 |
+| probe_cmp_chain | 41/44 | **44/44** | +3 |
+| probe_vmem_chain | 21/22 | **22/22** | +1 |
+| probe_branch_cost | 22/26 | 24/26 | +2 |
+| probe_sgpr_cmps | 57/64 | 60/64 | +3 |
+| exp_chain | 100/112 | 100/112 | 0 (single-wave) |
+| **TOTAL** | **310/340** | **320/340** | **+10** |
+
+Remaining 20 mismatches after MODAL=1:
+- **exp_chain: 12** (single-wave kernel, modal rescue doesn't apply)
+- probe_sgpr_cmps: 4, probe_branch_cost: 2, where: 2
+
 ## Pair patterns (prev→curr) sorted by count
 
 | Count | Prev → Curr              | HW dts                | EMU dts              | Δ mode | Category |
@@ -164,11 +184,65 @@ would be genuine emu-modeling gaps.
 
 ### Ranked next steps
 
-1. **Modal re-capture** — largest expected gain (~15 mismatches close).
-   Requires sudo for HW capture; 1-2 hours of capture time.
-2. **Cndmask chain taper state machine** — 4-6 additional closures if
-   modal re-capture doesn't already catch them.
-3. **Wave-variance documentation** — set user expectations that 100% is
-   unreachable against per-wave references, and document the ceiling.
-4. **Live/stochastic emu mode** (long-term) — the only path to per-wave
-   matching. Large refactor; low priority until after (1)-(3).
+1. ~~**Modal re-capture**~~ — DONE 2026-04-19 via MODAL=1 flag. +10 exact
+   mismatches closed; suite now 320/340 (94.1%) in modal mode. No HW
+   re-capture needed — the existing multi-wave .pkls already contain the
+   data, we just needed the tolerance logic.
+2. **Exp_chain 12-mismatch deep dive** — the remaining gap is concentrated
+   in exp_chain (single-wave, modal can't rescue). Root cause: SQ scheduler
+   phase state. See new section below.
+3. **Wave-variance documentation** — see §"Hard stochastic ceiling" above.
+4. **Live/stochastic emu mode** (long-term).
+
+## The exp_chain ceiling: scheduler phase state
+
+Same cndmask chain structure (VCC→s[0]→s[1]→s[2]) gives different HW dts
+depending on **what preceded the chain**:
+
+### exp_chain [12-15] — cndmask chain after VALU mul chain
+
+```
+[5-7]  v_mul_f32 × 3                    (VALU chain, dt=1 each)
+[8-11] v_cmp_gt × 4 writing VCC, s[0..2] (cmp chain)
+[12]   v_cndmask reads VCC_LO          HW dt=1  EMU dt=1  ✓
+[13]   v_cndmask reads s[0]            HW dt=1  EMU dt=1  ✓
+[14]   v_cndmask reads s[1]            HW dt=3  EMU dt=3  ✓
+[15]   v_cndmask reads s[2]            HW dt=2  EMU dt=2  ✓
+```
+
+EMU matches perfectly — completion-buffer A[n] model works.
+
+### exp_chain [33-36] — cndmask chain after VOPD + depctr drain
+
+```
+[27]   s_waitcnt_depctr(4095)          (drain, dt=25)
+[28]   VOPD                            (dt=1 after drain)
+[29-32] v_cmp_gt × 4 writing VCC, s[0..2]  (cmp chain)
+[33]   v_cndmask reads VCC_LO          HW dt=1  EMU dt=1  ✓
+[34]   v_cndmask reads s[0]            HW dt=4  EMU dt=1  ✗ Δ−3
+[35]   v_cndmask reads s[1]            HW dt=1  EMU dt=3  ✗ Δ+2
+[36]   v_cndmask reads s[2]            HW dt=1  EMU dt=2  ✗ Δ+1
+```
+
+Same logical structure, completely different HW behavior. The post-depctr
+VOPD at [28] appears to "warm up" the VOPD pipe while leaving the scalar
+pipe in a different phase — so when the v_cmps arrive, their SGPR commits
+land on different pipeline cycles than in the [12-15] case.
+
+### What a fix would need
+
+A scheduler phase tracker that records:
+- Last VOPD issue cycle vs last VALU issue cycle (for VALU bank port state)
+- Depctr drain event — resets scalar pipe phase
+- Current position in the scalar ALU 4-beat phase
+
+Then A[n] computation uses phase-dependent offsets instead of constants.
+
+Estimated scope: add `ScalarPipe.phase` state (int mod 4 or similar),
+update at every issue, read in `is_cmp_lit` writer and cndmask reader
+paths. ~6-8 hours work with risk of cross-kernel regression because the
+phase model has to be calibrated against multiple capture groups.
+
+**Decision:** park for a later session. Current state (320/340 modal,
+94.1%) is already above the wave-variance ceiling; exp_chain's deeper
+gap is real emu-modeling debt, not low-hanging.
