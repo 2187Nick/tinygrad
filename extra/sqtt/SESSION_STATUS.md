@@ -7,7 +7,7 @@ $1,000 bounty: Make tinygrad's software GPU emulator produce cycle-accurate inst
 
 ### Current state:
 - **Reference: 339/340 exact (99.7%), 340/340 ±2 (100.0%)** (+2 exact from 337)
-- **Microbench (A+B+C+D, 318 kernels): 41184/44126 exact (93.3%), 42724/44126 ±2 (96.8%)** (+4342 exact from 36842)
+- **Microbench (A+B+C+D, 318 kernels): 41456/44126 exact (93.9%), 42836/44126 ±2 (97.1%)** (+4614 exact from 36842)
 - All 8 bounty tests still pass.
 
 ### What landed this continuation session
@@ -32,6 +32,17 @@ $1,000 bounty: Make tinygrad's software GPU emulator produce cycle-accurate inst
 6. **VOPD MOV-only SGPR latency=2** (commit `27eaeeeb2`) — +112 microbench exact
    - HW mb_vopd_dualmov_sgpr_{pair,chain_n4} shows VOPD MOV reads SGPRs at ~2cy after
      the writer, not the standard 4cy. The decoder gathers operands via a late stage.
+7. **Immediate-predecessor SGPR bypass** (commit `c3a9cb2b5`) — +112 microbench exact
+   - HW mb_vcmp_interleave_cndmask measures cmp→cndmask pairs at dt=1 each. When a
+     VALU reads an SGPR written by the immediately-preceding dispatch, HW forwards at
+     +1cy rather than the standard 4cy SGPR latency.
+8. **Same-write-set VOPD bypass** (commit `a585a5d25`) — +32 microbench exact
+   - A self-fwd VOPD following a self-fwd VOPD that wrote the SAME VGPR set reuses the
+     pipe slot at 1cy. HW mb_vopd_bank_conflict_{src,dst} confirms.
+9. **Empty s_waitcnt scalar-pipe overhead +3cy** (commit `6e3fe0fc0`) — +80 microbench exact
+10. **Empty s_waitcnt_depctr overhead +3cy** (commit `acd34e9a4`) — +48 microbench exact
+    - HW mb_waitcnt_empty_barrier / mb_waitcnt_depctr_4095: empty s_waitcnt(_depctr)
+      measures dt=3 from prev VALU, not dt=1. Scalar-pipe decode overhead.
 
 ### Microbench gap breakdown (what's left)
 
