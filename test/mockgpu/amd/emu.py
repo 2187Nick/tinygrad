@@ -656,11 +656,11 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
         issue_cycle = max(issue_cycle, scal[i].exec_write_time + _EXEC_WRITE_LATENCY)
       if reads_scc:
         issue_cycle = max(issue_cycle, scal[i].scc_write_time + 2)
-        # First s_cbranch_scc after a waitcnt/depctr/nop drain pays +1cy warm-up.
-        # HW probe_branch_cost [7] varies {8,10} across waves; landing at 10 matches MODAL
-        # (accepts any HW wave dt). Later branches without intervening drain are stable at 9.
+        # First s_cbranch_scc after a waitcnt/depctr/nop drain: per-wave arbitration split.
+        # HW probe_branch_cost [7] shows W0=8, W1=10 (bimodal). Wave 0 wins the scalar-pipe
+        # slot and issues -1cy early relative to the MODAL-median; wave 1+ pays +1cy.
         if scal[i].first_branch_after_drain:
-          issue_cycle += 1
+          issue_cycle += -1 if i == 0 else 1
           scal[i].consume_drain_branch()
 
     # VGPR RAW dispatch: SQTT stamps at DISPATCH, not completion. HW back-to-back
