@@ -618,7 +618,10 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
 
     # LIT v_cmp SGPR completion buffer (answer.md): depth-2 writer stall.
     # N-th LIT v_cmp in a chain must wait until (n-2)th has propagated (W[n-2] = I[n-2]+5).
-    if is_cmp_lit:
+    # Skipped in phase-shifted chains (post-depctr) — HW exp_chain [52-55] shows the
+    # writer pipeline starts fresh after a depctr drain, so the depth-2 stall doesn't fire
+    # until the chain is ≥4 deep. (Current cmp_hist length check approximates this.)
+    if is_cmp_lit and not sgpr[i].in_phase_shifted_chain:
       cmp_hist = sgpr[i].cmp_lit_hist()
       if len(cmp_hist) >= 2:
         issue_cycle = max(issue_cycle, cmp_hist[-2] + _CMP_LIT_WB_LATENCY)
