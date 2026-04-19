@@ -596,19 +596,10 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
       _cmp_lit_rr = sgpr[i].cmp_lit_read_ready_map()
       _swt = sgpr[i].write_time_map()
       _smem_rr = sgpr[i].smem_ready_map()
-      # For pipelined SGPR writers (e.g. chained v_cmp_e64), take MIN write_time rather than MAX.
-      # HW mb_vopd_dualmov_sgpr_pair: cmp chain [5]@T,[6]@T+1,[7]@T+2,[8]@T+3 then VOPD MOV
-      # reading s[4],s[5]: dispatches at T+4 (first writer + SGPR_LATENCY), not T+5 (max+lat).
-      # This models dispatch-time SGPR read where the chain forwards via the operand-gather stage.
+      # VOPD MOV-only reads SGPRs via a late operand-gather stage — effective write-to-read
+      # latency is ~2cy (HW mb_vopd_dualmov_sgpr_{pair,chain_n4}), not the 4cy standard latency.
       _is_vopd_mov_only = kwargs.get('vopd_mov_only', False)
-      _pipelined_swt: dict[int, int] | None = None
-      if _is_vopd_mov_only and _swt and not _is_cndmask_nonvcc and not any(r in _cmp_lit_rr for r in sgpr_r_regs if r != 106):
-        # VOPD MOV reading SGPRs from a pipelined cmp chain (no LIT completion buffer):
-        # use MIN writer time as the chain-head constraint.
-        _reg_times = [(_swt[r], r) for r in sgpr_r_regs if r in _swt]
-        if _reg_times:
-          _min_t, _ = min(_reg_times)
-          _pipelined_swt = {r: _min_t for _, r in _reg_times}
+      _mov_only_latency = 2
       for r in sgpr_r_regs:
         # VCC (r=106) bypasses the LIT completion buffer — HW exp_chain [56] cndmask_b32_e64
         # reading VCC_LO after a VCC-writing v_cmp_lit uses standard SGPR latency (~+4cy),
@@ -616,9 +607,10 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
         if r != 106 and r in _cmp_lit_rr:  # LIT v_cmp writer: completion-buffer A[n] overrides standard latency
           issue_cycle = max(issue_cycle, _cmp_lit_rr[r])
         elif r in _swt:
-          lat = _CNDMASK_SGPR_LATENCY if (_is_cndmask_nonvcc and r == cond_sgpr) else _SGPR_LATENCY
-          _wt = _pipelined_swt[r] if _pipelined_swt and r in _pipelined_swt else _swt[r]
-          issue_cycle = max(issue_cycle, _wt + lat)
+          if _is_cndmask_nonvcc and r == cond_sgpr: lat = _CNDMASK_SGPR_LATENCY
+          elif _is_vopd_mov_only: lat = _mov_only_latency
+          else: lat = _SGPR_LATENCY
+          issue_cycle = max(issue_cycle, _swt[r] + lat)
         if r in _smem_rr:
           issue_cycle = max(issue_cycle, _smem_rr[r])
       # v_cndmask condition drain: disabled — HW probe_sgpr_cmps shows gap=4 sufficient without drain
