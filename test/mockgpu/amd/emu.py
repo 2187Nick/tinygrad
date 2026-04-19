@@ -220,6 +220,8 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
   # a VGPR written by the immediately-preceding VALU (no gap VGPRs). Used to detect
   # LONG chains (HW wave 1+ stall on chain depth ≥ 10 saturates the issue queue)
   # vs SHORT chains (all waves bypass). See mb_f1_valu_fmac_n16 vs mb_valu_add_n4.
+  # A broader consecutive-VALU-streak rule was tried but over-stalls VOPD chains
+  # and loses net strict; keeping same-reg chain detection.
   long_raw_chain: list[list[bool]] = []
   for wid in wave_ids:
     events = wave_events[wid]
@@ -244,7 +246,7 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
       L = end - p
       for q in range(p, end): seg_len[q] = L
       p = end if end > p else p + 1
-    long_raw_chain.append([L >= 10 for L in seg_len])
+    long_raw_chain.append([L >= 6 for L in seg_len])
 
   # Per-wave state
   pc = [0] * n
