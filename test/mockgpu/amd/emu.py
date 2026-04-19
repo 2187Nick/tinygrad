@@ -218,10 +218,8 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
   # Pre-pass: for each wave, for each instruction index, compute the length of the
   # containing "same-reg RAW chain". A chain runs while each consecutive VALU reads
   # a VGPR written by the immediately-preceding VALU (no gap VGPRs). Used to detect
-  # LONG chains (HW wave 1+ stall on chain depth ≥ 10 saturates the issue queue)
+  # LONG chains (HW wave 1+ stall on chain depth ≥ 6 saturates the issue queue)
   # vs SHORT chains (all waves bypass). See mb_f1_valu_fmac_n16 vs mb_valu_add_n4.
-  # A broader consecutive-VALU-streak rule was tried but over-stalls VOPD chains
-  # and loses net strict; keeping same-reg chain detection.
   long_raw_chain: list[list[bool]] = []
   for wid in wave_ids:
     events = wave_events[wid]
@@ -232,7 +230,6 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
       if cat_p != 'valu' or not isinstance(ex_p, tuple) or len(ex_p) < 5:
         p += 1; continue
       vw_p = ex_p[3] if len(ex_p) > 4 else ()
-      # Start a chain at p. Count consecutive same-reg RAWs forward.
       end = p + 1
       prev_w = set(vw_p or ())
       while end < len(events):
@@ -491,8 +488,15 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
           # Long nops invalidate burst state: the scheduling gap makes pre-nop burst stale
           if nop_cycles >= 16: burst_wave = -1; burst_exclusive = False
         else:
-          timed.append((nop_start, wid, pkt_cls, kwargs))
-          ready[i] = nop_start + nop_cycles
+          # Single-cycle s_nop(0): stamp at nop_start, propagate drain so
+          # consecutive s_nop(0)s each advance by 1cy (HW mb_e2_store_after_longnop
+          # and mb_e3_extra_waitcnt_nop16_vmov: 16 back-to-back s_nop(0) unanimous
+          # dt=1 across all 16 waves; without set_drain each nop reused the
+          # previous drain stamp and all stamped at the same cycle).
+          nop_stamp = max(nop_start, ready[i])
+          timed.append((nop_stamp, wid, pkt_cls, kwargs))
+          ready[i] = nop_stamp + nop_cycles
+          ib[i].set_drain(nop_stamp + nop_cycles)
         pc[i] += 1
         continue
       if cat == 'immediate':
@@ -704,9 +708,9 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
     # wave i ≥ 1 stalls on RAW chain of depth ≥ 4 (shorter chains preserved;
     # HW mb_valu_add_n1/n2/n4 show all waves dt=1).
     # Long-chain gate: pre-pass flagged positions in same-reg RAW chains of length
-    # ≥10. For those, wave 1+ stalls on every RAW continuation (HW mb_valu_add_n16,
+    # ≥6. For those, wave 1+ stalls on every RAW continuation (HW mb_valu_add_n16,
     # mb_f1_valu_fmac_n{10,12,16}, mb_e1_valu_add_n{10,12,24} unanimous dt=5).
-    # Short chains (≤9) fall back to the backward-depth≥4 rule so n≤4 and n=5-7
+    # Short chains (≤5) fall back to the backward-depth≥4 rule so n≤4 and n=5
     # short chains remain at dt=1 for all waves.
     _in_long_chain = (i < len(long_raw_chain) and pc[i] < len(long_raw_chain[i])
                       and long_raw_chain[i][pc[i]])
