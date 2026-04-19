@@ -730,7 +730,16 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
       for r in vgpr_r_regs:
         if r in tvr: _trans_read_deadline = max(_trans_read_deadline, tvr[r])
     if _is_trans:
+      _pre_trans_issue = issue_cycle
       issue_cycle = max(issue_cycle, trans[i].pipe_avail)
+      # Per-wave trans chain stagger: HW mb_f4_{exp,log,rcp,rsq,sqrt}_chain_n8
+      # show waves 0-3 dt=4 on chain continuations, waves 4-15 dt=10/14. Only
+      # fires for LONG chains (length ≥ 6 via long_raw_chain pre-pass); short
+      # chains like mb_trans_exp_n4 (chain=4) keep all waves at dt=4 unanimous.
+      if (i >= 4 and trans[i].pipe_avail > 0 and _pre_trans_issue < trans[i].pipe_avail
+          and i < len(long_raw_chain) and pc[i] < len(long_raw_chain[i])
+          and long_raw_chain[i][pc[i]]):
+        issue_cycle += 10
     # Enforce VOPD dual-issue occupancy: consecutive VOPDs need spacing
     _vopd_paid_phase_warmup = False  # tracks whether this VOPD paid the +2cy phase-warmup (for pair-follow-up)
     if is_vopd:
