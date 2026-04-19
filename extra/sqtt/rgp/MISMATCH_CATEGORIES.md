@@ -4,27 +4,41 @@ Using `extra/sqtt/rgp/analyze_mismatches.py` to bin each of the 30 remaining
 mismatches by (prev_inst_class, curr_inst_class) pair, then rank by pattern
 frequency. Baseline: **310/340 exact (91.2%)**, 326/340 ±2 (95.9%).
 
-## Final state: 323/340 exact (95.0%)
+## Final state: 329/340 exact (96.8%)
 
-Current emu baseline with all 2026-04-19 landings: **323/340 exact (95.0%)**,
-337/340 ±2 (99.1%). Achieved via three landings:
+Current emu baseline with all 2026-04-19 landings: **329/340 exact (96.8%)**,
+338/340 ±2 (99.4%). Achieved via six landings in session priority order:
 
 1. **MODAL mode default for multi-wave kernels** (+10): accept emu's dt if
    it matches any wave's HW dt at the same token index. Closes the wave-
    variance category where HW wave-0/wave-1 diverge by ±4cy in opposite
    directions.
 2. **Last-nop-in-drain-chain +4cy** (+2): probe_sgpr_cmps [23] unanimous
-   both waves HW=20, emu was 16. Implemented via peek at next inst in
-   the wave event list.
+   both waves HW=20, emu was 16. Implemented via peek at next inst.
 3. **Cmp_lit chain phase offset after depctr** (+1): s_waitcnt_depctr
-   sets `next_cmp_lit_phase_offset=3` on SgprScoreboard. Consumed on the
-   first cmp_lit write of the next chain; shifts C[n] uniformly. Exp_chain
-   [57] closed; [34],[35],[36],[58] shifted into ±2 range.
+   sets `next_cmp_lit_phase_offset=3`. Shifts C[n] uniformly through
+   prev_C cascade. Closes exp_chain [57].
+4. **VOPD-after-phase-shifted-chain +2cy** (+2): `in_phase_shifted_chain`
+   flag tracks the post-depctr chain through cndmask consumers; a VOPD
+   closing the chain pays +2cy dual-issue warm-up. Closes exp_chain
+   [37], [61]. Gated precisely via cndmask detection (sgpr_r_regs 106
+   or cond_sgpr >= 0) to avoid false-positives on [16], [47].
+5. **Phase-shifted chain GAP=1 + VOPD-pair post-warmup 2cy** (+3):
+   phase-shifted cmp_lit chains use SGPR_COMMIT_GAP=1 (tighter
+   back-to-back cndmask reads); a VOPD that paid the phase-warmup sets
+   next-VOPD gap to 2cy instead of 4. Closes exp_chain [35], [36],
+   [38], [40]; side-shifts [34], [57].
+6. **Skip cmp_lit writer-stall in phase-shifted chains** (+1): after
+   depctr the writer pipeline is drained, so the depth-2 stall doesn't
+   fire. Closes [31], [34], [54]; side-shifts [56], [57] back in.
 
-Remaining 17 mismatches:
-- exp_chain: 11 (single-wave; VOPD-adjacent-to-cndmask-chain + cndmask taper)
-- where: 2 (VOPD chain [8], b128 store [18])
-- probe_sgpr_cmps: 2 ([16] cndmask wave-variance)
+Remaining 11 mismatches:
+- exp_chain: 5 ([26] VOPD after DRAM idle, [37] [61] phase-shifted VOPD
+  over-prediction from GAP=1 side-effect, [56] [57] cndmask first-read
+  side-shifts)
+- where: 2 (VOPD chain [8] — V_DUAL_MOV SGPR-source not classed as LIT;
+  b128 store [18])
+- probe_sgpr_cmps: 2 ([16] cndmask HW=2/5 vs EMU=1 wave-variance)
 - probe_branch_cost: 2 (cbranch wave-variance, opposite directions)
 
 ## With MODAL=1: 320/340 exact (94.1%)
