@@ -124,6 +124,25 @@ decoupled them):
    - broken `s_mov→nop→s_cmp→s_cbranch`→VALU: 13cy
    - tight + VMEM successor: 12cy
 
+   **2026-04-19 UPDATE — not actionable.** The full cbranch picture from
+   modal/single-wave analysis:
+
+   | Case | n_waves | HW dt | EMU | Delta |
+   |---|---|---|---|---|
+   | tight→VMEM (mb_salu_scmp_tight) | 16 | 12 | 9 | +3 |
+   | broken→VMEM (mb_salu_scmp_spaced_nop0x3) | 16 | 9 | 9 | ✓ |
+   | tight→VALU (probe_scalar_beat_p0) | 1 | 8 | 9 | −1 |
+   | broken→VALU (probe_scalar_beat_p1) | 1 | 13 | 9 | +4 |
+   | probe_branch_cost W0 | 2 | 8 | 9 | +1 |
+   | probe_branch_cost W1 | 2 | 10 | 9 | −1 |
+
+   Only 2 cbranch mismatches exist in the full suite (probe_branch_cost
+   wave 0 and wave 1), and they diverge in **opposite directions** by ±1
+   each — pure wave-variance. A constant adjustment trades one mismatch
+   for the other. A 2×2 phase-aware model (tight/broken × VALU/VMEM)
+   would require new ScalarPipe phase state and large refactor for an
+   upper bound of ~2 mismatches. **Parked — not worth the blast radius.**
+
 Each of these is one subsystem-isolated change; the refactor makes them
 tryable without cross-regression (unlike Step 7a, where the problem turned
 out to be cross-subsystem anyway).
@@ -134,10 +153,38 @@ out to be cross-subsystem anyway).
    falsified; see the update block above. Chained cndmasks run at 1cy.
 2. ~~**Land fix #3 (Trans RAW 4cy)** first — isolated, won't cross-perturb.~~
    Already in emu (see updated fix #3 entry).
-3. **Land fix #4 (cbranch context-sensitive)** — also isolated.
-4. **Design cndmask-first-use fix** from the Batch B curve; land as fix #1.
-5. **Final validation**: capture Batch B again against the fixed emu, confirm
-   10+ of the 12 exp_chain C-group mismatches close.
+3. ~~**Land fix #4 (cbranch context-sensitive)** — also isolated.~~
+   Parked — only 2 mismatches, opposite-direction wave-variance,
+   not closable by constant change (see updated fix #4 entry).
+4. ~~**Design cndmask-first-use fix** from the Batch B curve; land as fix #1.~~
+   Hypothesis falsified — chained cndmasks run at 1cy on HW.
+5. **Final validation**: ~~capture Batch B again against the fixed emu~~
+   No fix landed, so no re-capture needed. Baseline holds at 310/340.
+
+### New direction for the 28 remaining mismatches
+
+After this session's analyses, three of the four "HW-confirmed fixes" turn
+out to be either already-implemented or not-actionable. The true path to
+closing the gap needs a fresh hypothesis pool:
+
+- **exp_chain C-group (12 mismatches)**: inspect the precise token stream
+  around each mismatch. Candidates: VOPD that reads an SGPR written by a
+  prior VOPD (VCC-implicit), cndmask→VOPD forwarding, or trans-chain RAW
+  positional effects (HW `mb_trans_exp_n4` shows [1,14,14,4] — current
+  emu would predict [1,4,4,4]; this might apply to exp_chain's v_exp
+  chain segment).
+
+- **probe_sgpr_cmps (7 mismatches)**: likely s_nop chain-position-sensitive
+  effects (see Batch A table where `mb_snop_15_chain_n{3,5,8}` first nop
+  gives 18, subsequent give 16 — current emu may predict 17 uniformly).
+
+- **probe_cmp_chain (3 mismatches)**: possibly wave-variance tail effects
+  similar to the cbranch case — may not be closable without a stochastic
+  scheduler model.
+
+The systematic next step is to diff the token stream per mismatch and
+bin them by instruction pair pattern, then pursue the most frequent
+pattern with a targeted microbench.
 
 ## Takeaway
 
