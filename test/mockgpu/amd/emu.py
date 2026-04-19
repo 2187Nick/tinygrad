@@ -681,14 +681,20 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
       # VGPR bank port pressure (Seb-V): after a VOPD, next VOPD within _VOPD_PIPE_CYCLES window
       # gets +1cy if it reads a bank the previous VOPD wrote (1cy bank-cache commit delay).
       # Skipped for MOV-only VOPDs — their vsrc1 reads are dummies (decoder artifact) so bank
-      # conflict doesn't apply. HW where [8] confirms: VOPD(MOV) after VOPD(MOV) = 1cy.
+      # conflict doesn't apply. Also skipped when the read set is disjoint from the write set
+      # (truly independent VOPDs, no RAW bypass pressure) — HW mb_vopd_indep_n4 measures 1cy
+      # between VOPDs that share read banks with the prev write bank via different VGPRs.
       if not is_vopd_lit and not _vopd_mov_only and valu[i].last_vopd_issue >= 0 and issue_cycle - valu[i].last_vopd_issue <= _VOPD_PIPE_CYCLES:
-        read_banks = {r & 3 for r in (vgpr_r_regs or ())}
-        _bank_wt = valu[i].bank_vopd_write_time()
-        for b in read_banks:
-          if _bank_wt[b] == valu[i].last_vopd_issue:
-            issue_cycle += 1
-            break
+        _raw_overlap = (isinstance(vgpr_r_regs, (tuple, list)) and vgpr_r_regs
+                        and set(vgpr_r_regs) & set(valu[i].vgpr_write_time_map().keys() & set(valu[i].vgpr_write_time_map()))
+                        and any(valu[i].vgpr_write_time_map().get(r, -1) == valu[i].last_vopd_issue for r in vgpr_r_regs))
+        if _raw_overlap:
+          read_banks = {r & 3 for r in (vgpr_r_regs or ())}
+          _bank_wt = valu[i].bank_vopd_write_time()
+          for b in read_banks:
+            if _bank_wt[b] == valu[i].last_vopd_issue:
+              issue_cycle += 1
+              break
 
     # LIT v_cmp SGPR completion buffer (answer.md): depth-2 writer stall.
     # N-th LIT v_cmp in a chain must wait until (n-2)th has propagated (W[n-2] = I[n-2]+5).
