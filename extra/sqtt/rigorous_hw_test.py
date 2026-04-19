@@ -293,16 +293,23 @@ def do_capture():
   Device[Device.DEFAULT].synchronize()
 
   CAPTURE_DIR.mkdir(parents=True, exist_ok=True)
+  skip_existing = os.environ.get("CAPTURE_SKIP_EXISTING", "1") == "1"
   captured = {}
+  skipped = 0
   for name, (run_fn, max_att) in KERNELS.items():
+    out = CAPTURE_DIR / f"{name}.pkl"
+    if skip_existing and out.exists():
+      skipped += 1
+      continue
     print(f"\n--- {name} ---")
     traces = run_capture(name, run_fn, max_att)
     if traces:
       captured[name] = traces
-      out = CAPTURE_DIR / f"{name}.pkl"
       with open(out, "wb") as f:
         pickle.dump(traces, f)
       print(f"  Saved → {out}")
+  if skipped > 0:
+    print(f"\n[skipped {skipped} kernels with existing captures; set CAPTURE_SKIP_EXISTING=0 to re-capture]")
 
   print(f"\n{'='*60}")
   print(f"Captured {len(captured)}/{len(KERNELS)} kernels")
