@@ -359,10 +359,15 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
         ib[i].set_drain(stall_until)
         pc[i] += 1
         trans[i].prune_valu_pend(stall_until)
-        # depctr drains the LIT v_cmp completion buffer — subsequent chains start fresh
+        # depctr drains the LIT v_cmp completion buffer — subsequent chains start fresh.
+        # Phase shift: the next cmp_lit chain's A[n] gets +3cy offset (scalar pipe phase
+        # left in a different state by depctr). HW exp_chain [33-36] shows the first
+        # cndmask after a depctr-drained cmp chain pays ~3cy more than the [12-15] variant
+        # where the cmp chain followed a VALU prefix.
         sgpr[i].clear_cmp_lit_hist()
         sgpr[i].set_cmp_lit_last_commit(0)
         sgpr[i].clear_cmp_lit_read_ready()
+        sgpr[i].set_next_cmp_lit_phase_offset(3)
         continue
       if cat == 'nop':
         # s_nop(N): stalls IB for N+1 cycles.
@@ -788,9 +793,18 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
 
     # LIT v_cmp completion buffer: update write/commit tracking, compute A[n] for readers.
     if is_cmp_lit and sgpr_w_regs:
+      # Apply the scalar-pipe phase offset (set after s_waitcnt_depctr). Only applies to
+      # explicit SGPR writes (not implicit VCC=106) — HW exp_chain [33] shows cndmask reading
+      # VCC is unaffected by the phase shift, only reads of fresh s[0..n] pay the offset.
+      # Applied to the first cmp's W (which cascades through prev_C to later cmps); uniform
+      # across the chain via prev_C chaining, not re-added per cmp.
+      _nonvcc_writes = [r for r in sgpr_w_regs if r != 106]
+      _phase_offset = sgpr[i].next_cmp_lit_phase_offset if _nonvcc_writes else 0
+      if _phase_offset > 0: sgpr[i].set_next_cmp_lit_phase_offset(0)
       W = issue_cycle + _CMP_LIT_WB_LATENCY
       prev_C = sgpr[i].cmp_lit_last_commit
       C = max(W, prev_C + _SGPR_COMMIT_GAP) if prev_C else W
+      C += _phase_offset  # phase shift lifts C uniformly for this chain entry
       A = C + 1
       sgpr[i].set_cmp_lit_last_commit(C)
       for r in sgpr_w_regs: sgpr[i].set_cmp_lit_read_ready(r, A)

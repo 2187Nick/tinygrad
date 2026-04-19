@@ -32,6 +32,14 @@ class SgprScoreboard:
     self._cmp_lit_last_commit: int = 0
     self._cmp_lit_hist: list[int] = []
     self._smem_ready: dict[int, int] = {}
+    # Phase offset applied to next cmp_lit chain's A[n]. Set to +3 after s_waitcnt_depctr
+    # (exp_chain [33-36] confirms: depctr-drain + VOPD + cmp chain shifts SGPR read-ready by ~3cy
+    # vs a VALU-prefix cmp chain like exp_chain [8-11]). Consumed on first cmp_lit A[n] update.
+    self._next_cmp_lit_phase_offset: int = 0
+
+  @property
+  def next_cmp_lit_phase_offset(self) -> int: return self._next_cmp_lit_phase_offset
+  def set_next_cmp_lit_phase_offset(self, v: int) -> None: self._next_cmp_lit_phase_offset = v
 
   # ── Write-time scoreboard ──────────────────────────────────────────────────
   def write_time_map(self) -> dict[int, int]:
