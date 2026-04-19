@@ -344,6 +344,9 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
         ready[i] = stall_until + 1  # waitcnt occupies the stall_until cycle; next issue at +1
         ib[i].set_drain(stall_until)  # nop after waitcnt starts at stall_until (no +1 gap)
         scal[i].mark_drain()  # first s_cbranch_scc after waitcnt drain pays +1cy (probe_branch_cost [7])
+        # First cndmask chain after vmcnt drain pays SGPR bank port pressure on 3rd-SGPR-cndmask.
+        # probe_sgpr_cmps [16] (1st chain) = {2, 5}; [31] (2nd chain, after s_nop drain) = {1, 1}.
+        if vm_th < len(sv): sgpr[i].mark_first_cndmask_chain_pending()
         pc[i] += 1
         # Prune completed ops
         lds.prune(i, stall_until)
@@ -568,6 +571,18 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
         if r in _smem_rr:
           issue_cycle = max(issue_cycle, _smem_rr[r])
       # v_cndmask condition drain: disabled — HW probe_sgpr_cmps shows gap=4 sufficient without drain
+      # 3rd+ SGPR-reading cndmask in a chain reading vanilla (non-cmp_lit) SGPR pays +1cy.
+      # HW probe_sgpr_cmps [16] w0=2 w1=5 vs EMU=1. Chain-producing cmps lack LIT so no
+      # completion buffer applies, and the 3rd _e64 cndmask hits SGPR bank port contention.
+      # Gated on (a) not-phase-shifted (exp_chain [33-36] phase_shifted 4-chain stays 1cy),
+      # (b) first chain after vmcnt drain (probe_sgpr_cmps [31] in 2nd chain, after s_nop drain,
+      # is clean — bank state has settled). Streak only counts cndmasks with cond_sgpr set (_e64);
+      # _e32 reads VCC implicitly (not encoded) → doesn't bump streak, so gate is `>= 2`.
+      if (_is_cndmask_nonvcc and sgpr[i].cndmask_streak >= 2 and
+          not sgpr[i].in_phase_shifted_chain and sgpr[i].first_cndmask_chain_pending):
+        if any(r != 106 and r not in _cmp_lit_rr and r in _swt for r in sgpr_r_regs):
+          issue_cycle += 1
+          sgpr[i].consume_first_cndmask_chain()
 
     # EXEC write-to-read dependency: v_cmpx writes EXEC, s_cbranch_execz/nz must wait for EXEC propagation
     # SCC write-to-read dependency: s_cmp writes SCC, s_cbranch_scc0/scc1 must wait 1cy for SCC propagation
@@ -863,10 +878,17 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
       _is_any_cndmask = (cond_sgpr >= 0) or (sgpr_r_regs and 106 in sgpr_r_regs)
       if not _is_any_cndmask and not is_cmp_lit:
         sgpr[i].set_in_phase_shifted_chain(False)
-    elif cat == 'valu' and not is_cmp_lit:
       # Non-LIT-v_cmp VALU resets the LIT chain (commit buffer drains when out of chain)
-      if sgpr[i].cmp_lit_hist(): sgpr[i].clear_cmp_lit_hist()
-      sgpr[i].set_cmp_lit_last_commit(0)
+      if not is_cmp_lit:
+        if sgpr[i].cmp_lit_hist(): sgpr[i].clear_cmp_lit_hist()
+        sgpr[i].set_cmp_lit_last_commit(0)
+
+    # cndmask streak bookkeeping: bump on SGPR-reading cndmask VALU, reset on any other VALU.
+    # Runs independent of the cmp_lit/elif branch above so cmp_lit correctly resets the streak.
+    if cat == 'valu':
+      _is_any_cndmask_streak = (cond_sgpr >= 0) or (sgpr_r_regs and 106 in sgpr_r_regs)
+      if _is_any_cndmask_streak: sgpr[i].bump_cndmask_streak()
+      else: sgpr[i].reset_cndmask_streak()
 
     # Track EXEC write time for v_cmpx → s_cbranch_execz/nz dependency
     if cat == 'valu' and kwargs.get('op') == InstOp.VALU1_WR_EXEC:

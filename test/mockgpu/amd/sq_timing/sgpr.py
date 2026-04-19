@@ -40,6 +40,14 @@ class SgprScoreboard:
     # Stays True through subsequent cmp_lit + cndmask-nonvcc issues, resets on any other
     # VALU (including VOPD) or drain. Used to gate the VOPD-after-cndmask-chain +2cy rule.
     self._in_phase_shifted_chain: bool = False
+    # Consecutive-cndmask streak counter. Increments on every cndmask issue, resets on
+    # non-cndmask VALU or drain. Used to detect 4th+ cndmask in a chain reading vanilla
+    # (non-cmp_lit-rr) SGPR — probe_sgpr_cmps [16] shows +1cy port pressure at streak≥3.
+    self._cndmask_streak: int = 0
+    # First-cndmask-chain-after-vmcnt-drain flag. Set True on waitcnt_vmcnt. Consumed by
+    # the first 3rd-SGPR-cndmask in a chain. Gates the +1cy port-pressure rule to the
+    # first chain only — probe_sgpr_cmps [16] pays, [31] (after s_nop drain) doesn't.
+    self._first_cndmask_chain_pending: bool = False
 
   @property
   def next_cmp_lit_phase_offset(self) -> int: return self._next_cmp_lit_phase_offset
@@ -48,6 +56,16 @@ class SgprScoreboard:
   @property
   def in_phase_shifted_chain(self) -> bool: return self._in_phase_shifted_chain
   def set_in_phase_shifted_chain(self, v: bool) -> None: self._in_phase_shifted_chain = v
+
+  @property
+  def cndmask_streak(self) -> int: return self._cndmask_streak
+  def bump_cndmask_streak(self) -> None: self._cndmask_streak += 1
+  def reset_cndmask_streak(self) -> None: self._cndmask_streak = 0
+
+  @property
+  def first_cndmask_chain_pending(self) -> bool: return self._first_cndmask_chain_pending
+  def mark_first_cndmask_chain_pending(self) -> None: self._first_cndmask_chain_pending = True
+  def consume_first_cndmask_chain(self) -> None: self._first_cndmask_chain_pending = False
 
   # ── Write-time scoreboard ──────────────────────────────────────────────────
   def write_time_map(self) -> dict[int, int]:
