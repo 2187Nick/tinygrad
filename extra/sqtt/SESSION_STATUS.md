@@ -3,14 +3,40 @@
 ## Bounty Goal
 $1,000 bounty: Make tinygrad's software GPU emulator produce cycle-accurate instruction timing matching real AMD 7900 XTX hardware, validated via SQTT (Shader Queue Thread Trace).
 
-## 2026-04-19 — Reference 99.7% + Microbench +4230 exact (session continuation)
+## 2026-04-19 — Batch E + Batch F + wave-credit RAW + long-chain lookahead
 
-### Current state:
-- **Reference MODAL: 339/340 exact (99.7%), 340/340 ±2 (100.0%)** (+2 from 337)
-- **Reference strict (MODAL=0): 327/340 exact (96.2%)** (+8 from 319)
-- **Microbench MODAL: 41458/44126 exact (94.0%), 42836/44126 ±2 (97.1%)** (+4616 from 36842)
-- **Microbench strict: 35293/44126 exact (80.0%)** (+1246 from 34047)
-- All 8 bounty tests still pass.
+### Current state (after 363 total kernels × 65384 comparison tokens):
+- **Total MODAL:  60651/65384 exact (92.8%), 62686/65384 ±2 (95.9%)**
+- **Total strict: 51067/65384 exact (78.1%), 55906/65384 ±2 (85.5%)**
+- **Reference MODAL: 339/340 exact (99.7%), 340/340 ±2 (100.0%)** (unchanged)
+- **Reference strict: 327/340 exact (96.2%)** (unchanged)
+- All 11 SQTT profiler + custom kernel tests pass.
+
+### New this session (on top of 2026-04-19 morning baseline):
+
+1. **Batch E (28 kernels)** — wave-variance + hard-inst probes:
+   chain-boundary n=3/5/6/7/10/12/24, VMEM store stagger, launch stagger,
+   int mul, cross-lane, bfi/alignbyte, packed f16, cvt.
+
+2. **Batch F (97 kernels)** — deep coverage: fine-grained chain lengths
+   (n=9-32 for add/mul/fmac/fma/sub), mixed-RAW patterns, VMEM store
+   safety (no 8-store chains — those hung GPU on first try), transcendental
+   chains, cross-regfile, edge ops. First F.3 run crashed the GPU
+   (8-store sequential overflow); rewrite caps at 4 stores/chain with
+   explicit vmcnt drains.
+
+3. **Wave-credit RAW stall (commit `91561e1c`)** — wave i≥1 pays 4cy on
+   VGPR RAW continuation when backward chain_depth ≥ 4. Calibrated against
+   mb_valu_add_n{8,16} waves 1-15 unanimous dt=5.
+
+4. **Long-chain look-ahead (commit `b9e4da59`, `3a8e9531`)** — pre-pass
+   marks positions in same-reg RAW chains of length ≥ 6. Those positions
+   stall for wave 1+ from the 1st RAW continuation (bypassing the
+   backward-depth gate). Threshold 6 picked from grid scan (10/8/7/6/5).
+
+5. **FMAC accumulator read (commit `9a183f24`)** — decoder now adds vdst to
+   vgpr_r for FMAC/FMAMK/FMAAK/MAC ops. Enables RAW detection of fmac
+   accumulator chains. Individual gain: fmac_n16 strict 24% → 91%.
 
 ### Wave-variance (stochastic scheduler) — Phase 0 & 1 landed
 
