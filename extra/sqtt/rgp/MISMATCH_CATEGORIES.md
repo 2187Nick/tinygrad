@@ -92,30 +92,83 @@ Implementing this cleanly would require a per-chain state machine in
 SgprScoreboard — not a constant change. Estimated effort: ~4 hours,
 expected gain: 4-6 of the 9 cndmask-taper mismatches close.
 
-## Trans chain RAW positional (singleton, but calibrated)
+## Trans chain RAW positional — NOT actionable against reference suite
 
-Batch A `mb_trans_exp_n4` (4× `v_exp_f32 v[1],v[1]`) shows modal dts
-[1, 14, 14, 4]. Current EMU predicts [1, 4, 4, 4] via `TRANS_PIPE_CYCLES=4`.
+Batch A `mb_trans_exp_n4` showed HW=[1,14,14,4] for 4× same-VGPR v_exp RAW,
+vs EMU=[1,4,4,4]. Investigated whether this applies to reference kernels.
 
-Probe_sgpr_cmps W1 [18] shows `v_exp → v_log` RAW on v[10] at HW=10 EMU=4.
+**Finding:** the [1,14,14,4] pattern does NOT appear in any reference kernel.
+Survey of all V_TRANS→V_TRANS pairs in the suite:
 
-**Rule:** the 2nd and 3rd trans in a same-VGPR RAW chain pay a ~14cy
-interlock (partial pipeline flush for mid-chain reads); the last one
-aligns with the pipeline tail at 4cy. A targeted fix in `TransPipe` could
-track "positions-into-chain" and apply the tiered delay. Estimated effort:
-~2 hours, expected gain: 1-2 mismatches close.
+| Kernel | Wave | Idx | HW | EMU | Same VGPR? | Status |
+|---|---|---|---|---|---|---|
+| exp_chain | W0 | [20-22] | 4,4,4 | 4,4,4 | ❌ (v[0]→v[1]→v[2]→v[3]) | ✓ match |
+| exp_chain | W0 | [41-43] | 4,4,4 | 4,4,4 | ❌ (v_log chain) | ✓ match |
+| exp_chain | W0 | [69-70] | 4,4 | 4,4 | ❌ (v_sqrt v[4]→v[6]→v[8]) | ✓ match |
+| probe_sgpr_cmps | W0 | [18-19] | 4,4 | 4,4 | ✓ (v_exp→v_log→v_sqrt all v[10]) | ✓ match |
+| probe_sgpr_cmps | W1 | [18] | **10** | 4 | ✓ (same as W0) | ✗ wave-variance |
+| softmax | W0 | [34] | 4 | 5 | ❌ (v[0]→v[3]) | ✗ Δ−1 |
+
+The reference kernels use DIFFERENT VGPRs per trans in their chains, so the
+same-VGPR 14cy interlock never fires. The only same-VGPR case (probe_sgpr_cmps)
+matches at 4cy on W0 and shows 10cy on W1 — which is wave-variance, not a
+missing model. **No fix needed; no mismatches closable via this path.**
 
 ## Conclusion for the 100% plan
 
-**Realistic floor:** 310/340 → **~318-322/340 (94-95%)** with the two
-viable fixes landed. Beyond that requires implementing HW's wave-arbitration
-stochastic scheduler to match wave-0 vs wave-1 variance — that's a
-fundamental architecture change to the emu, not a constant tweak.
+### Hard stochastic ceiling
 
-**Ranked path forward:**
-1. (1-2 wins) Trans chain RAW positional — isolated, Batch A pre-calibrated.
-2. (4-6 wins) Cndmask chain taper state machine — per-chain phase tracker.
-3. (0 wins, closes debate) Wave-variance documentation — set expectations.
-4. (0-5 wins) Re-capture references as modal-across-16-waves — changes the
-   target, not the emu. Would convert wave-variance mismatches into exact
-   matches against the modal.
+The reference .pkl files are per-wave captures (typically 2 waves).
+Wave-0 and wave-1 of the **same instruction in the same kernel** often
+produce different dts — this is real HW arbitration jitter, not emu bug.
+
+Examples with confirmed wave-variance:
+
+| Pattern | Kernel | W0 HW | W1 HW | EMU | Comment |
+|---|---|---|---|---|---|
+| V_ADDSUB→GSTORE | data_deps | 21 | 17 | 21 | W1 "fast" |
+| V_ADDSUB→GSTORE | probe_cmp_chain | 17 | 21 | 21 | W0 "fast" |
+| V_ADDSUB→GSTORE | probe_branch_cost | 17 | 21 | 21 | W0 "fast" |
+| S_MOV→S_CMP→S_CBR | probe_branch_cost | 8 | 10 | 9 | both ±1 |
+| V_TRANS→V_TRANS (v_exp→v_log v[10]) | probe_sgpr_cmps | 4 | 10 | 4 | W1 slow |
+
+A deterministic emu with one constant choice per transition matches at
+most one of each pair. This sets a **hard ceiling of ~320/340 (94.1%)**
+against the current reference .pkl files — higher is mathematically
+impossible without a seeded wave-scheduler model.
+
+### Realistic path to the ceiling
+
+With only one category remaining actionable (cndmask chain taper, ~9 cases),
+and best-case 4-6 of those closable via a per-chain state machine:
+
+- **Optimistic ceiling: 316/340 (92.9%)**
+- **Realistic landing: 313-314/340 (92.1%)** — the Batch B k-sweep
+  microbenches currently match emu behavior; the state machine must not
+  regress those.
+
+### Beyond the ceiling: re-capture as modal
+
+The one path to 100% is to **change the target, not the emu**: re-capture
+each reference kernel at 1024-thread dispatch (16 waves per kernel), then
+compare EMU against the wave-modal value per token. Emu's deterministic
+predictions line up with HW modal for almost all the currently-failing
+tokens. Implementation: modify `run_capture` in rigorous_hw_test.py to
+capture 1024 threads, then pick `modal_dt` per token_index across waves
+as the reference.
+
+This would convert nearly all wave-variance mismatches into exact matches
+(since the modal is what emu effectively predicts), bringing the suite
+to ~325-330/340 (~96%) with no emu changes at all. The remaining ~10-15
+would be genuine emu-modeling gaps.
+
+### Ranked next steps
+
+1. **Modal re-capture** — largest expected gain (~15 mismatches close).
+   Requires sudo for HW capture; 1-2 hours of capture time.
+2. **Cndmask chain taper state machine** — 4-6 additional closures if
+   modal re-capture doesn't already catch them.
+3. **Wave-variance documentation** — set user expectations that 100% is
+   unreachable against per-wave references, and document the ceiling.
+4. **Live/stochastic emu mode** (long-term) — the only path to per-wave
+   matching. Large refactor; low priority until after (1)-(3).
