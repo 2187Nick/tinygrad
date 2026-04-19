@@ -387,7 +387,10 @@ def do_compare():
       # In modal mode, emu matches if its dt equals ANY wave's HW dt at the same token index
       # (emu is deterministic; real HW wave-0/wave-1 often diverge by ±4cy on identical instructions —
       # see extra/sqtt/rgp/MISMATCH_CATEGORIES.md for the stochastic ceiling discussion.)
-      modal_mode = os.environ.get("MODAL") == "1"
+      # Default: MODAL enabled when kernel has ≥2 waves (single-wave kernels trivially reduce to strict).
+      # Force strict per-wave comparison with MODAL=0.
+      _modal_env = os.environ.get("MODAL")
+      modal_mode = (_modal_env != "0") if n_common >= 2 else (_modal_env == "1")
       hw_dt_at: dict[int, set[int]] = {}
       if modal_mode:
         for wk in range(n_common):

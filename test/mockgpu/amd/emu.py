@@ -377,9 +377,17 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
           sgpr_drain = max(t + _SGPR_LATENCY + 1 for t in sgpr[i].write_time_map().values())
           nop_start = max(nop_start, sgpr_drain)
         if nop_cycles > 1:
+          # Peek at next inst to detect "last nop in a chain" (next is NOT a nop) — HW adds +4cy
+          # to the last nop's stamp in a drain-path chain (probe_sgpr_cmps [21-23] unanimous both waves).
+          _next_pc = pc[i] + 1
+          _is_last_nop_in_chain = True
+          if _next_pc < len(wave_events[wid]):
+            _, _, _next_cat, _ = wave_events[wid][_next_pc]
+            if _next_cat == 'nop': _is_last_nop_in_chain = False
           if ib[i].last_drain_stamp >= 0:
-            # After drain event: stamp = start + stall_cycles (no overhead)
-            nop_stamp = nop_start + nop_cycles
+            # After drain event: stamp = start + stall_cycles (no overhead); last-in-chain pays +4.
+            _last_nop_extra = 4 if _is_last_nop_in_chain else 0
+            nop_stamp = nop_start + nop_cycles + _last_nop_extra
             ib[i].mark_nop_in_chain()
           else:
             # After non-drain event (VALU/etc): stamp includes +1 overhead
