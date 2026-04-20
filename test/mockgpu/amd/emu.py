@@ -122,6 +122,13 @@ def _nibbles_to_bytes(nibbles: list[int]) -> bytes:
 _SQTT_DEBUG = int(os.environ.get("SQTT_DEBUG", "0"))
 _sqtt_debug_log: list[dict] = []  # populated by _simulate_sq_timing when _SQTT_DEBUG=1
 
+# SIMD-arbiter shadow telemetry. When SIMD_ARB_SHADOW=1, each call to
+# `_simulate_sq_timing` appends one dict summarizing how often the arbiter's
+# per-SIMD VALU port_avail would have forced a stall beyond the current
+# heuristics' output. Read by analysis scripts; never changes behaviour.
+_SIMD_ARB_SHADOW = int(os.environ.get("SIMD_ARB_SHADOW", "0"))
+_simd_arb_shadow_log: list[dict] = []
+
 # Latency constants (in SQ clock cycles) — tuned against GFX1100 SQTT traces.
 # Source of truth: `test/mockgpu/amd/sq_timing/constants.py::TimingConstants`.
 # These module-level `_XXX` aliases are kept for backward compatibility with
@@ -132,6 +139,7 @@ from test.mockgpu.amd.sq_timing.ib_fetch import IbFetch
 from test.mockgpu.amd.sq_timing.lds import LdsPipe
 from test.mockgpu.amd.sq_timing.scalar import ScalarPipe
 from test.mockgpu.amd.sq_timing.sgpr import SgprScoreboard
+from test.mockgpu.amd.sq_timing.simd_arbiter import SimdArbiter
 from test.mockgpu.amd.sq_timing.trans import TransPipe
 from test.mockgpu.amd.sq_timing.valu import VAluPipe
 from test.mockgpu.amd.sq_timing.vmem import VmemPipe
@@ -295,6 +303,13 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
   # Shared-SIMD VALU issue port (GPUOpen / Seb-V): when waves share a SIMD, VALU issues serialize 1 wave/cycle.
   # For n==2 workgroups, HW typically places both waves on the same SIMD (16 wave slots, small wg fits).
   simd_valu_avail = 0
+  # CU-shared SIMD VALU arbiter (shadow-wire — Step 2 of the arbiter refactor).
+  # State is always updated on VALU issue; `port_avail` is never read back to mutate
+  # issue_cycle, so there is zero behaviour change. When SIMD_ARB_SHADOW=1 the
+  # would-bump telemetry is accumulated and appended to `_simd_arb_shadow_log`.
+  arbiter = SimdArbiter(n, CONST)
+  _arb_would_stall_cy = 0
+  _arb_would_stall_count = 0
 
   timed: list[tuple[int, int, type, dict]] = []
 
@@ -836,6 +851,21 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
     if pkt_cls is INST and kwargs.get('op') == InstOp.JUMP_NO:
       stamp_cycle = issue_cycle + 7
 
+    # SIMD-arbiter shadow update (non-behavioural). For every VALU issue,
+    # record whether the per-SIMD VALU port would have forced a later
+    # issue_cycle than the one the heuristics produced, then mark the port
+    # busy for 1cy. VOPD is modelled as 1cy on the same port (both lanes of
+    # one SIMD). See test/mockgpu/amd/sq_timing/simd_arbiter.py for the
+    # heuristics this is intended to eventually subsume.
+    if cat == 'valu':
+      _arb_simd = SimdArbiter.simd_for_wave(i)
+      _arb_pa = arbiter.port_avail(_arb_simd)
+      if _arb_pa > issue_cycle:
+        _arb_would_stall_cy += (_arb_pa - issue_cycle)
+        _arb_would_stall_count += 1
+      arbiter.set_port_avail(_arb_simd, issue_cycle + 1)
+      arbiter.set_last_issue_cycle(_arb_simd, issue_cycle)
+
     prev_issue_cycle = issue_cycle
     prev_wave = i
     timed.append((stamp_cycle, wid, pkt_cls, kwargs))
@@ -1150,6 +1180,14 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
     clock = issue_cycle + 1
     rr = (i + 1) % n
     pc[i] += 1
+
+  if _SIMD_ARB_SHADOW:
+    _simd_arb_shadow_log.append({
+      "n_waves": n,
+      "would_stall_cy": _arb_would_stall_cy,
+      "would_stall_count": _arb_would_stall_count,
+      "port_avail": list(arbiter.snapshot()["port_avail"]),
+    })
 
   return timed
 
