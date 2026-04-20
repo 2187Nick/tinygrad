@@ -871,9 +871,18 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
       # show waves 0-3 dt=4 on chain continuations, waves 4-15 dt=10/14. Only
       # fires for LONG chains (length ≥ 6 via long_raw_chain pre-pass); short
       # chains like mb_trans_exp_n4 (chain=4) keep all waves at dt=4 unanimous.
-      if (i >= 4 and trans[i].pipe_avail > 0 and _pre_trans_issue < trans[i].pipe_avail
-          and i < len(long_raw_chain) and pc[i] < len(long_raw_chain[i])
-          and long_raw_chain[i][pc[i]]):
+      # Short-chain stagger (Option D from wave-slot handoff): mb_f4_{exp,log,rcp,
+      # rsq,sqrt}_chain_n4 (chain=4) shows waves 7+ paying +6-10cy at chain pos
+      # 2-3, even though waves 0-6 stay at dt=4. All waves on SIMD 0 (HW_ID probe
+      # 2026-04-20) → the trans-unit dispatch queue fills after ~6 waves have
+      # fed into it; wave 7+ queues behind.
+      _trans_chain_L = raw_chain_L[i][pc[i]] if (i < len(raw_chain_L) and pc[i] < len(raw_chain_L[i])) else 0
+      _in_chain = (i < len(long_raw_chain) and pc[i] < len(long_raw_chain[i])
+                   and long_raw_chain[i][pc[i]])
+      _long_fire = _in_chain and i >= 4                         # length ≥ 6 AND wave ≥ 4
+      _short_fire = (_trans_chain_L == 4 and i >= 9)           # length exactly 4 AND wave ≥ 9 (Option D)
+      if (trans[i].pipe_avail > 0 and _pre_trans_issue < trans[i].pipe_avail
+          and (_long_fire or _short_fire)):
         issue_cycle += 10
     # Enforce VOPD dual-issue occupancy: consecutive VOPDs need spacing
     _vopd_paid_phase_warmup = False  # tracks whether this VOPD paid the +2cy phase-warmup (for pair-follow-up)
