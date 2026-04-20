@@ -132,6 +132,15 @@ _sqtt_debug_log: list[dict] = []  # populated by _simulate_sq_timing when _SQTT_
 # Analysis scripts align shadow events to emu_traces by (wave_id, stamp_cycle).
 _SIMD_ARB_SHADOW = int(os.environ.get("SIMD_ARB_SHADOW", "0"))
 _simd_arb_shadow_log: list[dict] = []
+
+# EMU_WGP_PEER_GATE: opt-in wave-credit refactor. When set to 1, the default
+# `_fire_stall = (i > 0)` clause gates on "has an earlier peer on the same
+# WGP port" (arbiter.simd_for_wave convention: even vs odd wave index). HW_ID
+# probe data confirms 16-wave workgroups split even/odd across two WGPs, so
+# wave 1 does not queue behind wave 0 for the first VALU port. Default 0
+# preserves current strict scorecard; A/B test against 50x100 captures before
+# flipping the default.
+_EMU_WGP_PEER_GATE = int(os.environ.get("EMU_WGP_PEER_GATE", "0"))
 _simd_arb_shadow_events: list[dict] = []
 
 # Latency constants (in SQ clock cycles) — tuned against GFX1100 SQTT traces.
@@ -842,7 +851,14 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
         else:
           _fire_stall = (valu[i].raw_chain_depth != 12)
       else:
-        _fire_stall = (i > 0)
+        # Default path: wave 1+ queues behind wave 0 on the VALU port.
+        # When EMU_WGP_PEER_GATE is on, route through the arbiter's even/odd
+        # peer-group model so wave 1 (different WGP than wave 0) doesn't stall.
+        if _EMU_WGP_PEER_GATE:
+          _peer_parity = SimdArbiter.simd_for_wave(i)
+          _fire_stall = any(SimdArbiter.simd_for_wave(j) == _peer_parity for j in range(i))
+        else:
+          _fire_stall = (i > 0)
       if _fire_stall:
         _vwt_raw = valu[i].vgpr_write_time_map()
         _vh_raw = valu[i].issue_hist()
