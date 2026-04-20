@@ -775,7 +775,17 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
     # pos4+ dt=1 for all slot-1..3 waves). For L≥12 the queue saturates and every
     # non-wave-0 wave stalls on every RAW continuation (mb_valu_add_n{16,32}).
     _chain_L = raw_chain_L[i][pc[i]] if (i < len(raw_chain_L) and pc[i] < len(raw_chain_L[i])) else 0
-    if cat == 'valu' and vgpr_r_regs and (valu[i].raw_chain_depth >= 4 or _in_long_chain):
+    # Medium-VALU RAW gate: kernels with many VALUs but short same-reg chains (e.g.
+    # mb_f2_raw_all_banks_n4: 4 interleaved RAW chains of 3-4 each, total ~12 VALU).
+    # HW_ID probe (2026-04-20) confirmed all waves land on SIMD 0, so wave 1+ queues
+    # behind wave 0's stream. HW shows wave 1+ dt=5 on every RAW continuation
+    # for the first 3 chain positions, then drains. raw_chain_depth is pre-increment:
+    # depth 1-2 corresponds to chain_pos 2-3 (first RAW continuation positions).
+    # Gate threshold ≥10 VALU preserves short kernels (mb_valu_add_n4: 4 VALU;
+    # n8: 8 VALU — already handled by long_raw_chain).
+    _medium_valu_gate = (wave_valu_count[i] >= 10 and 1 <= valu[i].raw_chain_depth <= 2
+                         and cat == 'valu' and not is_vopd)
+    if cat == 'valu' and vgpr_r_regs and (valu[i].raw_chain_depth >= 4 or _in_long_chain or _medium_valu_gate):
       if _chain_L and 6 <= _chain_L <= 11:
         # Mixed kernel (chain embedded in significant non-chain VALU work) → HW drains
         # dispatch queue after 3 stalls (chain_pos 4+ at dt=1). Pure chain kernel

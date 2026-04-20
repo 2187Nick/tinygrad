@@ -40,20 +40,24 @@ from tinygrad.runtime.autogen.amd.rdna3.ins import (
 from tinygrad.renderer.amd.dsl import s, v
 
 # HW_ID encoded simm16: (size-1)<<11 | offset<<6 | hwRegId
-# Full HW_ID: hwRegId=4, offset=0, size=32 → simm16 = (32-1)<<11 | 4 = 0xF804
-HWREG_HW_ID_FULL = (32 - 1) << 11 | 0 << 6 | 4
+# RDNA3 HW_ID1: hwRegId=23, offset=0, size=32 → simm16 = (32-1)<<11 | 23
+# RDNA3 HW_ID1 layout: [3:0]WAVE_ID [5:4]SIMD_ID [9:6]WGP_ID [12:10]SA_ID [14:13]SE_ID
+# RDNA3 HW_ID2 (hwRegId=24): [3:0]QUEUE_ID [7:4]PIPE_ID [11:8]ME_ID [15:12]STATE_ID
+#                            [19:16]WG_ID [23:20]VM_ID
+HWREG_HW_ID1_FULL = (32 - 1) << 11 | 0 << 6 | 23
+HWREG_HW_ID2_FULL = (32 - 1) << 11 | 0 << 6 | 24
 
 
 def custom_probe_hw_id(A):
-  """Kernel: every wave stores its 32-bit HW_ID to A[gidx0]."""
+  """Kernel: every wave stores its HW_ID1 to A[gidx0]. HW_ID1 has {WAVE_ID, SIMD_ID, WGP_ID, SA_ID, SE_ID}."""
   A = A.flatten()
   assert A.dtype.base == dtypes.uint32
   threads = UOp.special(A.size, "lidx0")
   insts = [
     s_load_b64(s[0:1], s[0:1], soffset=NULL),           # buffer ptr
     s_waitcnt_lgkmcnt(sdst=NULL, simm16=0),
-    s_getreg_b32(s[2], simm16=HWREG_HW_ID_FULL),         # read full HW_ID → s2
-    v_mov_b32_e32(v[1], s[2]),                           # broadcast to v1
+    s_getreg_b32(s[2], simm16=HWREG_HW_ID1_FULL),        # HW_ID1 → s2
+    v_mov_b32_e32(v[1], s[2]),                           # broadcast HW_ID1
     v_lshlrev_b32_e32(v[0], 2, v[0]),                    # lane*4 byte offset
     global_store_b32(addr=v[0], data=v[1], saddr=s[0:1]),
     s_endpgm(),
@@ -65,23 +69,31 @@ def custom_probe_hw_id(A):
                   UOp(Ops.LINEAR, src=tuple([UOp(Ops.INS, arg=x) for x in insts]))))
 
 
-def decode_hw_id(v: int) -> dict:
+def decode_hw_id(v1: int, v2: int) -> dict:
+  """Decode RDNA3 HW_ID1 (v1) and HW_ID2 (v2)."""
   return {
-    "wave_id":  v & 0xF,
-    "simd_id": (v >> 4) & 0x3,
-    "pipe_id": (v >> 6) & 0x3,
-    "cu_id":   (v >> 8) & 0xF,
-    "sh_id":   (v >> 12) & 0x7,
-    "se_id":   (v >> 15) & 0xF,
-    "tg_id":   (v >> 20) & 0xF,
-    "vm_id":   (v >> 24) & 0xF,
-    "raw_hex": f"0x{v:08x}",
+    # HW_ID1
+    "wave_id":  v1 & 0xF,
+    "simd_id": (v1 >> 4) & 0x3,
+    "wgp_id":  (v1 >> 6) & 0xF,
+    "sa_id":   (v1 >> 10) & 0x7,
+    "se_id":   (v1 >> 13) & 0x3,
+    "dp_rate": (v1 >> 15) & 0x7,
+    # HW_ID2
+    "queue_id": v2 & 0xF,
+    "pipe_id": (v2 >> 4) & 0xF,
+    "me_id":   (v2 >> 8) & 0xF,
+    "state_id":(v2 >> 12) & 0xF,
+    "wg_id":   (v2 >> 16) & 0xF,
+    "vm_id":   (v2 >> 20) & 0xF,
+    "raw1_hex": f"0x{v1:08x}",
+    "raw2_hex": f"0x{v2:08x}",
   }
 
 
-def run_probe(n_threads: int, runs: int = 5) -> list[dict]:
-  """Launch probe kernel N times with `n_threads` lanes. Returns list of per-run decoded HW_IDs per wave."""
-  import functools
+def run_probe(n_waves: int, runs: int = 5, lanes_per_wave: int = 32) -> list[dict]:
+  """Launch probe kernel N times with `n_waves` waves. Each thread writes HW_ID1 (1 uint32)."""
+  n_threads = n_waves * lanes_per_wave
   results = []
   for r in range(runs):
     buf = Tensor.zeros(n_threads, dtype=dtypes.uint32).contiguous().realize()
@@ -89,15 +101,15 @@ def run_probe(n_threads: int, runs: int = 5) -> list[dict]:
     buf.realize()
     Device[Device.DEFAULT].synchronize()
     arr = buf.numpy().tolist()
-    # Each wave has 64 lanes; all lanes of a wave see the same HW_ID.
     per_wave = []
-    for wave_start in range(0, n_threads, 64):
-      wave_ids = set(arr[wave_start:wave_start + 64])
-      if len(wave_ids) != 1:
-        per_wave.append({"error": f"wave at lane {wave_start} has {len(wave_ids)} distinct HW_IDs: {wave_ids}"})
+    for wave_idx in range(n_waves):
+      base = wave_idx * lanes_per_wave
+      hwid1s = set(arr[base+i] for i in range(lanes_per_wave))
+      if len(hwid1s) != 1:
+        per_wave.append({"error": f"wave {wave_idx} non-uniform hwid1={[hex(v) for v in sorted(hwid1s)[:4]]}"})
         continue
-      per_wave.append(decode_hw_id(wave_ids.pop()))
-    results.append({"run": r, "n_threads": n_threads, "waves": per_wave})
+      per_wave.append(decode_hw_id(hwid1s.pop(), 0))
+    results.append({"run": r, "n_threads": n_threads, "n_waves": n_waves, "waves": per_wave})
   return results
 
 
@@ -122,28 +134,34 @@ def main():
     n_threads = n_waves * 64
     print(f"=== sweep: {n_waves} waves ({n_threads} threads) ===")
     try:
-      runs = run_probe(n_threads, runs=10)
+      runs = run_probe(n_waves, runs=10)
     except Exception as e:
       print(f"  FAILED: {e}")
       report["sweeps"].append({"n_waves": n_waves, "error": str(e)})
       continue
-    # Summarize placement across runs
-    placements = {}    # (cu, simd) -> count
-    per_wave_simd = {} # wave_idx -> set of SIMDs observed across runs
+    # Summarize placement across runs: key on (se, sa, wgp, simd) which uniquely
+    # identifies a SIMD across the whole chip.
+    placements = {}
+    per_wave_simd = {}
     for run in runs:
       for widx, w in enumerate(run["waves"]):
         if "error" in w: continue
-        key = (w["cu_id"], w["simd_id"])
+        key = (w["se_id"], w["sa_id"], w["wgp_id"], w["simd_id"])
         placements[key] = placements.get(key, 0) + 1
         per_wave_simd.setdefault(widx, set()).add(w["simd_id"])
-    print(f"  placements (cu,simd): {sorted(placements.items())}")
+    print(f"  placements (se,sa,wgp,simd): {sorted(placements.items())}")
     print(f"  per-wave SIMD stability: "
           f"{sum(1 for s in per_wave_simd.values() if len(s) == 1)} stable / {len(per_wave_simd)} total")
+    # Show first run's wave→slot mapping
+    if runs and runs[0]["waves"] and "error" not in runs[0]["waves"][0]:
+      r0_map = [(i, (w["se_id"], w["sa_id"], w["wgp_id"], w["simd_id"], w["wave_id"]))
+                for i, w in enumerate(runs[0]["waves"]) if "error" not in w]
+      print(f"  run0 wave→(se,sa,wgp,simd,wave_slot): {r0_map[:8]}{' ...' if len(r0_map) > 8 else ''}")
     report["sweeps"].append({
       "n_waves": n_waves,
       "n_threads": n_threads,
       "runs": runs,
-      "placements_summary": {f"cu{k[0]}_simd{k[1]}": v for k, v in placements.items()},
+      "placements_summary": {f"se{k[0]}_sa{k[1]}_wgp{k[2]}_simd{k[3]}": v for k, v in placements.items()},
       "wave_simd_stable_count": sum(1 for s in per_wave_simd.values() if len(s) == 1),
     })
 

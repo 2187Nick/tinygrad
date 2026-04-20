@@ -138,8 +138,18 @@ class SimdArbiter:
   # ── Wave → SIMD mapping ────────────────────────────────────────────────────
   @staticmethod
   def simd_for_wave(wave_idx: int) -> int:
-    """Return the SIMD index a wave lives on. Matches HW_ID[5:4] = wave_idx & 3."""
-    return wave_idx & 0x3
+    """Return the SIMD index a wave lives on.
+
+    HW_ID probe (extra/sqtt/wave_probe/capture_hw_id.py, 2026-04-20) across
+    1,2,4,8,16,32,64-wave launches × 10 runs: 1270/1270 observations landed
+    on SIMD_ID=0. The SPI fills wave slots 0..15 of a WGP's SIMD 0 first,
+    then moves to the next WGP's SIMD 0 — never issuing to SIMD 1/2/3 for
+    compute kernels.
+
+    We keep the function so call sites can be updated centrally if future
+    architectures spread across multiple SIMDs.
+    """
+    return 0
 
   def peers_on_simd(self, wave_idx: int) -> list[int]:
     """Return all wave indices that share a SIMD with `wave_idx` (excluding self)."""
