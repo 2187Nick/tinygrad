@@ -10,14 +10,19 @@ Architecture recap
 ------------------
 RDNA3 CU has 4 SIMDs × 32 lanes. A wave64 wave runs on a single SIMD across
 two back-to-back 32-lane issues. Wave→SIMD mapping is fixed at dispatch and
-observable via HW_ID[5:4] — emu.py:3365 already uses
-`SIMD_ID = wave_idx % 4`, so we adopt the same rule here.
+observable via HW_ID[5:4].
+
+HW_ID probe (extra/sqtt/wave_probe/capture_hw_id.py, 2026-04-20) confirmed
+that compute shader waves ALWAYS land on SIMD 0, regardless of wave count
+(1-64 waves). The SPI fills slots 0..15 of a WGP's SIMD 0 before moving to
+the next WGP — SIMD 1/2/3 are never used for compute. simd_for_wave()
+therefore always returns 0.
 
 Each SIMD owns an independent VALU issue port. Waves sharing a SIMD serialize
 through that port; waves on different SIMDs issue in parallel. VOPD dual-
 issue consumes BOTH lanes of a single SIMD in one cycle — it does NOT multi-
-SIMD serialize (HW `mb_vopd_chain_n4_raw` pipelines at 1cy even when all 4
-waves fall on SIMD 0 via i%4 for n=4).
+SIMD serialize (HW `mb_vopd_chain_n4_raw` pipelines at 1cy even when
+all 4 waves share SIMD 0, as confirmed by HW_ID probe 2026-04-20).
 
 Heuristics this arbiter is intended to eventually subsume
 --------------------------------------------------------
@@ -110,7 +115,7 @@ from __future__ import annotations
 from test.mockgpu.amd.sq_timing.constants import CONST, TimingConstants
 
 
-N_SIMDS = 4          # RDNA3 CUs have 4 SIMDs — HW_ID[5:4] confirms (emu.py:3365)
+N_SIMDS = 4   # RDNA3 has 4 physical SIMDs; compute waves always land on SIMD 0 (HW_ID probe 2026-04-20)
 NO_OWNER = -1
 
 

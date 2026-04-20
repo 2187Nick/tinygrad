@@ -16,30 +16,28 @@ from test.mockgpu.amd.sq_timing.simd_arbiter import SimdArbiter, N_SIMDS, NO_OWN
 
 class TestSimdForWave(unittest.TestCase):
   def test_mapping_matches_hw_id(self):
-    # emu.py:3365 emits HW_ID[5:4] = wave_idx & 3. The arbiter mapping MUST
-    # track that: a divergence here would mean simulation-time arbitration
-    # contradicts run-time HW_ID reporting.
+    # HW_ID probe 2026-04-20: 1270/1270 observations confirmed SIMD_ID=0 for all
+    # compute waves. emu.py encodes HW_ID[5:4]=0 accordingly.
     for w in range(64):
-      self.assertEqual(SimdArbiter.simd_for_wave(w), w & 0x3)
+      self.assertEqual(SimdArbiter.simd_for_wave(w), 0)
 
   def test_n_simds_constant(self):
     self.assertEqual(N_SIMDS, 4)
 
 
 class TestPeersOnSimd(unittest.TestCase):
-  def test_four_waves_each_on_distinct_simd(self):
+  def test_four_waves_each_on_simd_zero(self):
     a = SimdArbiter(4)
+    # All 4 waves are on SIMD 0; each has the other 3 as peers
     for w in range(4):
-      self.assertEqual(a.peers_on_simd(w), [])
+      self.assertEqual(a.peers_on_simd(w), [x for x in range(4) if x != w])
 
-  def test_sixteen_waves_modulo_four_groupings(self):
+  def test_sixteen_waves_all_on_simd_zero(self):
     a = SimdArbiter(16)
-    # Wave 0 shares SIMD 0 with waves 4, 8, 12
-    self.assertEqual(a.peers_on_simd(0), [4, 8, 12])
-    # Wave 5 shares SIMD 1 with waves 1, 9, 13
-    self.assertEqual(a.peers_on_simd(5), [1, 9, 13])
-    # Wave 15 shares SIMD 3 with waves 3, 7, 11
-    self.assertEqual(a.peers_on_simd(15), [3, 7, 11])
+    # All 16 waves land on SIMD 0 — every other wave is a peer
+    self.assertEqual(a.peers_on_simd(0), list(range(1, 16)))
+    self.assertEqual(a.peers_on_simd(5), [x for x in range(16) if x != 5])
+    self.assertEqual(a.peers_on_simd(15), list(range(15)))
 
   def test_excludes_self(self):
     a = SimdArbiter(16)
@@ -63,11 +61,10 @@ class TestPortAvail(unittest.TestCase):
 
   def test_port_avail_for_wave_lookup(self):
     a = SimdArbiter(16)
-    a.set_port_avail(1, 42)
-    # Wave 5 is on SIMD 1 (5 & 3 == 1)
+    a.set_port_avail(0, 42)
+    # All waves are on SIMD 0 (HW_ID probe 2026-04-20)
     self.assertEqual(a.port_avail_for_wave(5), 42)
-    # Wave 2 is on SIMD 2 — still zero
-    self.assertEqual(a.port_avail_for_wave(2), 0)
+    self.assertEqual(a.port_avail_for_wave(2), 42)
 
 
 class TestOwnerTracking(unittest.TestCase):

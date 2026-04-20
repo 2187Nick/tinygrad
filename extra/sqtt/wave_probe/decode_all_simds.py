@@ -17,7 +17,7 @@ Usage:
       extra/sqtt/wave_probe/captures/raw_sqtt_<ts>
 """
 import os, sys, json, pickle, pathlib
-from collections import defaultdict
+from collections import defaultdict, deque
 
 _repo_root = pathlib.Path(__file__).resolve().parents[3]
 if str(_repo_root) not in sys.path: sys.path.insert(0, str(_repo_root))
@@ -26,24 +26,22 @@ from tinygrad.renderer.amd.sqtt import decode, WAVESTART, WAVESTART_RDNA4, WAVEE
 
 
 def decode_all_simds(blob: bytes) -> dict:
-  """Return {(cu, simd): [(wave_id, start_time, end_time), ...]} from a raw SQTT blob."""
-  wavestarts: dict[tuple[int, int, int], int] = {}   # (cu, simd, wave) → start_time
+  """Return {(cu, simd): [(wave_slot, start_time, end_time), ...]} from a raw SQTT blob."""
+  open_waves: dict[tuple[int, int, int], deque[int]] = defaultdict(deque)  # (cu, simd, wave) → deque of start_times
   result: dict[tuple[int, int], list] = defaultdict(list)
   for p in decode(blob):
     if isinstance(p, (WAVESTART, WAVESTART_RDNA4)):
       key = (p.cu, p.simd, p.wave)
-      wavestarts[key] = p._time
+      open_waves[key].append(p._time)
     elif isinstance(p, WAVEEND):
-      # WAVEEND doesn't carry cu/simd — match by wave index against the most recent WAVESTART for that wave.
-      candidates = [k for k in wavestarts if k[2] == p.wave]
-      if not candidates: continue
-      # Use the earliest unclosed one
-      k = min(candidates, key=lambda k: wavestarts[k])
-      start_t = wavestarts.pop(k)
-      result[(k[0], k[1])].append((k[2], start_t, p._time))
+      key = (p.cu, p.simd, p.wave)
+      if not open_waves[key]: continue
+      start_t = open_waves[key].popleft()
+      result[(p.cu, p.simd)].append((p.wave, start_t, p._time))
   # Include still-open waves (kernel may have truncated trace)
-  for (cu, simd, wave), start_t in wavestarts.items():
-    result[(cu, simd)].append((wave, start_t, None))
+  for (cu, simd, wave), pending in open_waves.items():
+    for start_t in pending:
+      result[(cu, simd)].append((wave, start_t, None))
   return dict(result)
 
 
@@ -100,7 +98,9 @@ def main():
     json.dump(all_results, f, indent=2)
   print(f"\nSummary saved: {out_path}")
 
-  # Compare against EMU assumption: wave_idx % 4 = simd_id
+  # Compare against the EMU assumption as a rough diagnostic. SQTT's `wave` is a
+  # hardware wave slot, not a launch wave index, so this can still mismatch even
+  # when scheduling is behaving as expected.
   print("\n=== EMU assumption check: wave_idx % 4 == observed simd_id? ===")
   matches, mismatches = 0, 0
   for kernel, summary in all_results.items():

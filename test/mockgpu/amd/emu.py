@@ -1673,10 +1673,12 @@ def _init_sqtt_encoder(entry_pc: int):
         if hasattr(inst, fn):
           o = getattr(getattr(inst, fn), 'offset', -1)
           if 0 <= o <= 106: salu_sgpr_r.append(o)
-      # is_mul flag: s_mul_i32 / s_mul_hi_u32 / s_mul_hi_i32 have deeper execution
+      # is_slow flag: S_MUL_{I32,HI}, S_OR/AND/BFE_B32 have deeper execution
       # pipeline, extending the SALU→VMEM store drain from 7cy to 15cy.
-      salu_is_mul = 'S_MUL_I32' in op_name or 'S_MUL_HI' in op_name
-      salu_extra = (tuple(salu_sgpr_w), tuple(salu_sgpr_r), salu_is_mul)
+      salu_is_slow = ('S_MUL_I32' in op_name or 'S_MUL_HI' in op_name
+                      or 'S_OR_B32' in op_name or 'S_AND_B32' in op_name
+                      or 'S_BFE_U32' in op_name or 'S_BFE_I32' in op_name)
+      salu_extra = (tuple(salu_sgpr_w), tuple(salu_sgpr_r), salu_is_slow)
     extra = ds_extra if cat == 'ds_rd' else (salu_extra if cat == 'salu' else vmem_extra)
     events.append((INST, {'wave': w, 'op': mem_op_val}, cat, extra))
 
@@ -3620,9 +3622,9 @@ def _init_wave(lib: int, wave_start: int, total_threads: int, lx: int, ly: int, 
     st._write_vgpr(0, lane, ((tid // (lx * ly)) << 20) | (((tid // lx) % ly) << 10) | (tid % lx))
   st._write_sgpr(SCRATCH_STRIDE_IDX, scratch_size)
   # Store HW register values at SGPR[SGPR_COUNT-16 .. SGPR_COUNT-1] for s_getreg_b32 emulation.
-  # HW_ID (hwRegId=4): WAVE_ID[3:0], SIMD_ID[5:4], PIPE_ID[7:6], CU_ID[11:8], ...
+  # HW_ID (hwRegId=4): WAVE_ID[3:0], SIMD_ID[5:4]=0 (always 0 for compute), PIPE_ID[7:6], CU_ID[11:8], ...
   wave_idx = wave_start // wave_size  # wave index within this workgroup (0, 1, 2, 3 for 256 threads / 64 wave_size)
-  hw_id = (wave_idx & 0xF) | ((wave_idx & 0x3) << 4)  # WAVE_ID = wave_idx, SIMD_ID = wave_idx % 4
+  hw_id = wave_idx & 0xF  # WAVE_ID = wave_idx, SIMD_ID = 0 (HW_ID probe 2026-04-20: 1270/1270 on SIMD 0)
   st._write_sgpr(SGPR_COUNT - 16 + 4, hw_id)  # HW_REGISTERS[4] = HW_ID
   return st
 
