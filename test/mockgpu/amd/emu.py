@@ -715,6 +715,14 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
           issue_cycle += -1 if i == 0 else 1
           scal[i].consume_drain_branch()
 
+    # VMEM_WR→VALU pipe contention: HW mb_vmem_store_b32_chain_n4 shows a VALU
+    # following a global_store_b32 stamps +8cy after the store, while EMU produces
+    # +1cy. The store dispatches through a serialized store-pipe that briefly
+    # blocks subsequent VALU issues on the same wave. Evidence: chain_n4 waves 0-15
+    # show consistent HW_Δ=8 for post-store v_add; emu had EMU_Δ=1.
+    if cat == 'valu':
+      issue_cycle = max(issue_cycle, vmem[i].post_wr_valu_ready)
+
     # VGPR RAW dispatch: SQTT stamps at DISPATCH, not completion. HW back-to-back
     # v_add_f32(v[1],1.0,v[1]) chains measure dt=1cy for wave 0 (mb_valu_add_nN
     # wave 0 unanimous). But waves 1+ pay 4cy extra once the chain is deep enough
@@ -941,6 +949,9 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
       # Slow-fresh forwarding stall overlaps with VMEM execution: reduce drain by the slow-fresh extension
       _drain = max(_VMEM_EXEC_MIN, _VMEM_DRAIN_CYCLES - vmem[i].wr_slow_ext) if _vmem_fwd_stall > 0 else _VMEM_DRAIN_CYCLES
       vmem[i].set_drain_deadline(issue_cycle + _drain)
+      # Post-store VALU stall: HW mb_vmem_store_b32_chain_n4 shows next VALU
+      # stamps +8cy after store dispatch (emu had +1cy).
+      vmem[i].set_post_wr_valu_ready(issue_cycle + 8)
 
     # Track multi-cycle VALU (transcendental) completion for s_waitcnt_depctr, and trans pipeline occupancy
     if _is_trans:

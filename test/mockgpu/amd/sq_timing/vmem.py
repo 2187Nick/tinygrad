@@ -29,6 +29,11 @@ class VmemPipe:
     - `valu_vmem_rd_deadline`: VALU→VMEM_RD forwarding deadline.
     - `vmem_drain_deadline`: VMEM pipeline drain — blocks s_nop/s_endpgm until
       the VMEM unit has accepted the op.
+    - `post_wr_valu_ready`: VMEM_WR→VALU stall deadline. HW probe
+      `mb_vmem_store_b32_chain_n4` shows VALU following a global_store_b32
+      stamps +8cy after the store while EMU produces +1cy. This deadline
+      forces the next VALU (same wave) to wait for the store-pipe dispatch
+      window to drain.
     - `vm_pend`: pending VMEM completion cycles for s_waitcnt_vmcnt drain.
   """
   def __init__(self, const: TimingConstants = CONST):
@@ -38,6 +43,7 @@ class VmemPipe:
     self._wr_slow_ext = 0
     self._rd_deadline = 0
     self._drain_deadline = 0
+    self._post_wr_valu_ready = 0
     self._vm_pend: list[int] = []
 
   # ── Simple accessors for read-only queries from emu.py ─────────────────────
@@ -51,6 +57,8 @@ class VmemPipe:
   def rd_deadline(self) -> int: return self._rd_deadline
   @property
   def drain_deadline(self) -> int: return self._drain_deadline
+  @property
+  def post_wr_valu_ready(self) -> int: return self._post_wr_valu_ready
 
   def vm_pending(self) -> list[int]:
     """Return the raw pending VMEM completion list (caller may sort/index)."""
@@ -62,6 +70,7 @@ class VmemPipe:
   def set_wr_slow_ext(self, v: int) -> None: self._wr_slow_ext = v
   def set_rd_deadline(self, cycle: int) -> None: self._rd_deadline = cycle
   def set_drain_deadline(self, cycle: int) -> None: self._drain_deadline = cycle
+  def set_post_wr_valu_ready(self, cycle: int) -> None: self._post_wr_valu_ready = cycle
 
   def cap_wr_deadline(self, cycle: int) -> None:
     """Clamp wr_deadline to min(current, cycle) — used by s_nop residual cap."""
