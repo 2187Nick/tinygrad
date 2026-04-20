@@ -3,9 +3,112 @@
 ## Bounty Goal
 $1,000 bounty: Make tinygrad's software GPU emulator produce cycle-accurate instruction timing matching real AMD 7900 XTX hardware, validated via SQTT (Shader Queue Thread Trace).
 
+## 2026-04-20 pm — 50×100 HW classification + BUG_DET inventory
+
+**Current state (unchanged this cycle):** **strict 55904/69862 (80.0%)**, MODAL 66067/69862 (94.6%).
+Emu code unchanged; session delivered measurement infrastructure only.
+
+### New tooling
+
+1. **`extra/sqtt/wave_probe/capture_expansion.py`** — 29 gap-targeted kernels × 100
+   runs with WAVESTART timestamps + per-launch-config HW_ID1 probe. Paired list
+   picked from current strict-compare miss counts (all ≥55 tokens missing,
+   mostly `mb_f2_*` RAW variants, `mb_g4_s_*_n8` SALU chains, `mb_c4_depctr_*`,
+   `mb_cndmask_*` tails, `mb_vopd_*` mixes). Complements capture_50x100.
+
+2. **`extra/sqtt/wave_probe/classify_mismatches.py`** — compares per-token HW
+   distribution (from 50×100 captures) against EMU's single prediction and
+   buckets every (wave, token) into HIT / NEAR_MISS / WAVE_VARIANCE / NOISY /
+   **BUG_DET**. Output at
+   `extra/sqtt/wave_probe/captures/targeted/mismatch_classification.json`.
+
+### First classifier run — 43 kernels / 7,986 tokens
+
+| Bucket | Tokens | % | Fix strategy |
+|---|---|---|---|
+| HIT | 5,119 | 64.1% | — already matches |
+| NEAR_MISS (EMU inside HW range) | 1,023 | 12.8% | — already optimal per-token |
+| NOISY (HW stdev >3 across 100 runs) | 1,444 | 18.1% | Emu can at best land ±3 — MODAL catches |
+| WAVE_VARIANCE (HW bimodal) | 150 | 1.9% | Stochastic scheduler (plan §1/2) |
+| **BUG_DET (HW 100-run stable, EMU wrong)** | **250** | **3.1%** | **Deterministic rule fixes — actionable** |
+
+The 250 BUG_DET tokens are the highest-leverage remaining work. Top concentrations:
+
+- `mb_vopd_chain_n4_raw`: 22
+- `mb_vmem_store_b128_isolated`: 19
+- `mb_vopd_lit_chain_n4`: 18
+- `mb_vmem_store_b64_isolated`: 18
+- `mb_vmem_store_b32_chain_n4`: 16
+- `mb_valu_add_n16`: 14
+- `mb_valu_add_n8`: 14
+- `mb_cndmask_sgpr_fresh_n4`: 14
+- `mb_e1_valu_add_n24`: 14
+- `mb_vopd_fmac_mul_n4`: 14
+
+### Two root causes isolated (both blocked, see below)
+
+**1. `s_waitcnt_vmcnt(NULL)` stamp — HW=3cy, EMU=300cy (50+ tokens affected)**
+
+EMU stamps the waitcnt at wait-resolution (`stall_until` = last VMEM completion
+cycle); HW stamps at DISPATCH. HW evidence: mb_vmem_store_b{32,64,128}_*  wave 1+
+`s_waitcnt_vmcnt(NULL)` after a store shows dt=3 unanimous across 100 runs
+regardless of when the store actually completes (VMEM_LATENCY=300).
+
+Attempted fix (`sqtt_stamp = min(stall_until, _initial_ready + 2)`): regressed
+113 kernels with tok_count dropping ~24 each. **Root cause of regression**:
+decoupling sqtt_stamp from ready[i] means the NEXT instruction's dt is computed
+relative to the waitcnt's new stamp (~+3cy) not its effective resolution time
+(~+300cy), making the next inst's dt exceed the comparator's 50cy DRAM-wait
+filter and drop out of the comparison. Requires a deeper refactor: either
+per-wave dt filter exemption for next-after-waitcnt, or a separate
+"sqtt_stamp" slot in `timed` entries so subsequent entries derive their deltas
+from the pre-fix `stall_until` instead.
+
+**2. b64/b128 VALU→store forwarding — HW=18cy, EMU=24cy (~10 tokens per kernel)**
+
+Current `_vmem_wr_issue` computes `deadline + width_extra` with
+`width_extra = store_vgprs - 1`. For b128 (store_vgprs=4): +3cy. HW shows b128
+at 18cy unanimous. The width_extra penalty over-counts when
+`vgprs_written ≥ store_vgprs` (data already staged in consecutive VALUs):
+pipeline gathers them in parallel, no per-VGPR serial cost.
+
+Proposed fix (not applied): when `vgprs_written ≥ store_vgprs AND store_vgprs > 1`,
+return `deadline` unchanged (no width_extra). This would reduce b128/b64 first-
+store dt by 3cy matching HW. Risk: could under-predict for truly scattered
+writes. Needs validation against mb_vmem_store_b128_indep variants and mixed
+cndmask/VOPC chains.
+
+### Stochastic scheduler — 50×100 data arguments for simpler rules first
+
+Section 4 of `capture_50x100.py analyze` dumped 50 kernels' per-wave mode dts.
+Observations:
+
+- **Startup-stagger pattern is deterministic, not stochastic.** First VALU after
+  waitcnt_vmcnt scales linearly with wave_idx beyond wave 3. Slopes:
+  - n=8 chain: `[1,1,1,8,24,59,92,127,157,225,...]` ~32cy/wave
+  - n=16 chain: `[1,101,1,257,300,567,...]` ~155cy/wave
+  - n=24 chain: `[1,1,1,67,180,295,408,523,...]` ~115cy/wave
+  - n=32 chain: IDENTICAL to n=16 (so slope plateaus around L≥16)
+- **Chain mid-drop** — wave 4+ chain-continuation stalls at +4cy for positions
+  1..5, then HW DROPS to 1cy at ~position L*0.75 (n=8 pos 6, n=16 pos 12), then
+  stalls resume. EMU over-stalls by +4 at the drop position.
+- **Some strict mismatches reflect reference-capture randomness** — e.g.
+  mb_valu_add_n8 wave 4+ first VALU: 100-run mode=20cy but the strict-reference
+  pkl caught a run where wave 5-15 also measured 1cy. Adding the stagger to
+  EMU would match modal HW but REGRESS the randomly-chosen strict reference.
+
+Actionable next steps (ordered by confidence):
+
+1. Fix BUG_DET #2 (width_extra) — narrow, 10-20 BUG_DET tokens, low regression risk.
+2. Refactor BUG_DET #1 (waitcnt stamp) properly via two-slot timed entry.
+3. Pick ONE clear wave-stagger pattern (e.g. chain mid-drop) and implement
+   chain-position-aware wave-credit expiry.
+4. Only after the above: tackle startup-stagger (100-run mode vs reference
+   mismatch makes this a poison pill for static strict scoring).
+
 ## 2026-04-20 — HW_ID probe lands + 4 follow-on emu rules
 
-**Current state:** **strict 55863/69862 (80.0%)**, MODAL 66003/69862 (94.5%).
+**Prior state:** **strict 55863/69862 (80.0%)**, MODAL 66003/69862 (94.5%).
 Crossed the 80% strict threshold for the first time.
 
 ### Session delta this window (+186 strict, -52 MODAL vs start)
