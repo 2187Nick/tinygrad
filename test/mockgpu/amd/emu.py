@@ -274,6 +274,7 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
   valu_ds_wr_deadline = [0] * n   # VALU→DS_WR forwarding
   valu_ds_rd_deadline = [0] * n   # VALU→DS_RD forwarding
   last_vmem_wr_issue = [0] * n    # last VMEM_WR issue cycle (for back-to-back store pipe-reuse)
+  post_ds_wr_valu_ready = [0] * n  # +8cy VALU stall after ds_store (mirrors post_wr_valu_ready for VMEM)
   # Per-wave VMEM pipeline tracker (EMU_REWRITE_DESIGN §1.6 / §5 Step 4).
   # Owns valu_vmem_wr_deadline / wr_set_time / wr_slow_ext / rd_deadline /
   # vmem_drain_deadline / vm_pend. `_vmem_wr_bypass_active` (cross-wave) still
@@ -747,6 +748,10 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
     # show consistent HW_Δ=8 for post-store v_add; emu had EMU_Δ=1.
     if cat == 'valu':
       issue_cycle = max(issue_cycle, vmem[i].post_wr_valu_ready)
+      # Mirror rule for LDS store→VALU: mb_lds_store_then_valu_forward shows
+      # v_add 8cy after ds_store (EMU was 1cy). LDS store dispatches through
+      # a serialized unit analogous to VMEM store.
+      issue_cycle = max(issue_cycle, post_ds_wr_valu_ready[i])
 
     # VGPR RAW dispatch: SQTT stamps at DISPATCH, not completion. HW back-to-back
     # v_add_f32(v[1],1.0,v[1]) chains measure dt=1cy for wave 0 (mb_valu_add_nN
@@ -1026,6 +1031,7 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
     elif cat in ('ds_rd', 'ds_wr'):
       if cat == 'ds_wr':  # LDS writes serialize through shared unit
         lds.on_ds_write_issue(i, issue_cycle)
+        post_ds_wr_valu_ready[i] = issue_cycle + 8
       else:
         ds_bytes, ds_dest_base = (extra if extra is not None else (4, None))
         lds_complete, is_serialized = lds.on_ds_read_issue(i, issue_cycle, ds_bytes=ds_bytes)
