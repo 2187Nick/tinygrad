@@ -521,6 +521,14 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
           # dt=1 across all 16 waves; without set_drain each nop reused the
           # previous drain stamp and all stamped at the same cycle).
           nop_stamp = max(nop_start, ready[i])
+          # HW stamps s_nop(0) +2cy later when it directly follows a real
+          # instruction (not a drain event): mb_snop_0_after_valu and
+          # mb_snop_0_after_scalar show HW=3 EMU=1 uniformly across all 16 waves.
+          # Only apply when last_drain_stamp == -1 (no prior waitcnt/depctr drain).
+          if ib[i].last_drain_stamp < 0 and pc[i] > 0:
+            _prev_cat = wave_events[wid][pc[i] - 1][2]
+            if _prev_cat in ('valu', 'salu', 'vmem_wr', 'vmem_rd', 'ds_wr', 'ds_rd'):
+              nop_stamp += 2
           timed.append((nop_stamp, wid, pkt_cls, kwargs))
           ready[i] = nop_stamp + nop_cycles
           ib[i].set_drain(nop_stamp + nop_cycles)
