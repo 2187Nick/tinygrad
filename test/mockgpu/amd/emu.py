@@ -767,6 +767,22 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
           _fire_stall = (i >= 4 and valu[i].raw_chain_depth < 4)
         else:
           _fire_stall = (i >= 4)
+      elif _chain_L and _chain_L >= 14:
+        # Long chain dispatch-queue saturation: HW shows wave 0 streams the first 14
+        # chain adds at dt=1 (queue fills with RAW backlog), then stalls at chain_pos 14+
+        # (queue slot must free before issue). Waves 1-15 stall on every RAW position
+        # EXCEPT chain_pos 13 where the slot-0 wave's imminent queue-fill opens one
+        # dispatch slot for a peer wave. See mb_f1_valu_add_n{14,15,18,20,22,28,32},
+        # mb_e1_valu_add_n24, mb_f1_valu_{mul,fmac}_n16 — HW unanimous across waves 1-15
+        # showing dt=1 at chain_pos 13 (position [18] in trace index) and wave 0
+        # diverging to dt=4/5 starting at chain_pos 14 (position [19]).
+        # raw_chain_depth is pre-increment: at chain_pos N (N ≥ 1) it equals N-1
+        # since the increment happens AFTER this check. So chain_pos 13 → depth 12,
+        # chain_pos 14 → depth 13.
+        if i == 0:
+          _fire_stall = (valu[i].raw_chain_depth >= 13)
+        else:
+          _fire_stall = (valu[i].raw_chain_depth != 12)
       else:
         _fire_stall = (i > 0)
       if _fire_stall:
