@@ -955,6 +955,15 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
         if store_vgprs == 1 and _vmem_wr_bypass_active(i):
           wr_deadline -= _VALU_VMEM_WR_BYPASS
         issue_cycle = max(issue_cycle, wr_deadline)
+      # SALU → VMEM_WR drain: HW mb_salu_smov_n1/n4 show 7cy gap between last SALU
+      # and the following global_store, unanimous across all waves (EMU used to emit
+      # dt=1). The store pipeline waits for the scalar pipe to drain before accepting
+      # a new dispatch. Fire when the IMMEDIATELY previous event for this wave was a
+      # SALU (any SOP1/SOP2/SOPC/SOPK — matches decoder's cat='salu' bucket).
+      _prev_was_salu = (pc[i] > 0 and wave_events[wid][pc[i] - 1][2] == 'salu'
+                        and scal[i].last_salu_issue > 0)
+      if _prev_was_salu:
+        issue_cycle = max(issue_cycle, scal[i].last_salu_issue + 7)
       # Per-operand address VGPR forwarding: recently-written addr VGPRs need extra cycles to reach AGU
       if isinstance(extra, tuple) and extra[1] is not None:
         addr_wt = valu[i].vgpr_write_time_map().get(extra[1], 0)
