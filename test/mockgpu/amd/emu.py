@@ -237,6 +237,7 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
   # used by the slot-0 exemption in the wave-credit rule.
   long_raw_chain: list[list[bool]] = []
   raw_chain_L: list[list[int]] = []
+  wave_valu_count: list[int] = []
   for wid in wave_ids:
     events = wave_events[wid]
     seg_len = [0] * len(events)
@@ -261,6 +262,7 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
       p = end if end > p else p + 1
     long_raw_chain.append([L >= 6 for L in seg_len])
     raw_chain_L.append(list(seg_len))
+    wave_valu_count.append(sum(1 for e in events if e[2] == 'valu'))
 
   # Per-wave state
   pc = [0] * n
@@ -746,20 +748,34 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
     # short chains remain at dt=1 for all waves.
     _in_long_chain = (i < len(long_raw_chain) and pc[i] < len(long_raw_chain[i])
                       and long_raw_chain[i][pc[i]])
-    # Slot-0 exemption: HW shows slot-0 waves (indices 0-3, i.e. one per SIMD) win
-    # dt=1 on chains ≤11 deep — dispatch queue has enough depth for each SIMD's
-    # oldest wave to stream without stalling. For chains ≥12 the queue saturates
-    # and only wave 0 wins. See HW probes mb_valu_add_n{8,11} vs mb_valu_add_n{16,32}.
+    # Slot-0 exemption + medium-chain drain: HW shows slot-0 waves (indices 0-3,
+    # one per SIMD) win dt=1 on chains ≤11 deep — dispatch queue depth lets each
+    # SIMD's oldest wave stream without stalling. Non-slot-0 waves on L∈[6,11]
+    # stall only the FIRST 4 chain positions (dispatch queue depth ≈4), then drain
+    # to dt=1 — see mb_f2_raw_then_vopd / mb_f2_vopd_then_raw (HW pos0-3 dt=5,
+    # pos4+ dt=1 for all slot-1..3 waves). For L≥12 the queue saturates and every
+    # non-wave-0 wave stalls on every RAW continuation (mb_valu_add_n{16,32}).
     _chain_L = raw_chain_L[i][pc[i]] if (i < len(raw_chain_L) and pc[i] < len(raw_chain_L[i])) else 0
-    _slot_gate = (i >= 4) if _chain_L and _chain_L <= 11 else (i > 0)
-    if (cat == 'valu' and vgpr_r_regs and _slot_gate
-        and (valu[i].raw_chain_depth >= 4 or _in_long_chain)):
-      _vwt_raw = valu[i].vgpr_write_time_map()
-      _vh_raw = valu[i].issue_hist()
-      _last_valu_issue = _vh_raw[-1] if _vh_raw else -1
-      # RAW continuation: a source reg was written by the immediately-previous VALU
-      if _last_valu_issue > 0 and any(_vwt_raw.get(r, -1) == _last_valu_issue for r in vgpr_r_regs):
-        issue_cycle = max(issue_cycle, _last_valu_issue + 5)
+    if cat == 'valu' and vgpr_r_regs and (valu[i].raw_chain_depth >= 4 or _in_long_chain):
+      if _chain_L and 6 <= _chain_L <= 11:
+        # Mixed kernel (chain embedded in significant non-chain VALU work) → HW drains
+        # chain pos 4+ to dt=1. Pure chain kernel (just the chain + preamble) → HW
+        # stalls all positions at dt=5. Threshold diff ≥ 5 cleanly separates pure
+        # chains (total_valu = L+1, from a single preamble v_mov) from mixed kernels
+        # like mb_f2_raw_then_vopd where total_valu = L+9 (8 extra v_movs + 1 VOPD).
+        if wave_valu_count[i] >= _chain_L + 5:
+          _fire_stall = (i >= 4 and valu[i].raw_chain_depth < 4)
+        else:
+          _fire_stall = (i >= 4)
+      else:
+        _fire_stall = (i > 0)
+      if _fire_stall:
+        _vwt_raw = valu[i].vgpr_write_time_map()
+        _vh_raw = valu[i].issue_hist()
+        _last_valu_issue = _vh_raw[-1] if _vh_raw else -1
+        # RAW continuation: a source reg was written by the immediately-previous VALU
+        if _last_valu_issue > 0 and any(_vwt_raw.get(r, -1) == _last_valu_issue for r in vgpr_r_regs):
+          issue_cycle = max(issue_cycle, _last_valu_issue + 5)
     # Enforce trans ALU pipeline occupancy: trans instructions wait for the trans unit to be free
     _is_trans = cat == 'valu' and pkt_cls is INST and kwargs.get('op') == InstOp.VALUT_4
     # Trans-written VGPR readiness: non-trans VALU must wait for full trans writeback (27/31 cycles)
