@@ -81,6 +81,29 @@ Design notes
   policy). VOPD is modelled as consuming the same port for 1cy.
 - Wave→SIMD mapping is immutable per-dispatch and exposed as a method for
   future experimentation (e.g. verifying via RGP placement data).
+
+Dead-ends recorded
+-----------------
+**Naive 1cy/SIMD apply** (re-confirmed 2026-04-19): applying
+`issue_cycle = max(issue_cycle, port_avail)` for every VALU issue regresses
+strict from 54830→30654 (-24176) and MODAL from 65259→38674 (-26585). Same
+failure mode as the pre-session attempt noted in HANDOFF_OVERNIGHT.md
+Option A. Root cause: SQTT timestamps at DISPATCH, not at SIMD-VALU
+execute. The CU's dispatch ring accepts back-to-back same-SIMD issues into
+a per-SIMD queue that drains over many cycles — the 1cy/SIMD serialization
+happens AFTER SQTT stamping, not before. The existing heuristics
+(wave-credit RAW, long-chain lookahead, trans wave-stagger) model the
+dependency-driven stalls that DO show up in SQTT; the arbiter's extra
+40K+ "would-stall" cycles are queue-pressure noise that HW's dispatch
+buffering absorbs invisibly.
+
+Implication for cutover: a direct replacement of the heuristics with a
+1cy/SIMD port is not viable. Future work should either (a) model the
+per-SIMD dispatch QUEUE (credit-based, absorbs back-to-back issues up to
+queue depth, then stalls the CU dispatcher — matches MGPUSim), or
+(b) use the shadow telemetry as a calibration signal and only apply the
+stall in narrowly-gated cases (e.g. when peer-wave ready cycles also
+cluster within 2cy, indicating genuine queue pressure).
 """
 from __future__ import annotations
 
