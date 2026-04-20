@@ -126,8 +126,13 @@ _sqtt_debug_log: list[dict] = []  # populated by _simulate_sq_timing when _SQTT_
 # `_simulate_sq_timing` appends one dict summarizing how often the arbiter's
 # per-SIMD VALU port_avail would have forced a stall beyond the current
 # heuristics' output. Read by analysis scripts; never changes behaviour.
+# When SIMD_ARB_SHADOW=2, additionally records one dict PER VALU issue into
+# `_simd_arb_shadow_events` so analysis scripts can correlate shadow-mode
+# queue-pressure events against MODAL mismatches in rigorous_hw_test.py.
+# Analysis scripts align shadow events to emu_traces by (wave_id, stamp_cycle).
 _SIMD_ARB_SHADOW = int(os.environ.get("SIMD_ARB_SHADOW", "0"))
 _simd_arb_shadow_log: list[dict] = []
+_simd_arb_shadow_events: list[dict] = []
 
 # Latency constants (in SQ clock cycles) — tuned against GFX1100 SQTT traces.
 # Source of truth: `test/mockgpu/amd/sq_timing/constants.py::TimingConstants`.
@@ -228,7 +233,10 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
   # a VGPR written by the immediately-preceding VALU (no gap VGPRs). Used to detect
   # LONG chains (HW wave 1+ stall on chain depth ≥ 6 saturates the issue queue)
   # vs SHORT chains (all waves bypass). See mb_f1_valu_fmac_n16 vs mb_valu_add_n4.
+  # `raw_chain_L[i][pc]` stores the raw segment length (parallel to `long_raw_chain`),
+  # used by the slot-0 exemption in the wave-credit rule.
   long_raw_chain: list[list[bool]] = []
+  raw_chain_L: list[list[int]] = []
   for wid in wave_ids:
     events = wave_events[wid]
     seg_len = [0] * len(events)
@@ -252,6 +260,7 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
       for q in range(p, end): seg_len[q] = L
       p = end if end > p else p + 1
     long_raw_chain.append([L >= 6 for L in seg_len])
+    raw_chain_L.append(list(seg_len))
 
   # Per-wave state
   pc = [0] * n
@@ -737,7 +746,13 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
     # short chains remain at dt=1 for all waves.
     _in_long_chain = (i < len(long_raw_chain) and pc[i] < len(long_raw_chain[i])
                       and long_raw_chain[i][pc[i]])
-    if (cat == 'valu' and vgpr_r_regs and i > 0
+    # Slot-0 exemption: HW shows slot-0 waves (indices 0-3, i.e. one per SIMD) win
+    # dt=1 on chains ≤11 deep — dispatch queue has enough depth for each SIMD's
+    # oldest wave to stream without stalling. For chains ≥12 the queue saturates
+    # and only wave 0 wins. See HW probes mb_valu_add_n{8,11} vs mb_valu_add_n{16,32}.
+    _chain_L = raw_chain_L[i][pc[i]] if (i < len(raw_chain_L) and pc[i] < len(raw_chain_L[i])) else 0
+    _slot_gate = (i >= 4) if _chain_L and _chain_L <= 11 else (i > 0)
+    if (cat == 'valu' and vgpr_r_regs and _slot_gate
         and (valu[i].raw_chain_depth >= 4 or _in_long_chain)):
       _vwt_raw = valu[i].vgpr_write_time_map()
       _vh_raw = valu[i].issue_hist()
@@ -871,6 +886,31 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
       if _arb_pa > issue_cycle:
         _arb_would_stall_cy += (_arb_pa - issue_cycle)
         _arb_would_stall_count += 1
+      # Per-event shadow record: peer-wave ready clustering is the signal for
+      # genuine queue pressure (simd_arbiter.py dead-end: naive 1cy/SIMD
+      # regresses 24K tokens because SQTT stamps at dispatch, which absorbs
+      # back-to-back same-SIMD issues that aren't clustered).
+      if _SIMD_ARB_SHADOW >= 2:
+        _peer_c2 = 0
+        _peer_c1 = 0
+        for _pj in range(n):
+          if _pj == i or at_barrier[_pj] or wave_done[_pj]: continue
+          if SimdArbiter.simd_for_wave(_pj) != _arb_simd: continue
+          _d = abs(ready[_pj] - issue_cycle)
+          if _d <= 2: _peer_c2 += 1
+          if _d <= 1: _peer_c1 += 1
+        _simd_arb_shadow_events.append({
+          "wave_idx": i,            # simulation index (used for simd mapping)
+          "wave_id": wid,           # GPU wave ID (used for emu_traces correlation)
+          "pc": pc[i],
+          "simd": _arb_simd,
+          "issue_cycle": issue_cycle,
+          "stamp_cycle": stamp_cycle,
+          "port_avail_before": _arb_pa,
+          "would_stall_cy": max(0, _arb_pa - issue_cycle),
+          "peer_cluster_2cy": _peer_c2,
+          "peer_cluster_1cy": _peer_c1,
+        })
       arbiter.set_port_avail(_arb_simd, issue_cycle + 1)
       arbiter.set_last_issue_cycle(_arb_simd, issue_cycle)
 
@@ -1198,6 +1238,9 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
       "would_stall_cy": _arb_would_stall_cy,
       "would_stall_count": _arb_would_stall_count,
       "port_avail": list(arbiter.snapshot()["port_avail"]),
+      # events_end is the exclusive upper bound into _simd_arb_shadow_events
+      # for this kernel call — analysis slices [prev.events_end : events_end].
+      "events_end": len(_simd_arb_shadow_events),
     })
 
   return timed
