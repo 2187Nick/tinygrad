@@ -3,11 +3,29 @@
 ## Bounty Goal
 $1,000 bounty: Make tinygrad's software GPU emulator produce cycle-accurate instruction timing matching real AMD 7900 XTX hardware, validated via SQTT (Shader Queue Thread Trace).
 
-## 2026-04-19 — Batch E + Batch F + wave-credit RAW + long-chain lookahead
+## 2026-04-19 — End of session handoff
+
+**→ Overnight team: see [HANDOFF_OVERNIGHT.md](HANDOFF_OVERNIGHT.md) for
+options A-F, validation commands, and known-unfixed list.**
 
 ### Current state (after 403 total kernels × 69860 comparison tokens):
 - **Total MODAL:  65259/69860 exact (93.4%), 66782/69860 ±2 (95.6%)**
 - **Total strict: 54830/69860 exact (78.5%), 59655/69860 ±2 (85.4%)**
+
+### Session delta (this window):
+Started at 337/340 reference strict / 41458 microbench MODAL on a smaller 280-
+kernel corpus. After adding Batch E (28) + Batch F (97) + Batch G (40) and
+landing 9 emu rules on top of the earlier overnight team's work:
+- Reference: held at 339 MODAL / 327 strict (unchanged)
+- Total strict on the expanded 69860-token corpus: 54830 (78.5%)
+- Total MODAL: 65259 (93.4%)
+
+**Individual kernel highlights that improved dramatically:**
+- `mb_f1_valu_fmac_n16`: 24% → 91% strict (FMAC accumulator fix)
+- `mb_e2_store_after_longnop`: 16% → 92.5% strict (s_nop(0) drain fix)
+- `mb_e3_extra_waitcnt_nop16_vmov`: 17% → 93.5% strict (same fix)
+- `mb_f1_valu_add_n32`: 82% → 93% strict (long-chain lookahead)
+- `mb_f6_vmul_hi_chain_n4`: 41% → 72% strict (int-mul 4cy pipe)
 
 ### Batch G (40 kernels, added 4476 tokens):
 - SMEM load sizes, DS atomics, VALU misc ops, SALU variants, f16 non-packed,
