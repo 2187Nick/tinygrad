@@ -937,8 +937,11 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
     # Scalar branch NOT-TAKEN: HW stamps SQTT token 7cy after issue; 10cy total until next ready.
     # (Branch TAKEN: 3cy total — next inst redirects, no late stamp.)
     # HW validated: probe_branch_cost w0 s_cmp→branch=8cy (issue+7), branch→v_mov=3cy (cost=10).
+    # EXEC-based branches (execz/execnz) skip this: HW mb_g7_s_cbranch_execz shows dt=1
+    # (no late stamp) — EXEC/VCC status is resolved early enough that NOT-TAKEN stamps at issue.
+    _branch_reads_exec = cat == 'branch' and isinstance(extra, tuple) and extra[0]
     stamp_cycle = issue_cycle
-    if pkt_cls is INST and kwargs.get('op') == InstOp.JUMP_NO:
+    if pkt_cls is INST and kwargs.get('op') == InstOp.JUMP_NO and not _branch_reads_exec:
       stamp_cycle = issue_cycle + 7
 
     # SIMD-arbiter shadow update (non-behavioural). For every VALU issue,
@@ -1020,7 +1023,7 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
       _sqtt_debug_log.append(dbg)
 
     issue_cost = _get_issue_cost(pkt_cls, kwargs)
-    if pkt_cls is INST and kwargs.get('op') == InstOp.JUMP_NO:
+    if pkt_cls is INST and kwargs.get('op') == InstOp.JUMP_NO and not _branch_reads_exec:
       issue_cost = 10
 
     # Track memory operation completion times
