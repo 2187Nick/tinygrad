@@ -272,6 +272,7 @@ if os.environ.get("MICROBENCH"):
   import extra.sqtt.rgp.batch_d_vopd_tail   # noqa: F401 — 18 kernels (D.1-D.3 VOPD→non-VOPD tails)
   import extra.sqtt.rgp.batch_e_wave_variance  # noqa: F401 — 28 kernels (E.1-E.4 wave variance + hard insts)
   import extra.sqtt.rgp.batch_f_deep_coverage  # noqa: F401 — ~110 kernels (F.1-F.6 deep coverage)
+  import extra.sqtt.rgp.batch_g_gap_fill       # noqa: F401 — ~40 kernels (G.1-G.7 gap fill)
   # Kernels that crash under PYTHON_REMU (compare-only skip; HW capture OK).
   _MB_SKIP = set()
   for _mb_name in MICROBENCHES:
