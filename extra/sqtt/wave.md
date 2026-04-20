@@ -22,11 +22,17 @@ sudo DEV=AMD AM_RESET=1 PROFILE=1 SQTT=1 MICROBENCH=1 VIZ=-2 \
 # 3. Decode the raw blobs across all SIMDs and produce a summary JSON
 .venv/bin/python extra/sqtt/wave_probe/decode_all_simds.py \
      extra/sqtt/wave_probe/captures/raw_sqtt_<timestamp>
+
+# 4. Per-WGP performance counters (SQ_WAVES etc.) across all microbenches
+#    — cross-checks the per-wave placement from script #2 (see §9).
+sudo DEV=AMD AM_RESET=1 PROFILE=1 PMC=1 SQTT=1 MICROBENCH=1 VIZ=-2 \
+     PYTHONPATH=. .venv/bin/python extra/sqtt/wave_probe/capture_spm.py
 ```
 
 Send back:
 - `extra/sqtt/wave_probe/captures/hw_id_<ts>.json`
 - `extra/sqtt/wave_probe/captures/raw_sqtt_<ts>/` (the whole directory incl. `all_simds_summary.json`)
+- `extra/sqtt/wave_probe/captures/pmc_<ts>/` (the whole directory incl. `summary.json`)
 
 Nothing private — the blobs contain only instruction-level SQTT packets
 (no register contents, no data) and the kernel binaries already live in
@@ -200,6 +206,7 @@ tells us.
 - Scripts are self-contained. No new deps beyond what tinygrad already uses.
 - `capture_hw_id.py` needs no sudo — just `DEV=AMD`.
 - `capture_raw_sqtt.py` needs sudo (SQTT reg access).
+- `capture_spm.py` needs sudo (PMC reg access).
 - All outputs are JSON except the raw blobs (pickle, ~10-100 KB each).
 - Anything that errors in the middle of a sweep is logged inline and doesn't
   halt the rest — partial results are still useful.
@@ -217,4 +224,84 @@ tells us.
   (has `simd`, `cu`, `wave` fields we need).
 - `extra/sqtt/rigorous_hw_test.py` — harness that produces the
   `.pkl` trace files we score against.
+- `extra/sqtt/mes_notes.md` — separate review of AMD's MES firmware spec
+  (queue-level scheduler). TL;DR: MES doesn't own wave-slot placement, so
+  it can't directly answer this handoff's questions, but it does expose
+  determinism knobs (CU reservation, wave limiting, `SET_SE_MODE=SINGLE_SE`)
+  that would help HW team isolate the variable if §5-§8 data is ambiguous.
+- `github.com/tinygrad/7900xtx` — tinygrad's public 7900 XTX reverse-eng
+  notes. `docs/CU.md`, `docs/MEC.md`, `docs/CP.md` cover the dispatch path
+  from the IP-block side; useful cross-reference if a reviewer wants the
+  "what are CU/MEC/CP" picture.
 - Commit `8597550f8` — current committed snapshot of the work.
+
+## 9. Optional: per-CU/WGP performance counters (script #4)
+
+**Script:** `extra/sqtt/wave_probe/capture_spm.py`
+
+Exact answer to the "monitor all workgroups" idea. tinygrad already has a
+PMC (performance-counter) infrastructure — `tinygrad/runtime/ops_amd.py:1031`,
+enabled via `PMC=1`. On gfx11, SQ-block counters are broken down **per
+(SE, SA, WGP)** — i.e. we get the count *per compute-unit-pair* for each
+kernel run, from one PM4 `COPY_DATA` packet pair bracketing the dispatch.
+
+**What we capture:**
+
+| Counter | What it tells us |
+|---|---|
+| `SQ_WAVES` | Total waves that ran on each WGP — *direct* placement histogram |
+| `SQ_BUSY_CYCLES` | How long each WGP was active |
+| `SQ_INSTS_VALU` | VALU issue rate per WGP — reveals VALU-pipe contention |
+| `SQ_INSTS_SALU` | SALU issue — cross-check against scalar-pipe bucket |
+| `SQ_INSTS_VMEM` | VMEM issue — cross-check against memory-latency variance |
+| `SQ_INSTS_LDS` | LDS instructions retired per WGP |
+| `GRBM_GUI_ACTIVE` | Total GPU-active cycles (scalar denominator) |
+| `GL2C_HIT` / `GL2C_MISS` | Per-instance L2 cache behavior — partial answer to §5 Q6 |
+
+**Why this complements script #2.** SQTT (script #2) with the `simd==0`
+filter removed gives per-WAVE placement. PMC (script #4) gives per-WGP
+*aggregate* totals. Together they cross-check: if script #2 says "16 waves
+on `cu0_simd0`" but script #4 says "SQ_WAVES has 4 WGPs active," we know
+one of the decoders is wrong.
+
+**Streaming vs aggregate.** True SPM (Streaming Performance Monitor)
+samples counters at a fixed cadence during the kernel, letting us see
+time-evolution of occupancy. tinygrad's PMC gives the *sum* over the
+kernel lifetime. For now the sum is enough: "which WGPs did the 16 waves
+of an `_n16` launch hit?" is answered by `SQ_WAVES` alone. If a future
+question depends on *when* waves arrived (e.g., "did waves 8-15 start
+after waves 0-7 drained?") we'd need to revisit and wire up true SPM
+via `regRLC_SPM_MC_CNTL` + a ring buffer.
+
+**Run command:**
+
+```bash
+sudo DEV=AMD AM_RESET=1 PROFILE=1 PMC=1 SQTT=1 MICROBENCH=1 VIZ=-2 \
+     PMC_COUNTERS=SQ_WAVES,SQ_BUSY_CYCLES,SQ_INSTS_VALU,SQ_INSTS_SALU,SQ_INSTS_VMEM,SQ_INSTS_LDS,GRBM_GUI_ACTIVE,GL2C_HIT,GL2C_MISS \
+     PYTHONPATH=. .venv/bin/python extra/sqtt/wave_probe/capture_spm.py
+```
+
+**Output:** `extra/sqtt/wave_probe/captures/pmc_<ts>/<kernel>.json` per
+kernel, plus `summary.json` with top-level analysis. Each file has:
+
+```json
+{
+  "kernel": "mb_vopd_chain_n4_raw",
+  "counters": {
+    "SQ_WAVES": {"block": "SQ", "rows": [{"se":0,"sa":0,"wgp":0,"value":16}, ...], "total": 16},
+    ...
+  },
+  "wave_distribution": {"per_wgp": {"se0_sa0_wgp0": 16}, "total_waves": 16, "unique_wgps_used": 1},
+  "balance": {"SQ_WAVES": {"nonzero_units": 1, "total_units": 60, "balance_ratio": 1.0}}
+}
+```
+
+**Key value added:** if `wave_distribution.unique_wgps_used == 1` across
+all microbenches, the SPI is *definitely* packing tight — possibility #1
+from §3. If it's >1 and the balance_ratio is near 1.0, we're seeing even
+load-balance across WGPs; script #2's `simd_balance` field then tells us
+the within-WGP split.
+
+Run #4 after #1/#2/#3. It's cheap — adds ~1 ms per kernel — and the
+`SQ_WAVES` histogram is by far the most direct signal we can get for
+the wave-placement question.
