@@ -22,17 +22,22 @@ class IbFetch:
     self._const = const
     self._last_drain_stamp: int = -1
     self._had_drain_nop: bool = False
+    self._chain_is_valu_origin: bool = False
 
   @property
   def last_drain_stamp(self) -> int: return self._last_drain_stamp
   @property
   def had_drain_nop(self) -> bool: return self._had_drain_nop
+  @property
+  def chain_is_valu_origin(self) -> bool: return self._chain_is_valu_origin
 
-  def set_drain(self, stamp: int) -> None:
+  def set_drain(self, stamp: int, from_valu_nop: bool = False) -> None:
     self._last_drain_stamp = stamp
+    if from_valu_nop: self._chain_is_valu_origin = True
 
   def reset_drain(self) -> None:
     self._last_drain_stamp = -1
+    self._chain_is_valu_origin = False
 
   def mark_nop_in_chain(self) -> None:
     self._had_drain_nop = True
@@ -51,3 +56,4 @@ class IbFetch:
   def on_non_nop_issue(self) -> None:
     """Called after a non-nop instruction issues — clears the nop-chain flag."""
     self._had_drain_nop = False
+    self._chain_is_valu_origin = False

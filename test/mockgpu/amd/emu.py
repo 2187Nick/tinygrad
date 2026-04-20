@@ -492,7 +492,10 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
             if _next_cat == 'nop': _is_last_nop_in_chain = False
           if ib[i].last_drain_stamp >= 0:
             # After drain event: stamp = start + stall_cycles (no overhead); last-in-chain pays +4.
-            _last_nop_extra = 4 if _is_last_nop_in_chain else 0
+            # If the chain originated from a VALU/SALU (not a real drain), skip the +4 —
+            # HW mb_snop_mixed_values [8] shows nop(5) last-in-chain after VALU+nop(0)+nop(15)
+            # runs 6cy (not 10cy). probe_sgpr_cmps chain starts from waitcnt → +4 still applies.
+            _last_nop_extra = (4 if _is_last_nop_in_chain and not ib[i].chain_is_valu_origin else 0)
             nop_stamp = nop_start + nop_cycles + _last_nop_extra
             ib[i].mark_nop_in_chain()
           else:
@@ -525,13 +528,15 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
           # instruction (not a drain event): mb_snop_0_after_valu and
           # mb_snop_0_after_scalar show HW=3 EMU=1 uniformly across all 16 waves.
           # Only apply when last_drain_stamp == -1 (no prior waitcnt/depctr drain).
+          _valu_origin = False
           if ib[i].last_drain_stamp < 0 and pc[i] > 0:
             _prev_cat = wave_events[wid][pc[i] - 1][2]
             if _prev_cat in ('valu', 'salu', 'vmem_wr', 'vmem_rd', 'ds_wr', 'ds_rd'):
               nop_stamp += 2
+              _valu_origin = True
           timed.append((nop_stamp, wid, pkt_cls, kwargs))
           ready[i] = nop_stamp + nop_cycles
-          ib[i].set_drain(nop_stamp + nop_cycles)
+          ib[i].set_drain(nop_stamp + nop_cycles, from_valu_nop=_valu_origin)
         pc[i] += 1
         continue
       if cat == 'immediate':
