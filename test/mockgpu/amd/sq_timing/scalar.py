@@ -43,6 +43,11 @@ class ScalarPipe:
     # rule so short chains (n≤5, HW mb_g4_s_{or,and,xor,bfe}_n4 all-waves dt=1) stay
     # fast while long chains (n≥6, HW mb_g4_s_add_u32_n8 wave 1+ stalls at pos 6+).
     self._salu_raw_chain_depth: int = 0
+    # Last SALU was integer multiply (s_mul_i32, s_mul_hi_u32, etc.). Multiplies
+    # have a deeper execution pipeline; SALU→VMEM store drain is +15 instead of +7
+    # (HW mb_g4_s_mul_i32_n4 store dt=15 unanimous waves 0-3 vs mb_salu_smov_n{1,4}
+    # store dt=7). Tracked per wave.
+    self._last_salu_was_mul: bool = False
 
   # ── Read-only accessors ────────────────────────────────────────────────────
   @property
@@ -60,6 +65,9 @@ class ScalarPipe:
   def salu_raw_chain_depth(self) -> int: return self._salu_raw_chain_depth
   def inc_salu_raw_chain_depth(self) -> None: self._salu_raw_chain_depth += 1
   def reset_salu_raw_chain_depth(self) -> None: self._salu_raw_chain_depth = 0
+  @property
+  def last_salu_was_mul(self) -> bool: return self._last_salu_was_mul
+  def set_last_salu_was_mul(self, v: bool) -> None: self._last_salu_was_mul = v
 
   # ── Mutations routed through methods so future steps can swap logic ────────
   def set_scc_write_time(self, cycle: int) -> None: self._scc_write_time = cycle

@@ -655,11 +655,15 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
     else:
       sgpr_w_regs, sgpr_r_regs, vgpr_w_regs, vgpr_r_regs, is_vopd, cond_sgpr = (), (), (), (), False, -1
 
-    # SALU: extract SGPR writes/reads for RAW stall detection
+    # SALU: extract SGPR writes/reads + mul-flag for RAW stall & VMEM-drain detection.
     salu_sgpr_w_regs: tuple = ()
     salu_sgpr_r_regs: tuple = ()
-    if cat == 'salu' and isinstance(extra, tuple) and len(extra) == 2:
-      salu_sgpr_w_regs, salu_sgpr_r_regs = extra
+    salu_is_mul = False
+    if cat == 'salu' and isinstance(extra, tuple):
+      if len(extra) == 3:
+        salu_sgpr_w_regs, salu_sgpr_r_regs, salu_is_mul = extra
+      elif len(extra) == 2:
+        salu_sgpr_w_regs, salu_sgpr_r_regs = extra
 
     # Apply S_DELAY_ALU stall (time-based for VALU_DEP, fixed for TRANS32_DEP/SALU)
     ds = dly[i]
@@ -960,10 +964,13 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
       # dt=1). The store pipeline waits for the scalar pipe to drain before accepting
       # a new dispatch. Fire when the IMMEDIATELY previous event for this wave was a
       # SALU (any SOP1/SOP2/SOPC/SOPK — matches decoder's cat='salu' bucket).
+      # s_mul_i32 variants pay +15cy instead of +7 (deeper SALU exec pipeline) —
+      # HW mb_g4_s_mul_i32_n4 store dt=15 unanimous across waves 0-3.
       _prev_was_salu = (pc[i] > 0 and wave_events[wid][pc[i] - 1][2] == 'salu'
                         and scal[i].last_salu_issue > 0)
       if _prev_was_salu:
-        issue_cycle = max(issue_cycle, scal[i].last_salu_issue + 7)
+        _drain = 15 if scal[i].last_salu_was_mul else 7
+        issue_cycle = max(issue_cycle, scal[i].last_salu_issue + _drain)
       # Per-operand address VGPR forwarding: recently-written addr VGPRs need extra cycles to reach AGU
       if isinstance(extra, tuple) and extra[1] is not None:
         addr_wt = valu[i].vgpr_write_time_map().get(extra[1], 0)
@@ -1316,6 +1323,7 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
       else:
         scal[i].reset_salu_raw_chain_depth()
       scal[i].set_last_salu_issue(issue_cycle)
+      scal[i].set_last_salu_was_mul(salu_is_mul)
       # Track SALU-only SGPR write times for SALU RAW-chain detection (separate
       # from sgpr[i].write_time so it doesn't leak the 4cy SGPR→VALU latency).
       for r in salu_sgpr_w_regs:
@@ -1665,7 +1673,10 @@ def _init_sqtt_encoder(entry_pc: int):
         if hasattr(inst, fn):
           o = getattr(getattr(inst, fn), 'offset', -1)
           if 0 <= o <= 106: salu_sgpr_r.append(o)
-      salu_extra = (tuple(salu_sgpr_w), tuple(salu_sgpr_r))
+      # is_mul flag: s_mul_i32 / s_mul_hi_u32 / s_mul_hi_i32 have deeper execution
+      # pipeline, extending the SALU→VMEM store drain from 7cy to 15cy.
+      salu_is_mul = 'S_MUL_I32' in op_name or 'S_MUL_HI' in op_name
+      salu_extra = (tuple(salu_sgpr_w), tuple(salu_sgpr_r), salu_is_mul)
     extra = ds_extra if cat == 'ds_rd' else (salu_extra if cat == 'salu' else vmem_extra)
     events.append((INST, {'wave': w, 'op': mem_op_val}, cat, extra))
 
