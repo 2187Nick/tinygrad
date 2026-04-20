@@ -5,9 +5,24 @@ $1,000 bounty: Make tinygrad's software GPU emulator produce cycle-accurate inst
 
 ## 2026-04-19 — Batch E + Batch F + wave-credit RAW + long-chain lookahead
 
-### Current state (after 363 total kernels × 65384 comparison tokens):
-- **Total MODAL:  61190/65384 exact (93.6%), 62697/65384 ±2 (95.9%)**
-- **Total strict: 51843/65384 exact (79.3%), 56153/65384 ±2 (85.9%)**
+### Current state (after 403 total kernels × 69860 comparison tokens):
+- **Total MODAL:  65259/69860 exact (93.4%), 66782/69860 ±2 (95.6%)**
+- **Total strict: 54830/69860 exact (78.5%), 59655/69860 ±2 (85.4%)**
+
+### Batch G (40 kernels, added 4476 tokens):
+- SMEM load sizes, DS atomics, VALU misc ops, SALU variants, f16 non-packed,
+  integer add/sub/shift, scalar cmp+branch. All captured cleanly (no GPU hang).
+- Batch G strict: 2470/3882 (63.6%), MODAL 3625/3882 (93.4%).
+
+### SIMD arbiter — attempted, reverted
+
+Tried a 4-SIMD arbiter with wave i → SIMD (i % 4) and 1-cycle issue throughput
+per SIMD VALU port. Naive implementation regressed strict by ~24K tokens
+because VOPD chains in HW pipeline at 1cy, but the round-robin SIMD arbiter
+forces 4-way serialization across waves 0/4/8/12 on SIMD 0. A proper model
+needs priority-based scheduling (oldest-wave monopolizes its SIMD until
+drain), which is a multi-session rewrite. Learnings documented for a future
+dedicated session. No code committed.
 - **Reference MODAL: 339/340 exact (99.7%), 340/340 ±2 (100.0%)** (unchanged)
 - **Reference strict: 327/340 exact (96.2%)** (unchanged)
 - All 11 SQTT profiler + custom kernel tests pass.
