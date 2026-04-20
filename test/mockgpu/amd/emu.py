@@ -934,14 +934,19 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
     if cat == 'barrier' and any(at_barrier):
       issue_cycle += 1
 
-    # Scalar branch NOT-TAKEN: HW stamps SQTT token 7cy after issue; 10cy total until next ready.
-    # (Branch TAKEN: 3cy total — next inst redirects, no late stamp.)
-    # HW validated: probe_branch_cost w0 s_cmp→branch=8cy (issue+7), branch→v_mov=3cy (cost=10).
+    # Scalar branch: HW stamps SQTT token 7cy after issue (both TAKEN and NOT-TAKEN paths).
+    # HW validated: probe_branch_cost w0 s_cmp→branch=8cy (issue+7), branch→v_mov=3cy (cost=10
+    # for NOT-TAKEN). mb_g7_s_cmp_*_branch shows same +7 stamp for TAKEN with longer cost=18
+    # (PC redirect + fetch penalty).
     # EXEC-based branches (execz/execnz) skip this: HW mb_g7_s_cbranch_execz shows dt=1
     # (no late stamp) — EXEC/VCC status is resolved early enough that NOT-TAKEN stamps at issue.
     _branch_reads_exec = cat == 'branch' and isinstance(extra, tuple) and extra[0]
+    _branch_reads_scc = cat == 'branch' and isinstance(extra, tuple) and extra[1]
+    _is_scc_branch_any = pkt_cls is INST and kwargs.get('op') in (InstOp.JUMP, InstOp.JUMP_NO) and _branch_reads_scc
     stamp_cycle = issue_cycle
     if pkt_cls is INST and kwargs.get('op') == InstOp.JUMP_NO and not _branch_reads_exec:
+      stamp_cycle = issue_cycle + 7
+    elif _is_scc_branch_any and kwargs.get('op') == InstOp.JUMP:
       stamp_cycle = issue_cycle + 7
 
     # SIMD-arbiter shadow update (non-behavioural). For every VALU issue,
@@ -1025,6 +1030,8 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
     issue_cost = _get_issue_cost(pkt_cls, kwargs)
     if pkt_cls is INST and kwargs.get('op') == InstOp.JUMP_NO and not _branch_reads_exec:
       issue_cost = 10
+    elif _is_scc_branch_any and kwargs.get('op') == InstOp.JUMP:
+      issue_cost = 18  # TAKEN scc branch: +7 stamp + 11cy refetch penalty (mb_g7_s_cmp_*_branch HW dt=8+11)
 
     # Track memory operation completion times
     if cat == 'smem':
