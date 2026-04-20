@@ -655,6 +655,12 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
     else:
       sgpr_w_regs, sgpr_r_regs, vgpr_w_regs, vgpr_r_regs, is_vopd, cond_sgpr = (), (), (), (), False, -1
 
+    # SALU: extract SGPR writes/reads for RAW stall detection
+    salu_sgpr_w_regs: tuple = ()
+    salu_sgpr_r_regs: tuple = ()
+    if cat == 'salu' and isinstance(extra, tuple) and len(extra) == 2:
+      salu_sgpr_w_regs, salu_sgpr_r_regs = extra
+
     # Apply S_DELAY_ALU stall (time-based for VALU_DEP, fixed for TRANS32_DEP/SALU)
     ds = dly[i]
     ds[0] += 1  # count packet-emitting instructions for INSTSKIP tracking
@@ -725,6 +731,21 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
         if any(r != 106 and r not in _cmp_lit_rr and r in _swt for r in sgpr_r_regs):
           issue_cycle += 1
           sgpr[i].consume_first_cndmask_chain()
+
+    # SALU RAW long-chain wave-credit: HW mb_g4_s_add_u32_n8 wave 1 shows the chain
+    # runs dt=1 for positions 1-5 then stalls dt=2 from chain_pos 6 onward — the
+    # scalar-pipe dispatch queue fills after ~5 consecutive same-sgpr RAW issues,
+    # forcing wave 1+ to 2cy cadence. Short chains (n≤5) stay at dt=1 for all waves
+    # — mb_g4_s_{or,and,xor,bfe}_n4 unanimous across waves 0-3. All waves on SIMD 0
+    # (HW_ID probe 2026-04-20). Fire when: cat=='salu', i>0, has SGPR read,
+    # immediate-prev SALU RAW, and chain_depth ≥ 5 (position 6+ in the chain).
+    if cat == 'salu' and i > 0 and salu_sgpr_r_regs:
+      _salu_swt = scal[i].salu_write_time_map()
+      _last_salu_issue = scal[i].last_salu_issue
+      _salu_raw_hit = (_last_salu_issue > 0
+                       and any(_salu_swt.get(r, -1) == _last_salu_issue for r in salu_sgpr_r_regs))
+      if _salu_raw_hit and scal[i].salu_raw_chain_depth >= 5:
+        issue_cycle = max(issue_cycle, _last_salu_issue + 2)
 
     # EXEC write-to-read dependency: v_cmpx writes EXEC, s_cbranch_execz/nz must wait for EXEC propagation
     # SCC write-to-read dependency: s_cmp writes SCC, s_cbranch_scc0/scc1 must wait 1cy for SCC propagation
@@ -1267,6 +1288,20 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
     if cat == 'salu':
       scal[i].set_scc_write_time(issue_cycle)
       scal[i].set_exec_write_time(issue_cycle)
+      # Update SALU chain-depth tracker BEFORE updating scal.last_salu_issue so the
+      # `_prev_salu_issue` reference matches the wave's real previous SALU.
+      _prev_salu_issue = scal[i].last_salu_issue
+      _salu_swt_before = scal[i].salu_write_time_map()
+      if (salu_sgpr_r_regs and _prev_salu_issue > 0
+          and any(_salu_swt_before.get(r, -1) == _prev_salu_issue for r in salu_sgpr_r_regs)):
+        scal[i].inc_salu_raw_chain_depth()
+      else:
+        scal[i].reset_salu_raw_chain_depth()
+      scal[i].set_last_salu_issue(issue_cycle)
+      # Track SALU-only SGPR write times for SALU RAW-chain detection (separate
+      # from sgpr[i].write_time so it doesn't leak the 4cy SGPR→VALU latency).
+      for r in salu_sgpr_w_regs:
+        scal[i].set_salu_write_time(r, issue_cycle)
 
     # Track VGPR write readiness: all VALU writes update scoreboard for RAW dependency tracking
     if cat == 'valu' and not _is_trans and vgpr_w_regs:
@@ -1598,7 +1633,22 @@ def _init_sqtt_encoder(entry_pc: int):
       if addr_field is not None and hasattr(addr_field, 'offset') and addr_field.offset >= 256:
         addr_vgpr = addr_field.offset - 256
       vmem_extra = (vmem_bytes, addr_vgpr)
-    extra = ds_extra if cat == 'ds_rd' else vmem_extra
+    # For SALU (SOP1/SOP2/SOPC), extract SGPR reads/writes for RAW-chain detection
+    # (HW mb_g4_s_add_u32_n8 wave 1+ unanimous dt=2 on chain continuations vs EMU dt=1).
+    # SOP1/SOP2/SOPC use ssrc0/ssrc1 fields (distinct from VALU src0/src1/src2).
+    salu_extra = None
+    if cat == 'salu':
+      salu_sgpr_w: list[int] = []
+      salu_sgpr_r: list[int] = []
+      if hasattr(inst, 'sdst'):
+        o = getattr(inst.sdst, 'offset', -1)
+        if 0 <= o <= 106: salu_sgpr_w.append(o)
+      for fn in ('ssrc0', 'ssrc1', 'src0', 'src1'):
+        if hasattr(inst, fn):
+          o = getattr(getattr(inst, fn), 'offset', -1)
+          if 0 <= o <= 106: salu_sgpr_r.append(o)
+      salu_extra = (tuple(salu_sgpr_w), tuple(salu_sgpr_r))
+    extra = ds_extra if cat == 'ds_rd' else (salu_extra if cat == 'salu' else vmem_extra)
     events.append((INST, {'wave': w, 'op': mem_op_val}, cat, extra))
 
   def finish(wave_id: int):

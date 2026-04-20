@@ -34,6 +34,15 @@ class ScalarPipe:
     self._scc_write_time: int = 0
     self._exec_write_time: int = 0
     self._first_branch_after_drain: bool = False
+    self._last_salu_issue: int = 0
+    # Dedicated SALU-only write-time map (separate from sgpr[i].write_time which models
+    # the VALU-visible 4cy SGPR latency). SALU→SALU RAW-chain uses this shorter map.
+    self._salu_write_time: dict[int, int] = {}
+    # Consecutive SALU RAW-chain length. Incremented when a SALU reads an sdst written
+    # by the immediately-previous SALU; reset otherwise. Used to gate the wave-credit
+    # rule so short chains (n≤5, HW mb_g4_s_{or,and,xor,bfe}_n4 all-waves dt=1) stay
+    # fast while long chains (n≥6, HW mb_g4_s_add_u32_n8 wave 1+ stalls at pos 6+).
+    self._salu_raw_chain_depth: int = 0
 
   # ── Read-only accessors ────────────────────────────────────────────────────
   @property
@@ -42,9 +51,19 @@ class ScalarPipe:
   def exec_write_time(self) -> int: return self._exec_write_time
   @property
   def first_branch_after_drain(self) -> bool: return self._first_branch_after_drain
+  @property
+  def last_salu_issue(self) -> int: return self._last_salu_issue
+
+  def salu_write_time_map(self) -> dict[int, int]: return self._salu_write_time
+  def set_salu_write_time(self, reg: int, cycle: int) -> None: self._salu_write_time[reg] = cycle
+  @property
+  def salu_raw_chain_depth(self) -> int: return self._salu_raw_chain_depth
+  def inc_salu_raw_chain_depth(self) -> None: self._salu_raw_chain_depth += 1
+  def reset_salu_raw_chain_depth(self) -> None: self._salu_raw_chain_depth = 0
 
   # ── Mutations routed through methods so future steps can swap logic ────────
   def set_scc_write_time(self, cycle: int) -> None: self._scc_write_time = cycle
   def set_exec_write_time(self, cycle: int) -> None: self._exec_write_time = cycle
   def mark_drain(self) -> None: self._first_branch_after_drain = True
   def consume_drain_branch(self) -> None: self._first_branch_after_drain = False
+  def set_last_salu_issue(self, cycle: int) -> None: self._last_salu_issue = cycle
