@@ -15,29 +15,34 @@ from test.mockgpu.amd.sq_timing.simd_arbiter import SimdArbiter, N_SIMDS, NO_OWN
 
 
 class TestSimdForWave(unittest.TestCase):
-  def test_mapping_matches_hw_id(self):
-    # HW_ID probe 2026-04-20: 1270/1270 observations confirmed SIMD_ID=0 for all
-    # compute waves. emu.py encodes HW_ID[5:4]=0 accordingly.
+  def test_even_odd_wgp_split(self):
+    # HW_ID probe 2026-04-20 (16-wave launches, 2600+ obs): every compute wave
+    # has SIMD_ID=0, but 16-wave workgroups split across TWO WGPs in an
+    # even/odd pattern. simd_for_wave() returns wave_idx & 0x1 as a peer-group
+    # proxy — even waves on one WGP's port, odd waves on the other.
     for w in range(64):
-      self.assertEqual(SimdArbiter.simd_for_wave(w), 0)
+      self.assertEqual(SimdArbiter.simd_for_wave(w), w & 0x1)
 
   def test_n_simds_constant(self):
-    self.assertEqual(N_SIMDS, 4)
+    self.assertEqual(N_SIMDS, 2)
 
 
 class TestPeersOnSimd(unittest.TestCase):
-  def test_four_waves_each_on_simd_zero(self):
+  def test_four_waves_even_odd_split(self):
     a = SimdArbiter(4)
-    # All 4 waves are on SIMD 0; each has the other 3 as peers
-    for w in range(4):
-      self.assertEqual(a.peers_on_simd(w), [x for x in range(4) if x != w])
+    # Even waves (0, 2) share one peer group; odd waves (1, 3) share the other
+    self.assertEqual(a.peers_on_simd(0), [2])
+    self.assertEqual(a.peers_on_simd(2), [0])
+    self.assertEqual(a.peers_on_simd(1), [3])
+    self.assertEqual(a.peers_on_simd(3), [1])
 
-  def test_sixteen_waves_all_on_simd_zero(self):
+  def test_sixteen_waves_even_odd_split(self):
     a = SimdArbiter(16)
-    # All 16 waves land on SIMD 0 — every other wave is a peer
-    self.assertEqual(a.peers_on_simd(0), list(range(1, 16)))
-    self.assertEqual(a.peers_on_simd(5), [x for x in range(16) if x != 5])
-    self.assertEqual(a.peers_on_simd(15), list(range(15)))
+    # Wave 0 (even) peers = all other even waves {2, 4, 6, 8, 10, 12, 14}
+    self.assertEqual(a.peers_on_simd(0), [2, 4, 6, 8, 10, 12, 14])
+    # Wave 5 (odd) peers = all other odd waves {1, 3, 7, 9, 11, 13, 15}
+    self.assertEqual(a.peers_on_simd(5), [1, 3, 7, 9, 11, 13, 15])
+    self.assertEqual(a.peers_on_simd(15), [1, 3, 5, 7, 9, 11, 13])
 
   def test_excludes_self(self):
     a = SimdArbiter(16)
@@ -53,18 +58,18 @@ class TestPortAvail(unittest.TestCase):
 
   def test_setter_persists(self):
     a = SimdArbiter(16)
-    a.set_port_avail(2, 1234)
-    self.assertEqual(a.port_avail(2), 1234)
-    # Other SIMDs untouched
-    for s in (0, 1, 3):
-      self.assertEqual(a.port_avail(s), 0)
+    a.set_port_avail(1, 1234)
+    self.assertEqual(a.port_avail(1), 1234)
+    # Other SIMD untouched
+    self.assertEqual(a.port_avail(0), 0)
 
   def test_port_avail_for_wave_lookup(self):
     a = SimdArbiter(16)
     a.set_port_avail(0, 42)
-    # All waves are on SIMD 0 (HW_ID probe 2026-04-20)
-    self.assertEqual(a.port_avail_for_wave(5), 42)
-    self.assertEqual(a.port_avail_for_wave(2), 42)
+    a.set_port_avail(1, 99)
+    # Even waves -> SIMD 0, odd waves -> SIMD 1
+    self.assertEqual(a.port_avail_for_wave(4), 42)
+    self.assertEqual(a.port_avail_for_wave(5), 99)
 
 
 class TestOwnerTracking(unittest.TestCase):
@@ -90,8 +95,8 @@ class TestLastIssueCycle(unittest.TestCase):
 
   def test_setter(self):
     a = SimdArbiter(16)
-    a.set_last_issue_cycle(3, 99)
-    self.assertEqual(a.last_issue_cycle(3), 99)
+    a.set_last_issue_cycle(1, 99)
+    self.assertEqual(a.last_issue_cycle(1), 99)
 
 
 class TestSnapshot(unittest.TestCase):
@@ -99,21 +104,21 @@ class TestSnapshot(unittest.TestCase):
     a = SimdArbiter(16)
     snap = a.snapshot()
     self.assertEqual(snap, {
-      "port_avail": [0, 0, 0, 0],
-      "owner_wave": [-1, -1, -1, -1],
-      "last_issue_cycle": [-1, -1, -1, -1],
+      "port_avail": [0, 0],
+      "owner_wave": [-1, -1],
+      "last_issue_cycle": [-1, -1],
     })
 
   def test_snapshot_after_updates(self):
     a = SimdArbiter(16)
     a.set_port_avail(0, 10)
-    a.set_port_avail(2, 20)
+    a.set_port_avail(1, 20)
     a.set_owner_wave(0, 4)
-    a.set_last_issue_cycle(2, 19)
+    a.set_last_issue_cycle(1, 19)
     snap = a.snapshot()
-    self.assertEqual(snap["port_avail"], [10, 0, 20, 0])
-    self.assertEqual(snap["owner_wave"], [4, -1, -1, -1])
-    self.assertEqual(snap["last_issue_cycle"], [-1, -1, 19, -1])
+    self.assertEqual(snap["port_avail"], [10, 20])
+    self.assertEqual(snap["owner_wave"], [4, -1])
+    self.assertEqual(snap["last_issue_cycle"], [-1, 19])
 
   def test_snapshot_is_copy_not_reference(self):
     # Callers mutating the snapshot MUST NOT affect arbiter state

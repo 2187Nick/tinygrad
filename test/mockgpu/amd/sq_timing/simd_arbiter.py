@@ -115,7 +115,7 @@ from __future__ import annotations
 from test.mockgpu.amd.sq_timing.constants import CONST, TimingConstants
 
 
-N_SIMDS = 4   # RDNA3 has 4 physical SIMDs; compute waves always land on SIMD 0 (HW_ID probe 2026-04-20)
+N_SIMDS = 2   # Compute waves use 2 WGPs (even/odd wave split) — each exposes its SIMD 0 as a port
 NO_OWNER = -1
 
 
@@ -143,18 +143,27 @@ class SimdArbiter:
   # ── Wave → SIMD mapping ────────────────────────────────────────────────────
   @staticmethod
   def simd_for_wave(wave_idx: int) -> int:
-    """Return the SIMD index a wave lives on.
+    """Return the "peer group" index a wave's SIMD port belongs to.
 
-    HW_ID probe (extra/sqtt/wave_probe/capture_hw_id.py, 2026-04-20) across
-    1,2,4,8,16,32,64-wave launches × 10 runs: 1270/1270 observations landed
-    on SIMD_ID=0. The SPI fills wave slots 0..15 of a WGP's SIMD 0 first,
-    then moves to the next WGP's SIMD 0 — never issuing to SIMD 1/2/3 for
-    compute kernels.
+    SIMD_ID is always 0 for compute waves (HW_ID probe 1270/1270). However
+    multi-wave workgroups split across TWO WGPs in an EVEN/ODD pattern:
+    16-wave launches place waves 0,2,4,…,14 on one WGP (slot 0..7 of SIMD 0)
+    and waves 1,3,5,…,15 on a different WGP's SIMD 0 (slot 0..7). The two
+    WGPs issue in parallel — waves on different WGPs do not arbitrate with
+    each other. (Evidence: captures/hw_id_20260420_102105.json 16-wave runs,
+    captures/hwid_per_kernel/hwid_n0512.json from capture_expansion.py.)
 
-    We keep the function so call sites can be updated centrally if future
-    architectures spread across multiple SIMDs.
+    To capture this parallelism without modeling WGP explicitly, this function
+    returns wave_idx % 2 — a proxy "SIMD port" where even waves share one
+    port and odd waves share another. Downstream wave-credit / peer-contention
+    rules should read this value rather than raw wave_idx when deciding which
+    waves queue behind which.
+
+    Call sites in emu.py's _simulate_sq_timing still use raw `i` for the
+    wave-credit rule today. Migrating those to
+    `SimdArbiter.simd_for_wave(i)`-based peer gating is the next wiring step.
     """
-    return 0
+    return wave_idx & 0x1
 
   def peers_on_simd(self, wave_idx: int) -> list[int]:
     """Return all wave indices that share a SIMD with `wave_idx` (excluding self)."""
