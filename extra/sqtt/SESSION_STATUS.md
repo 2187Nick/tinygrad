@@ -3,6 +3,70 @@
 ## Bounty Goal
 $1,000 bounty: Make tinygrad's software GPU emulator produce cycle-accurate instruction timing matching real AMD 7900 XTX hardware, validated via SQTT (Shader Queue Thread Trace).
 
+## 2026-04-20 — HW_ID probe lands + 4 follow-on emu rules
+
+**Current state:** **strict 55863/69862 (80.0%)**, MODAL 66003/69862 (94.5%).
+Crossed the 80% strict threshold for the first time.
+
+### Session delta this window (+186 strict, -52 MODAL vs start)
+
+1. **HW_ID probe across 1/2/4/8/16/32/64-wave launches × 10 runs** (no sudo):
+   Confirmed 1270/1270 observations land on SIMD 0. The SPI fills wave
+   slots 0..15 of a WGP's SIMD 0 first, then moves to the next WGP —
+   never issues to SIMD 1/2/3 for compute kernels. `simd_for_wave()` now
+   returns 0 centrally; bits 4/5 of the HW_ID1 register were previously
+   wrong (hwRegId=4 is GCN/RDNA2; RDNA3 renumbered to 23 for HW_ID1).
+   Scripts: `extra/sqtt/wave_probe/capture_hw_id.py`, output JSON
+   committed at `extra/sqtt/wave_probe/captures/hw_id_20260420_102105.json`.
+
+2. **emu: widen wave-credit RAW for medium-VALU non-VOPD chains** (+127 strict):
+   `mb_f2_raw_all_banks_n4` (42.8% → 81.5% strict). Kernels with many
+   VALUs (≥10) but short same-reg chains (L≤4) have wave 1+ stalling on
+   every RAW continuation — HW direct consequence of all waves on SIMD 0.
+   Gated to exclude VOPD (dual-issue drain is different).
+
+3. **emu: SALU RAW +1cy for long chains** (+8 strict):
+   `mb_g4_s_add_u32_n8` (39.7% → 43.7% strict). Wave 1+ chains on the
+   same sgpr stall dt=2 after chain_pos 6, mirroring the VALU wave-credit
+   rule but shallower (SALU pipeline ~2cy). Adds SGPR read/write decode
+   to SALU events (previously None) and a dedicated `salu_write_time`
+   map so it doesn't leak into the VALU-visible 4cy SGPR latency path.
+
+4. **emu: trans short-chain stagger for wave≥9** (+19 strict):
+   `mb_f4_{exp,sqrt,rsq,mixed}_chain_n4` gained +5-7 each. HW shows
+   waves 9+ paying +10cy on length-4 trans chains (trans-unit dispatch
+   queue fills after ~8 waves). Supplements the existing long-chain
+   (L≥6, wave≥4) rule.
+
+5. **emu: SALU→VMEM_WR +7cy drain** (+32 strict / +32 MODAL):
+   `mb_salu_smov_n1`/`n4` show unanimous 7cy gap between the last SALU
+   and the following global_store (EMU was emitting dt=1). The VMEM
+   store dispatch waits for the scalar pipe to drain before accepting
+   a new op.
+
+### Remaining gap analysis (what's still unfixed)
+
+Large but variance-driven, hard to close with single rules:
+
+- `mb_f2_raw_indep_interleave_n8` (193/308 strict): waves 2, 3, 8, 15
+  stall dt=4 on every VALU while waves 0, 1, 4 stream at dt=1. Matches
+  per-wave SIMD-placement variance that the raw SQTT capture (script
+  #2, still needs sudo on the HW box) would pin down conclusively.
+- `mb_vcmp_spaced_cndmask_nop12` (77/128 strict): HW `s_nop(12)` dt
+  varies 15-23 per wave (bimodal), store varies 16-38. Variance bucket
+  where MODAL=±2 reaches 67% but strict caps at 60%.
+- Global_store dts after long VALU chains consistently 20-50 in HW but
+  EMU's VALU→VMEM_WR forward uses a 17-21cy deadline — needs per-wave
+  VMEM-write-queue modelling (Option B in HANDOFF_OVERNIGHT.md).
+
+### What to do next
+
+The HW team still needs to run `capture_raw_sqtt.py` + `capture_spm.py`
+on real HW (see `wave.md`). That data will resolve the per-wave SIMD
+placement question for specific kernels and let us pick the right model
+for the remaining `_n4`/`_n8` 16-miss bucket (the wave.md document's
+biggest outstanding signal).
+
 ## 2026-04-19 — End of session handoff
 
 **→ Overnight team: see [HANDOFF_OVERNIGHT.md](HANDOFF_OVERNIGHT.md) for
