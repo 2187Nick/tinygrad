@@ -273,6 +273,7 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
   dly: list[list[int]] = [[0, -1, 0, -1, 0] for _ in range(n)]  # S_DELAY_ALU state
   valu_ds_wr_deadline = [0] * n   # VALU→DS_WR forwarding
   valu_ds_rd_deadline = [0] * n   # VALU→DS_RD forwarding
+  last_vmem_wr_issue = [0] * n    # last VMEM_WR issue cycle (for back-to-back store pipe-reuse)
   # Per-wave VMEM pipeline tracker (EMU_REWRITE_DESIGN §1.6 / §5 Step 4).
   # Owns valu_vmem_wr_deadline / wr_set_time / wr_slow_ext / rd_deadline /
   # vmem_drain_deadline / vm_pend. `_vmem_wr_bypass_active` (cross-wave) still
@@ -877,13 +878,25 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
       pre_fwd_cycle = issue_cycle
       vmem_bytes = extra[0] if isinstance(extra, tuple) else extra
       store_vgprs = max(1, (vmem_bytes or 4) // 4) if vmem_bytes else 1
-      wr_deadline = _vmem_wr_issue(vmem[i].wr_deadline, store_vgprs,
-                                                     valu[i].consecutive_selffwd_vgprs, valu[i].consecutive_vgprs_written,
-                                                     valu[i].cndmask_cluster_vgprs)
-      # Inter-wave VMEM bypass: another wave schedulable ≥4cy before deadline → SQ pipelines forwarding (21→17cy)
-      if store_vgprs == 1 and _vmem_wr_bypass_active(i):
-        wr_deadline -= _VALU_VMEM_WR_BYPASS
-      issue_cycle = max(issue_cycle, wr_deadline)
+      # Back-to-back store pipe-reuse: once the VMEM store pipe is flowing, the
+      # next store can enter 1cy after the prev store issues, independent of
+      # VALU→VMEM_WR forwarding deadline. Applies only when the IMMEDIATELY
+      # previous event for this wave was itself a vmem_wr (no intervening
+      # VALU/waitcnt/etc). HW evidence: mb_f3_store_pair_then_pair / _chain_n4
+      # wave 1+ shows 2nd store at dt=1-3 while EMU produced dt=4 (wr_deadline
+      # anchored to last VALU+21 blocked pipe-reuse).
+      _back_to_back_store = (pc[i] > 0 and wave_events[wid][pc[i] - 1][2] == 'vmem_wr'
+                             and last_vmem_wr_issue[i] > 0)
+      if _back_to_back_store:
+        issue_cycle = max(issue_cycle, last_vmem_wr_issue[i] + 1)
+      else:
+        wr_deadline = _vmem_wr_issue(vmem[i].wr_deadline, store_vgprs,
+                                                       valu[i].consecutive_selffwd_vgprs, valu[i].consecutive_vgprs_written,
+                                                       valu[i].cndmask_cluster_vgprs)
+        # Inter-wave VMEM bypass: another wave schedulable ≥4cy before deadline → SQ pipelines forwarding (21→17cy)
+        if store_vgprs == 1 and _vmem_wr_bypass_active(i):
+          wr_deadline -= _VALU_VMEM_WR_BYPASS
+        issue_cycle = max(issue_cycle, wr_deadline)
       # Per-operand address VGPR forwarding: recently-written addr VGPRs need extra cycles to reach AGU
       if isinstance(extra, tuple) and extra[1] is not None:
         addr_wt = valu[i].vgpr_write_time_map().get(extra[1], 0)
@@ -1028,6 +1041,7 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
       # Post-store VALU stall: HW mb_vmem_store_b32_chain_n4 shows next VALU
       # stamps +8cy after store dispatch (emu had +1cy).
       vmem[i].set_post_wr_valu_ready(issue_cycle + 8)
+      last_vmem_wr_issue[i] = issue_cycle
 
     # Track multi-cycle VALU (transcendental) completion for s_waitcnt_depctr, and trans pipeline occupancy
     if _is_trans:
