@@ -17,18 +17,26 @@
   html,body{height:100%;overflow:hidden;background:var(--bg);color:var(--fg);
     font-family:'SF Mono','Cascadia Code','Fira Code',ui-monospace,monospace;font-size:13px}
   button,select,input{font-family:inherit;font-size:inherit}
-  #app{display:grid;grid-template-columns:280px 1fr;height:100%}
+  #app{display:grid;grid-template-columns:260px 1fr 320px;height:100%}
 
-  /* Sidebar */
-  #sidebar{background:var(--bg2);border-right:1px solid var(--line);display:flex;flex-direction:column;min-height:0}
-  #sidebar h1{padding:14px 16px;font-size:14px;color:var(--blue);border-bottom:1px solid var(--line);font-weight:600}
-  #sidebar h1 .sub{color:var(--fg3);font-size:11px;font-weight:400;margin-left:8px}
+  /* Shared panels */
+  aside{background:var(--bg2);display:flex;flex-direction:column;min-height:0}
+  #sidebar{border-right:1px solid var(--line)}
+  #right{border-left:1px solid var(--line)}
+  aside h1, aside h2{font-size:13px;color:var(--blue);padding:12px 14px;
+    border-bottom:1px solid var(--line);font-weight:600;letter-spacing:.02em}
+  aside h2{font-size:11px;color:var(--fg2);text-transform:uppercase;letter-spacing:.08em;
+    padding:10px 14px 6px;border-bottom:none;border-top:1px solid var(--line)}
+  aside h1 .sub{color:var(--fg3);font-size:11px;font-weight:400;margin-left:8px}
+
+  /* Kernel list */
   #search{padding:8px 12px;border-bottom:1px solid var(--line)}
   #search input{width:100%;background:var(--bg3);color:var(--fg);border:1px solid var(--line);
     padding:6px 8px;border-radius:4px;outline:none}
   #search input:focus{border-color:var(--blue)}
   #kernel-list{flex:1;overflow-y:auto;scrollbar-width:thin;scrollbar-color:#484f58 var(--bg2)}
-  .kernel{padding:8px 14px;cursor:pointer;border-bottom:1px solid #1e2132;display:flex;justify-content:space-between;gap:8px}
+  .kernel{padding:7px 14px;cursor:pointer;border-bottom:1px solid #1e2132;display:flex;
+    justify-content:space-between;gap:8px}
   .kernel:hover{background:var(--bg3)}
   .kernel.active{background:#1c2541;border-left:3px solid var(--blue);padding-left:11px}
   .kernel .n{font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1}
@@ -36,90 +44,140 @@
 
   /* Main */
   #main{display:flex;flex-direction:column;min-height:0;min-width:0}
-  #toolbar{padding:8px 14px;background:var(--bg2);border-bottom:1px solid var(--line);
-    display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+  #toolbar{padding:8px 12px;background:var(--bg2);border-bottom:1px solid var(--line);
+    display:flex;gap:8px;align-items:center;flex-wrap:wrap}
   #toolbar .group{display:flex;gap:4px;align-items:center}
   #toolbar label{color:var(--fg2);font-size:11px;letter-spacing:.03em;text-transform:uppercase}
   #toolbar button{background:var(--bg3);color:var(--fg);border:1px solid var(--line);
-    padding:5px 10px;border-radius:4px;cursor:pointer;font-weight:500}
+    padding:5px 10px;border-radius:4px;cursor:pointer;font-weight:500;min-width:28px}
   #toolbar button:hover:not(:disabled){background:#262a3d;border-color:#3a3f55}
   #toolbar button:disabled{opacity:.4;cursor:not-allowed}
   #toolbar button.play{background:#133b1f;color:var(--green);border-color:#1f5a30}
   #toolbar button.play.playing{background:#3d1117;color:var(--red);border-color:#5a1f2a}
-  #toolbar input[type=range]{width:120px}
-  #toolbar .divider{width:1px;height:22px;background:var(--line)}
+  #toolbar input[type=range]{width:110px}
+  #toolbar .divider{width:1px;height:20px;background:var(--line)}
+  #toolbar .val{color:var(--fg);min-width:55px;font-size:11px}
 
-  #stats{padding:8px 14px;background:var(--bg2);border-bottom:1px solid var(--line);
-    display:flex;gap:18px;font-size:12px;color:var(--fg2)}
-  #stats .stat{display:flex;gap:6px;align-items:baseline}
+  #stats{padding:6px 12px;background:var(--bg2);border-bottom:1px solid var(--line);
+    display:flex;gap:16px;font-size:11px;color:var(--fg2);flex-wrap:wrap}
+  #stats .stat{display:flex;gap:5px;align-items:baseline}
   #stats .stat b{color:var(--fg);font-weight:600}
+  #stats .filter-badge{color:var(--yellow);cursor:pointer}
+  #stats .filter-badge:hover{text-decoration:underline}
 
   /* Timeline */
-  #timeline-wrap{flex:1;overflow:auto;position:relative}
+  #timeline-wrap{flex:1;overflow:auto;position:relative;scrollbar-width:thin;scrollbar-color:#484f58 var(--bg)}
   #timeline{display:block}
-  .row-label{fill:var(--fg2);font-size:11px}
+  .row-label{fill:var(--fg2);font-size:11px;cursor:pointer}
   .row-label.meta{fill:var(--fg3);font-size:10px}
+  .row-label.focused{fill:var(--yellow);font-weight:600}
+  .row-bg{fill:#0f111a;stroke:#1e2132}
+  .row-bg.focused{fill:#1a1e2e;stroke:#384064}
   .grid-line{stroke:#1e2132;stroke-width:1}
   .grid-line.major{stroke:#2d3148}
   .cursor-line{stroke:var(--yellow);stroke-width:1.5;pointer-events:none}
-  .inst{rx:1;ry:1}
+  .inst{rx:1;ry:1;cursor:pointer}
   .inst.active{stroke:var(--yellow);stroke-width:1.5}
+  .inst.pinned{stroke:var(--red);stroke-width:2}
+  .inst.dim{opacity:.15}
   .ruler-bg{fill:var(--bg2)}
   .ruler-tick{stroke:var(--fg3);stroke-width:1}
   .ruler-label{fill:var(--fg2);font-size:10px;text-anchor:middle}
+  .util-bg{fill:#0c0e18}
+  .util-label{fill:var(--fg3);font-size:9px}
 
   /* Tooltip */
   #tooltip{position:absolute;background:#0d0f16;border:1px solid var(--line);
     padding:8px 10px;border-radius:6px;font-size:11px;pointer-events:none;
-    box-shadow:0 4px 16px rgba(0,0,0,.6);display:none;z-index:10;max-width:320px}
+    box-shadow:0 4px 16px rgba(0,0,0,.6);display:none;z-index:20;max-width:340px}
   #tooltip .t-inst{color:var(--fg);font-weight:600;margin-bottom:4px;word-break:break-all}
   #tooltip .t-meta{color:var(--fg2)}
   #tooltip .t-meta span{color:var(--fg);margin-right:10px}
 
   /* Legend */
-  #legend{padding:6px 14px;background:var(--bg2);border-top:1px solid var(--line);
-    display:flex;gap:12px;flex-wrap:wrap;font-size:11px;color:var(--fg2)}
-  #legend .item{display:flex;gap:5px;align-items:center}
-  #legend .swatch{width:12px;height:10px;border-radius:2px}
+  #legend{padding:6px 12px;background:var(--bg2);border-top:1px solid var(--line);
+    display:flex;gap:10px;flex-wrap:wrap;font-size:11px;color:var(--fg2)}
+  #legend .item{display:flex;gap:4px;align-items:center}
+  #legend .swatch{width:11px;height:9px;border-radius:2px}
 
   /* Empty */
-  #empty{display:flex;align-items:center;justify-content:center;flex:1;color:var(--fg3);text-align:center;padding:40px}
-  #empty .big{font-size:18px;color:var(--fg2);margin-bottom:8px}
+  #empty{display:flex;align-items:center;justify-content:center;flex:1;color:var(--fg3);
+    text-align:center;padding:40px}
+  #empty .big{font-size:17px;color:var(--fg2);margin-bottom:8px}
   code{background:var(--bg3);padding:1px 5px;border-radius:3px;color:var(--yellow)}
+  kbd{background:var(--bg3);border:1px solid var(--line);border-bottom-width:2px;
+    border-radius:3px;padding:0 5px;color:var(--fg);font-size:10px;margin:0 2px}
+
+  /* Right panel — topology + detail */
+  #topo-wrap{padding:8px 12px;border-bottom:1px solid var(--line);max-height:45%;overflow:auto;
+    scrollbar-width:thin;scrollbar-color:#484f58 var(--bg2)}
+  #topo-note{color:var(--fg3);font-size:10px;margin-bottom:6px}
+  #topo-svg{display:block}
+  .topo-cell{stroke:#1e2132;stroke-width:0.5;cursor:pointer}
+  .topo-cell.empty{fill:#12141e}
+  .topo-cell.active{fill:var(--blue)}
+  .topo-cell.selected{stroke:var(--yellow);stroke-width:1.5}
+  .topo-label{fill:var(--fg3);font-size:9px}
+  .topo-legend{color:var(--fg3);font-size:10px;margin-top:6px;display:flex;gap:10px;flex-wrap:wrap}
+
+  #detail{flex:1;overflow:auto;padding:10px 14px;scrollbar-width:thin;scrollbar-color:#484f58 var(--bg2)}
+  #detail .empty{color:var(--fg3);font-size:11px;padding:8px 0}
+  .pin-head{background:#1a1e2e;border:1px solid var(--line);border-radius:6px;padding:8px 10px;margin-bottom:10px}
+  .pin-head .inst-line{color:var(--fg);font-weight:600;word-break:break-all;margin-bottom:6px}
+  .pin-head .meta{color:var(--fg2);font-size:11px;line-height:1.6}
+  .pin-head .meta b{color:var(--fg)}
+  .inst-ctx{border-left:2px solid var(--line);margin-left:4px;padding-left:10px}
+  .inst-ctx .row{display:flex;gap:8px;font-size:11px;padding:3px 0;color:var(--fg2);
+    border-bottom:1px dashed #1e2132}
+  .inst-ctx .row.self{background:#1a1e2e;color:var(--fg);padding:4px 6px;margin-left:-6px;border-radius:4px}
+  .inst-ctx .row .t{color:var(--fg3);min-width:48px;text-align:right}
+  .inst-ctx .row .dt{color:var(--fg3);min-width:34px;text-align:right}
+  .inst-ctx .row .inst{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .cat-pill{display:inline-block;padding:0 5px;border-radius:8px;font-size:9px;color:#000;font-weight:600;text-transform:uppercase}
+  .cat-pill.valu{background:var(--cat-valu)} .cat-pill.salu{background:var(--cat-salu)}
+  .cat-pill.vmem{background:var(--cat-vmem)} .cat-pill.smem{background:var(--cat-smem)}
+  .cat-pill.lds{background:var(--cat-lds)} .cat-pill.trans{background:var(--cat-trans);color:#000}
+  .cat-pill.vopd{background:var(--cat-vopd)} .cat-pill.branch{background:var(--cat-branch)}
+  .cat-pill.wait{background:var(--cat-wait);color:var(--fg)} .cat-pill.other{background:var(--cat-other);color:var(--fg)}
+
+  #shortcuts{padding:8px 12px;border-top:1px solid var(--line);font-size:10px;color:var(--fg3);line-height:1.7}
+  #shortcuts b{color:var(--fg2)}
 </style>
 </head>
 <body>
 <div id="app">
+  <!-- LEFT: kernel picker -->
   <aside id="sidebar">
     <h1>SQTT Viewer <span class="sub" id="hdr-sub">—</span></h1>
     <div id="search"><input id="kq" type="search" placeholder="filter kernels…" spellcheck="false"/></div>
     <div id="kernel-list"></div>
   </aside>
 
+  <!-- CENTER: timeline -->
   <section id="main">
     <div id="toolbar">
       <div class="group">
-        <button id="step-back" title="Step back (←)">◀︎</button>
+        <button id="step-back" title="Step back one event (←)">◀︎</button>
         <button id="play" class="play" title="Play/Pause (space)">▶</button>
-        <button id="step-fwd" title="Step forward (→)">▶︎</button>
+        <button id="step-fwd" title="Step forward one event (→)">▶︎</button>
       </div>
       <div class="divider"></div>
       <div class="group">
         <label>cycle</label>
-        <input id="cursor" type="range" min="0" max="0" value="0" step="1" style="width:260px"/>
-        <span id="cyc" style="color:var(--fg);min-width:80px">0 / 0</span>
+        <input id="cursor" type="range" min="0" max="0" value="0" step="1" style="width:220px"/>
+        <span id="cyc" class="val" style="min-width:80px">0 / 0</span>
       </div>
       <div class="divider"></div>
       <div class="group">
         <label>speed</label>
-        <input id="speed" type="range" min="1" max="500" value="60" step="1"/>
-        <span id="speed-v" style="color:var(--fg);min-width:60px">60 cyc/s</span>
+        <input id="speed" type="range" min="1" max="1000" value="120" step="1"/>
+        <span id="speed-v" class="val">120 cyc/s</span>
       </div>
       <div class="divider"></div>
       <div class="group">
         <label>zoom</label>
         <input id="zoom" type="range" min="0.05" max="10" value="0.5" step="0.05"/>
-        <span id="zoom-v" style="color:var(--fg);min-width:50px">0.5 px/c</span>
+        <span id="zoom-v" class="val">0.5 px/c</span>
       </div>
     </div>
 
@@ -128,13 +186,20 @@
       <div class="stat"><label>insts</label><b id="s-insts">—</b></div>
       <div class="stat"><label>span</label><b id="s-span">—</b></div>
       <div class="stat"><label>active now</label><b id="s-active">0</b></div>
+      <div class="stat"><label>peak concurrent</label><b id="s-peak">—</b></div>
+      <div class="stat" id="s-filter-wrap" style="display:none">
+        <label>filter</label><b id="s-filter" class="filter-badge" title="click to clear">—</b>
+      </div>
     </div>
 
     <div id="timeline-wrap">
       <div id="empty"><div>
         <div class="big">No kernel loaded</div>
         <div>Pick a kernel from the sidebar ← to begin.</div>
-        <div style="margin-top:16px">Data file: <code id="src-path">viewer_data.json</code></div>
+        <div style="margin-top:14px">Keys: <kbd>Space</kbd> play <kbd>←</kbd><kbd>→</kbd> step
+          <kbd>,</kbd><kbd>.</kbd> ±1 cyc <kbd>V</kbd> next VMEM
+          <kbd>S</kbd> next stall <kbd>N</kbd> next wave</div>
+        <div style="margin-top:14px">Data file: <code id="src-path">viewer_data.json</code></div>
       </div></div>
       <svg id="timeline" style="display:none"></svg>
       <div id="tooltip"></div>
@@ -153,32 +218,68 @@
       <div class="item"><div class="swatch" style="background:var(--cat-other)"></div>OTHER</div>
     </div>
   </section>
+
+  <!-- RIGHT: topology + detail -->
+  <aside id="right">
+    <h2>Topology (48 WGP × 4 SIMD)</h2>
+    <div id="topo-wrap">
+      <div id="topo-note">—</div>
+      <svg id="topo-svg"></svg>
+      <div class="topo-legend">
+        <span><span class="swatch" style="background:var(--blue);display:inline-block;width:10px;height:8px;border-radius:1px;vertical-align:middle"></span> occupied · shade = wave count</span>
+      </div>
+    </div>
+
+    <h2>Pinned instruction</h2>
+    <div id="detail"><div class="empty">Click an instruction to pin it.</div></div>
+
+    <div id="shortcuts">
+      <b>Click</b> inst → pin · <b>Click</b> row/cell → filter<br>
+      <kbd>Esc</kbd> clear pin · <kbd>F</kbd> clear filter<br>
+      <kbd>V</kbd> next VMEM · <kbd>S</kbd> next stall<br>
+      <kbd>N</kbd> next wave start · <kbd>,</kbd><kbd>.</kbd> ±1 cyc
+    </div>
+  </aside>
 </div>
 
 <script>
 "use strict";
 
+// ─────────────────────── State ───────────────────────
 const STATE = {
-  data: null,          // full viewer_data.json
-  kernelName: null,    // currently selected
-  kernel: null,        // kernels[kernelName]
-  cursor: 0,           // current cycle
+  data: null,
+  kernelName: null,
+  kernel: null,
+  cursor: 0,
   playing: false,
   lastFrame: 0,
-  speed: 60,           // cycles per real second
-  pxPerCyc: 0.5,       // zoom
+  speed: 120,
+  pxPerCyc: 0.5,
   rowH: 18,
   rowGap: 2,
   labelW: 130,
   rulerH: 22,
+  utilH: 54,
   filter: "",
+  // Precomputed per-kernel
+  timeEvents: [],        // sorted unique instruction times (for step navigation)
+  peakConcurrent: 0,     // max simultaneously-executing waves
+  utilization: null,     // {buckets:N, dt, counts:[{cat:n, ...}], total:[]}
+  placementIndex: null,  // {"cu.simd": [waveIdx in STATE.kernel.waves, ...]}
+  // Selection
+  pinned: null,          // {w:int, i:int}
+  filterBy: null,        // {kind:"wave", w:int} or {kind:"simd", cu:int, simd:int}
 };
 
 const $ = (id) => document.getElementById(id);
 const SVGNS = "http://www.w3.org/2000/svg";
 const svgEl = (tag, attrs) => { const e = document.createElementNS(SVGNS, tag);
   if (attrs) for (const k in attrs) e.setAttribute(k, attrs[k]); return e; };
+const escape = (s) => String(s).replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"})[c]);
 
+const CATS = ["valu","salu","vmem","smem","lds","vopd","trans","branch","wait","other"];
+
+// ─────────────────────── Data load ───────────────────────
 async function loadData() {
   const res = await fetch("viewer_data.json");
   if (!res.ok) throw new Error("Failed to load viewer_data.json: HTTP " + res.status);
@@ -211,36 +312,123 @@ function selectKernel(name) {
   STATE.kernel = STATE.data.kernels[name];
   STATE.cursor = 0;
   STATE.playing = false;
+  STATE.pinned = null;
+  STATE.filterBy = null;
   $("play").classList.remove("playing");
   $("play").textContent = "▶";
   document.querySelectorAll(".kernel").forEach(el => el.classList.toggle("active",
     el.querySelector(".n").textContent === name));
+  precomputeKernel();
   $("s-waves").textContent = STATE.kernel.total_waves;
   $("s-insts").textContent = STATE.kernel.total_instructions;
   $("s-span").textContent = STATE.kernel.time_max + " cyc";
+  $("s-peak").textContent = STATE.peakConcurrent;
   $("cursor").max = STATE.kernel.time_max;
   $("empty").style.display = "none";
   $("timeline").style.display = "block";
-  render();
+  renderAll();
+  updateFilterBadge();
+  renderDetail();
 }
 
-function render() {
+function precomputeKernel() {
+  const k = STATE.kernel;
+  // Unique event times (for step navigation)
+  const times = new Set();
+  for (const w of k.waves) for (const it of w.instructions) times.add(it.t);
+  STATE.timeEvents = [...times].sort((a,b)=>a-b);
+
+  // Peak concurrent waves: merge [time_min, time_max] intervals, max stacking
+  const events = [];
+  for (const w of k.waves) { events.push([w.time_min, +1]); events.push([w.time_max, -1]); }
+  events.sort((a,b) => a[0] - b[0] || a[1] - b[1]);
+  let cur = 0, peak = 0;
+  for (const [_, d] of events) { cur += d; if (cur > peak) peak = cur; }
+  STATE.peakConcurrent = peak;
+
+  // Utilization histogram: sample buckets
+  const N = 400;
+  const dt = Math.max(1, k.time_max / N);
+  const counts = Array.from({length:N}, () => Object.fromEntries(CATS.map(c => [c, 0])));
+  const total = new Array(N).fill(0);
+  for (const w of k.waves) {
+    const insts = w.instructions;
+    if (!insts.length) continue;
+    let pos = 0;
+    for (let b = 0; b < N; b++) {
+      const t = b * dt;
+      if (t < w.time_min || t > w.time_max) continue;
+      while (pos < insts.length - 1 && insts[pos+1].t <= t) pos++;
+      counts[b][insts[pos].cat]++;
+      total[b]++;
+    }
+  }
+  STATE.utilization = { N, dt, counts, total };
+
+  // Placement index: (cu, simd) → [wave index within waves array]
+  const idx = {};
+  for (let i = 0; i < k.waves.length; i++) {
+    const w = k.waves[i];
+    if (w.cu == null || w.simd == null) continue;
+    const key = w.cu + "." + w.simd;
+    (idx[key] ||= []).push(i);
+  }
+  STATE.placementIndex = idx;
+}
+
+// ─────────────────────── Wave filter ───────────────────────
+function visibleWaves() {
+  if (!STATE.kernel) return [];
+  const waves = STATE.kernel.waves;
+  if (!STATE.filterBy) return waves.map((w,i) => ({w,i}));
+  if (STATE.filterBy.kind === "wave") {
+    const i = STATE.filterBy.w;
+    return [{w:waves[i], i}];
+  }
+  if (STATE.filterBy.kind === "simd") {
+    const {cu, simd} = STATE.filterBy;
+    return waves.map((w,i)=>({w,i})).filter(({w}) => w.cu === cu && w.simd === simd);
+  }
+  return waves.map((w,i) => ({w,i}));
+}
+
+function updateFilterBadge() {
+  const f = STATE.filterBy;
+  const wrap = $("s-filter-wrap"), el = $("s-filter");
+  if (!f) { wrap.style.display = "none"; return; }
+  wrap.style.display = "";
+  if (f.kind === "wave") el.textContent = `wave ${STATE.kernel.waves[f.w].wave_id} ✕`;
+  else if (f.kind === "simd") el.textContent = `cu${f.cu}·simd${f.simd} ✕`;
+}
+
+function setFilter(f) { STATE.filterBy = f; updateFilterBadge(); renderAll(); renderTopology(); }
+function clearFilter() { setFilter(null); }
+
+// ─────────────────────── Main render ───────────────────────
+function renderAll() {
+  renderTimeline();
+  renderTopology();
+  updateCursor();
+}
+
+function renderTimeline() {
   const svg = $("timeline");
   while (svg.firstChild) svg.removeChild(svg.firstChild);
   if (!STATE.kernel) return;
 
+  const visWaves = visibleWaves();
   const k = STATE.kernel;
   const px = STATE.pxPerCyc;
   const trackW = Math.max(400, Math.ceil(k.time_max * px) + 40);
   const width = STATE.labelW + trackW;
-  const height = STATE.rulerH + k.waves.length * (STATE.rowH + STATE.rowGap) + 8;
+  const rowsStartY = STATE.rulerH + STATE.utilH;
+  const height = rowsStartY + visWaves.length * (STATE.rowH + STATE.rowGap) + 8;
   svg.setAttribute("width", width);
   svg.setAttribute("height", height);
   svg.setAttribute("viewBox", `0 0 ${width} ${height}`);
 
   // Ruler
-  const rulerBg = svgEl("rect", {x:0, y:0, width, height:STATE.rulerH, class:"ruler-bg"});
-  svg.appendChild(rulerBg);
+  svg.appendChild(svgEl("rect", {x:0, y:0, width, height:STATE.rulerH, class:"ruler-bg"}));
   const tickStep = niceStep(k.time_max, trackW / 80);
   for (let t = 0; t <= k.time_max; t += tickStep) {
     const x = STATE.labelW + t * px;
@@ -248,43 +436,47 @@ function render() {
     const lbl = svgEl("text", {x, y:STATE.rulerH-8, class:"ruler-label"});
     lbl.textContent = t;
     svg.appendChild(lbl);
-    // vertical gridline into tracks
     svg.appendChild(svgEl("line", {x1:x, y1:STATE.rulerH, x2:x, y2:height,
       class:"grid-line" + (t % (tickStep*5) === 0 ? " major" : "")}));
   }
 
+  // Utilization strip
+  renderUtilStrip(svg, trackW);
+
   // Tracks
-  for (let i = 0; i < k.waves.length; i++) {
-    const w = k.waves[i];
-    const y = STATE.rulerH + i * (STATE.rowH + STATE.rowGap);
-    // Row label
-    const lbl = svgEl("text", {x:8, y:y + STATE.rowH * 0.7, class:"row-label"});
-    const placement = (w.cu !== null && w.cu !== undefined) ? ` cu${w.cu}·s${w.simd}` : "";
+  for (let vi = 0; vi < visWaves.length; vi++) {
+    const { w, i } = visWaves[vi];
+    const y = rowsStartY + vi * (STATE.rowH + STATE.rowGap);
+    const focused = STATE.filterBy && STATE.filterBy.kind === "wave" && STATE.filterBy.w === i;
+    const placement = (w.cu != null) ? ` cu${w.cu}·s${w.simd}` : "";
+    const lbl = svgEl("text", {x:8, y:y + STATE.rowH * 0.7,
+      class:"row-label" + (focused ? " focused" : ""), "data-w": i});
     lbl.textContent = `wave ${w.wave_id}${placement}`;
+    lbl.addEventListener("click", () => setFilter({kind:"wave", w:i}));
     svg.appendChild(lbl);
     const meta = svgEl("text", {x:8, y:y + STATE.rowH * 0.7 + 11, class:"row-label meta"});
     meta.textContent = `${w.inst_count}i · ${w.time_max - w.time_min}c`;
     svg.appendChild(meta);
 
-    // Track background
     svg.appendChild(svgEl("rect", {x:STATE.labelW, y, width:trackW, height:STATE.rowH,
-      fill:"#0f111a", stroke:"#1e2132"}));
+      class:"row-bg" + (focused ? " focused" : "")}));
 
-    // Instructions
     for (let j = 0; j < w.instructions.length; j++) {
       const it = w.instructions[j];
       const nx = w.instructions[j+1];
-      const dur = nx ? Math.max(1, nx.t - it.t) : 4;
+      const dur = nx ? Math.max(1, nx.t - it.t) : Math.max(1, Math.min(8, w.time_max - it.t + 1));
       const x = STATE.labelW + it.t * px;
       const barW = Math.max(1, dur * px);
+      const isPin = STATE.pinned && STATE.pinned.w === i && STATE.pinned.i === j;
       const rect = svgEl("rect", {
         x, y:y+2, width:barW, height:STATE.rowH - 4,
-        class:"inst",
+        class:"inst" + (isPin ? " pinned" : ""),
         fill: `var(--cat-${it.cat})`,
         "data-w": i, "data-i": j,
       });
       rect.addEventListener("mouseenter", onInstHover);
       rect.addEventListener("mouseleave", onInstLeave);
+      rect.addEventListener("click", onInstClick);
       svg.appendChild(rect);
     }
   }
@@ -294,10 +486,168 @@ function render() {
   cursorG.appendChild(svgEl("line", {id:"cursor-line", x1:STATE.labelW, y1:0,
     x2:STATE.labelW, y2:height, class:"cursor-line"}));
   svg.appendChild(cursorG);
-
-  updateCursor();
 }
 
+function renderUtilStrip(svg, trackW) {
+  const U = STATE.utilization;
+  if (!U) return;
+  const y0 = STATE.rulerH;
+  const h = STATE.utilH;
+  svg.appendChild(svgEl("rect", {x:STATE.labelW, y:y0, width:trackW, height:h, class:"util-bg"}));
+
+  // Compute max stack height (total active waves in any bucket)
+  let maxStack = 0;
+  for (const v of U.total) if (v > maxStack) maxStack = v;
+  if (maxStack === 0) maxStack = 1;
+
+  const pxPerBucket = (STATE.kernel.time_max * STATE.pxPerCyc) / U.N;
+  // Stacked bars, one per bucket
+  for (let b = 0; b < U.N; b++) {
+    const c = U.counts[b];
+    let cumY = y0 + h - 1;
+    const xb = STATE.labelW + b * pxPerBucket;
+    for (const cat of CATS) {
+      const v = c[cat];
+      if (v === 0) continue;
+      const barH = (v / maxStack) * (h - 4);
+      cumY -= barH;
+      svg.appendChild(svgEl("rect", {x:xb, y:cumY, width:Math.max(1, pxPerBucket),
+        height:barH, fill:`var(--cat-${cat})`, "shape-rendering":"crispEdges"}));
+    }
+  }
+
+  // y-axis scale label
+  const lbl = svgEl("text", {x:STATE.labelW - 6, y:y0 + 10, class:"util-label",
+    "text-anchor":"end"});
+  lbl.textContent = `${maxStack} waves`;
+  svg.appendChild(lbl);
+  const lbl2 = svgEl("text", {x:STATE.labelW - 6, y:y0 + h - 2, class:"util-label",
+    "text-anchor":"end"});
+  lbl2.textContent = "0";
+  svg.appendChild(lbl2);
+}
+
+// ─────────────────────── Topology grid ───────────────────────
+// Layout: 48 WGPs (columns) × 4 SIMDs (rows).
+// We don't know which WGP a (cu, simd) maps to without full raw data, so we
+// collapse CU pairs per WGP naively: wgp index = floor(cu/2), and within a
+// WGP the simd position = (cu%2)*2 + simd  (cu_even: simd 0/1; cu_odd: 2/3).
+// When --raw is not supplied, all waves have cu=null and the grid stays empty.
+function renderTopology() {
+  const svg = $("topo-svg");
+  while (svg.firstChild) svg.removeChild(svg.firstChild);
+  const note = $("topo-note");
+  if (!STATE.kernel) return;
+
+  const hasPlacement = STATE.kernel.waves.some(w => w.cu != null);
+  if (!hasPlacement) {
+    note.innerHTML = `<span style="color:var(--yellow)">no placement data</span> — rerun
+      <code>build_viewer_data.py</code> with <code>--raw &lt;raw_sqtt_dir&gt;</code> to populate.`;
+  } else {
+    const total = STATE.kernel.total_waves;
+    const units = Object.keys(STATE.placementIndex).length;
+    note.innerHTML = `${total} waves across ${units} (cu,simd) units — click a cell to filter.`;
+  }
+
+  const cols = 48, rows = 4;
+  const cellW = 10, cellH = 14, gap = 1;
+  const padL = 22, padT = 14;
+  const W = padL + cols * (cellW + gap) + 20;
+  const H = padT + rows * (cellH + gap) + 20;
+  svg.setAttribute("width", W);
+  svg.setAttribute("height", H);
+  svg.setAttribute("viewBox", `0 0 ${W} ${H}`);
+
+  // Column group separators (every 8 WGPs = 1 SE — approximation for 6-SE × 8-WGP layout)
+  for (let se = 0; se < 6; se++) {
+    const x = padL + se * 8 * (cellW + gap) - 1;
+    svg.appendChild(svgEl("line", {x1:x, y1:padT-2, x2:x, y2:padT + rows*(cellH+gap) + 2,
+      stroke:"#2d3148", "stroke-width":0.5}));
+    const lbl = svgEl("text", {x:x + 4*(cellW+gap), y:padT - 3, class:"topo-label",
+      "text-anchor":"middle"});
+    lbl.textContent = `SE${se}`;
+    svg.appendChild(lbl);
+  }
+
+  // Row labels
+  for (let r = 0; r < rows; r++) {
+    const lbl = svgEl("text", {x:padL - 4, y:padT + r*(cellH+gap) + cellH*0.7,
+      class:"topo-label", "text-anchor":"end"});
+    lbl.textContent = `s${r}`;
+    svg.appendChild(lbl);
+  }
+
+  // Build a (wgp, simd) → waveCount map via naive cu->wgp mapping
+  const occ = new Array(cols * rows).fill(0);  // count per cell
+  const occWaves = Array.from({length: cols*rows}, () => []); // wave indices per cell
+  for (const key of Object.keys(STATE.placementIndex)) {
+    const [cu, simd] = key.split(".").map(Number);
+    const wgp = Math.floor(cu / 2) % cols;
+    const rowSimd = ((cu % 2) * 2 + (simd % 2)) % rows;
+    const idx = rowSimd * cols + wgp;
+    const waves = STATE.placementIndex[key];
+    occ[idx] += waves.length;
+    occWaves[idx].push(...waves);
+  }
+  const maxOcc = Math.max(1, ...occ);
+
+  for (let r = 0; r < rows; r++) for (let c = 0; c < cols; c++) {
+    const idx = r*cols + c;
+    const n = occ[idx];
+    const sel = STATE.filterBy && STATE.filterBy.kind === "simd"
+      && STATE.filterBy.cu === (c*2 + (r>=2?1:0)) && STATE.filterBy.simd === (r%2);
+    const intensity = n ? 0.25 + 0.75 * (n / maxOcc) : 0;
+    const rect = svgEl("rect", {
+      x: padL + c*(cellW+gap), y: padT + r*(cellH+gap),
+      width: cellW, height: cellH,
+      class: "topo-cell" + (n ? " active" : " empty") + (sel ? " selected" : ""),
+      fill: n ? `rgba(88, 166, 255, ${intensity.toFixed(2)})` : "",
+      "data-c": c, "data-r": r, "data-n": n, "data-waves": occWaves[idx].join(","),
+    });
+    if (n > 0) {
+      rect.addEventListener("mouseenter", onTopoHover);
+      rect.addEventListener("mouseleave", onInstLeave);
+      rect.addEventListener("click", onTopoClick);
+    }
+    svg.appendChild(rect);
+
+    if (n > 0 && cellW >= 10) {
+      const lbl = svgEl("text", {x:padL + c*(cellW+gap) + cellW/2,
+        y:padT + r*(cellH+gap) + cellH*0.75,
+        class:"topo-label", "text-anchor":"middle",
+        fill:"#fff", "font-size":8});
+      lbl.textContent = n;
+      svg.appendChild(lbl);
+    }
+  }
+}
+
+function onTopoHover(e) {
+  const c = +e.target.getAttribute("data-c");
+  const r = +e.target.getAttribute("data-r");
+  const n = +e.target.getAttribute("data-n");
+  const waveIdxs = (e.target.getAttribute("data-waves") || "").split(",").filter(Boolean).map(Number);
+  const waveIds = waveIdxs.map(i => STATE.kernel.waves[i].wave_id).join(", ");
+  const tt = $("tooltip");
+  tt.innerHTML = `<div class="t-inst">WGP ${c} · SIMD row ${r}</div>
+    <div class="t-meta"><span>waves ${n}</span><span>ids: ${waveIds || '—'}</span></div>`;
+  const wrap = $("timeline-wrap").getBoundingClientRect();
+  tt.style.left = (e.clientX - wrap.left + 12) + "px";
+  tt.style.top = (e.clientY - wrap.top + 12) + "px";
+  tt.style.display = "block";
+}
+
+function onTopoClick(e) {
+  const c = +e.target.getAttribute("data-c");
+  const r = +e.target.getAttribute("data-r");
+  // Reverse-map: first wave in that cell, use its cu/simd (so filter matches real data key)
+  const waveIdxs = (e.target.getAttribute("data-waves") || "").split(",").filter(Boolean).map(Number);
+  if (!waveIdxs.length) return;
+  const first = STATE.kernel.waves[waveIdxs[0]];
+  setFilter({kind:"simd", cu:first.cu, simd:first.simd});
+}
+
+// ─────────────────────── Cursor ───────────────────────
 function niceStep(range, targetTicks) {
   if (range <= 0) return 100;
   const raw = range / Math.max(1, targetTicks);
@@ -310,10 +660,10 @@ function niceStep(range, targetTicks) {
 function updateCursor() {
   if (!STATE.kernel) return;
   const cx = STATE.labelW + STATE.cursor * STATE.pxPerCyc;
-  const line = $("cursor-line") || document.querySelector("#cursor-g line");
+  const line = document.querySelector("#cursor-g line");
   if (line) line.setAttribute("transform", `translate(${cx - STATE.labelW}, 0)`);
   $("cursor").value = STATE.cursor;
-  $("cyc").textContent = `${STATE.cursor} / ${STATE.kernel.time_max}`;
+  $("cyc").textContent = `${Math.round(STATE.cursor)} / ${STATE.kernel.time_max}`;
 
   // Mark active instructions + count active waves
   let active = 0;
@@ -322,6 +672,7 @@ function updateCursor() {
   allInsts.forEach(el => el.classList.remove("active"));
   for (let i = 0; i < k.waves.length; i++) {
     const w = k.waves[i];
+    if (STATE.cursor < w.time_min || STATE.cursor > w.time_max) continue;
     const idx = findActive(w.instructions, STATE.cursor);
     if (idx >= 0) {
       active++;
@@ -332,7 +683,6 @@ function updateCursor() {
   $("s-active").textContent = active;
 }
 
-// Binary search: index of the last instruction with t <= cursor (or -1 if none / past end)
 function findActive(insts, t) {
   if (!insts.length || t < insts[0].t) return -1;
   let lo = 0, hi = insts.length - 1;
@@ -341,30 +691,85 @@ function findActive(insts, t) {
     if (insts[mid].t <= t) lo = mid;
     else hi = mid - 1;
   }
-  // Still "active" only if next inst not reached yet — for last inst we keep it active
-  // until the wave's time_max (already bounded by cursor at that point).
   return lo;
 }
 
-// --- Tooltip ---
+// ─────────────────────── Pin + detail ───────────────────────
+function onInstClick(e) {
+  const w = +e.target.getAttribute("data-w");
+  const i = +e.target.getAttribute("data-i");
+  STATE.pinned = { w, i };
+  // Re-render pinned class — cheap enough to just toggle all
+  document.querySelectorAll("rect.inst.pinned").forEach(el => el.classList.remove("pinned"));
+  e.target.classList.add("pinned");
+  // Move cursor to this instruction
+  STATE.cursor = STATE.kernel.waves[w].instructions[i].t;
+  updateCursor();
+  renderDetail();
+}
+
+function renderDetail() {
+  const d = $("detail");
+  if (!STATE.pinned) {
+    d.innerHTML = '<div class="empty">Click an instruction to pin it.</div>';
+    return;
+  }
+  const w = STATE.kernel.waves[STATE.pinned.w];
+  const i = STATE.pinned.i;
+  const it = w.instructions[i];
+  const placement = (w.cu != null) ? `cu${w.cu}·simd${w.simd}` : "(no placement data)";
+  const deltaPrev = i > 0 ? (it.t - w.instructions[i-1].t) : 0;
+  const deltaNext = i < w.instructions.length-1 ? (w.instructions[i+1].t - it.t) : 0;
+
+  let html = `<div class="pin-head">
+    <div class="inst-line">${escape(it.inst || '(no disasm)')}</div>
+    <div class="meta">
+      <div><b>wave ${w.wave_id}</b> · ${placement} · inst ${i}/${w.inst_count}</div>
+      <div>pc <b>${it.pc}</b> · cyc <b>${it.t}</b> · type <b>${it.type}</b>
+        · <span class="cat-pill ${it.cat}">${it.cat}</span></div>
+      <div>Δprev <b>${deltaPrev}</b> cyc · Δnext <b>${deltaNext}</b> cyc</div>
+    </div>
+  </div>`;
+
+  html += '<div class="inst-ctx">';
+  const lo = Math.max(0, i - 5);
+  const hi = Math.min(w.instructions.length - 1, i + 5);
+  for (let j = lo; j <= hi; j++) {
+    const ji = w.instructions[j];
+    const dt = j > 0 ? (ji.t - w.instructions[j-1].t) : 0;
+    const self = j === i ? " self" : "";
+    html += `<div class="row${self}">
+      <span class="t">${ji.t}</span>
+      <span class="dt">${dt > 0 ? '+'+dt : ''}</span>
+      <span class="cat-pill ${ji.cat}">${ji.cat}</span>
+      <span class="inst" title="${escape(ji.inst)}">${escape(ji.inst || '(no disasm)')}</span>
+    </div>`;
+  }
+  html += '</div>';
+  d.innerHTML = html;
+}
+
+// ─────────────────────── Tooltip ───────────────────────
 function onInstHover(e) {
   const wi = +e.target.getAttribute("data-w");
   const ii = +e.target.getAttribute("data-i");
   const w = STATE.kernel.waves[wi];
   const it = w.instructions[ii];
+  const prev = ii > 0 ? w.instructions[ii-1] : null;
+  const dt = prev ? (it.t - prev.t) : 0;
   const tt = $("tooltip");
   tt.innerHTML = `<div class="t-inst">${escape(it.inst || "(no disasm)")}</div>
     <div class="t-meta"><span>wave ${w.wave_id}</span><span>pc ${it.pc}</span>
-    <span>cyc ${it.t}</span><span>${it.type}</span><span>cat ${it.cat}</span></div>`;
+    <span>cyc ${it.t}</span>${prev ? `<span>Δ${dt}</span>` : ''}
+    <span>${it.type}</span><span class="cat-pill ${it.cat}">${it.cat}</span></div>`;
   const wrap = $("timeline-wrap").getBoundingClientRect();
-  const x = e.clientX - wrap.left + 12;
-  const y = e.clientY - wrap.top + 12;
-  tt.style.left = x + "px"; tt.style.top = y + "px"; tt.style.display = "block";
+  tt.style.left = (e.clientX - wrap.left + 12) + "px";
+  tt.style.top = (e.clientY - wrap.top + 12) + "px";
+  tt.style.display = "block";
 }
 function onInstLeave(){ $("tooltip").style.display = "none"; }
-function escape(s){ return String(s).replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"})[c]); }
 
-// --- Controls ---
+// ─────────────────────── Playback + navigation ───────────────────────
 function togglePlay(){
   if (!STATE.kernel) return;
   STATE.playing = !STATE.playing;
@@ -384,33 +789,67 @@ function tick(now) {
 }
 function stepDelta(sign) {
   if (!STATE.kernel) return;
-  // Snap to next/prev instruction time across all waves
-  const targets = new Set();
-  for (const w of STATE.kernel.waves) for (const it of w.instructions) targets.add(it.t);
-  const sorted = [...targets].sort((a,b)=>a-b);
+  const sorted = STATE.timeEvents;
   let idx;
   if (sign > 0) idx = sorted.findIndex(t => t > STATE.cursor);
-  else idx = (() => { let i = sorted.length - 1; while (i >= 0 && sorted[i] >= STATE.cursor) i--; return i; })();
+  else {
+    idx = sorted.length - 1;
+    while (idx >= 0 && sorted[idx] >= STATE.cursor) idx--;
+  }
   if (idx < 0 || idx >= sorted.length) return;
   STATE.cursor = sorted[idx];
   updateCursor();
 }
+function nudgeCyc(d) {
+  if (!STATE.kernel) return;
+  STATE.cursor = Math.max(0, Math.min(STATE.kernel.time_max, STATE.cursor + d));
+  updateCursor();
+}
 
+// Jump to next instruction matching a predicate, across all waves
+function jumpNext(pred) {
+  if (!STATE.kernel) return;
+  let best = Infinity;
+  for (const w of STATE.kernel.waves) {
+    for (const it of w.instructions) {
+      if (it.t > STATE.cursor && pred(it) && it.t < best) { best = it.t; break; }
+    }
+  }
+  if (isFinite(best)) { STATE.cursor = best; updateCursor(); }
+}
+function jumpNextWaveStart() {
+  if (!STATE.kernel) return;
+  let best = Infinity;
+  for (const w of STATE.kernel.waves) if (w.time_min > STATE.cursor && w.time_min < best) best = w.time_min;
+  if (isFinite(best)) { STATE.cursor = best; updateCursor(); }
+}
+
+// ─────────────────────── Wiring ───────────────────────
 $("play").onclick = togglePlay;
 $("step-fwd").onclick = () => stepDelta(+1);
 $("step-back").onclick = () => stepDelta(-1);
 $("cursor").oninput = (e) => { STATE.cursor = +e.target.value; updateCursor(); };
 $("speed").oninput = (e) => { STATE.speed = +e.target.value; $("speed-v").textContent = STATE.speed + " cyc/s"; };
-$("zoom").oninput  = (e) => { STATE.pxPerCyc = +e.target.value; $("zoom-v").textContent = STATE.pxPerCyc + " px/c"; render(); };
+$("zoom").oninput  = (e) => { STATE.pxPerCyc = +e.target.value; $("zoom-v").textContent = STATE.pxPerCyc.toFixed(2) + " px/c"; renderTimeline(); updateCursor(); };
 $("kq").oninput    = (e) => { STATE.filter = e.target.value; renderKernelList(); };
+$("s-filter").onclick = () => clearFilter();
 
 document.addEventListener("keydown", (e) => {
   if (e.target.tagName === "INPUT") return;
-  if (e.code === "Space") { e.preventDefault(); togglePlay(); }
-  else if (e.code === "ArrowRight") { e.preventDefault(); stepDelta(+1); }
-  else if (e.code === "ArrowLeft")  { e.preventDefault(); stepDelta(-1); }
-  else if (e.code === "Home") { STATE.cursor = 0; updateCursor(); }
-  else if (e.code === "End" && STATE.kernel) { STATE.cursor = STATE.kernel.time_max; updateCursor(); }
+  const k = e.code;
+  if (k === "Space")      { e.preventDefault(); togglePlay(); }
+  else if (k === "ArrowRight") { e.preventDefault(); stepDelta(+1); }
+  else if (k === "ArrowLeft")  { e.preventDefault(); stepDelta(-1); }
+  else if (k === "Home")       { STATE.cursor = 0; updateCursor(); }
+  else if (k === "End" && STATE.kernel) { STATE.cursor = STATE.kernel.time_max; updateCursor(); }
+  else if (k === "Comma" || k === "Period") { e.preventDefault(); nudgeCyc(k === "Comma" ? -1 : 1); }
+  else if (k === "KeyV") { e.preventDefault(); jumpNext(it => it.cat === "vmem"); }
+  else if (k === "KeyS") { e.preventDefault(); jumpNext(it => it.cat === "wait"); }
+  else if (k === "KeyN") { e.preventDefault(); jumpNextWaveStart(); }
+  else if (k === "KeyF") { e.preventDefault(); clearFilter(); }
+  else if (k === "Escape") { STATE.pinned = null;
+    document.querySelectorAll("rect.inst.pinned").forEach(el => el.classList.remove("pinned"));
+    renderDetail(); }
 });
 
 // Boot
@@ -418,7 +857,7 @@ loadData().catch(err => {
   $("empty").innerHTML = `<div>
     <div class="big" style="color:var(--red)">Failed to load data</div>
     <div>${escape(err.message)}</div>
-    <div style="margin-top:16px">Run <code>python -m http.server</code> in this directory, or<br>
+    <div style="margin-top:16px">Run <code>python -m http.server --directory extra/sqtt/viewer</code>, or<br>
       regenerate with <code>python extra/sqtt/viewer/build_viewer_data.py</code>.</div>
   </div>`;
 });

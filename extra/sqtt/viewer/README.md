@@ -9,9 +9,11 @@ viewer with play/pause/step controls over a wave-per-row timeline.
 - **Session 1 (landed):** ingest `extra/sqtt/captures/rigorous/*.pkl`, one row
   per wave with cycle-aligned instruction spans, category colouring, a draggable
   cycle cursor, play/pause/step ±1 controls, and a speed/zoom slider.
-- **Session 2 (planned):** live utilization heatmap per unit at the cursor,
-  instruction detail panel, pan + per-track horizontal scroll sync,
-  keyboard-rich jumping (next stall, next VMEM, etc.).
+- **Session 2 (landed):** utilization strip (stacked per-category wave count
+  over time) above the timeline, 48-WGP × 4-SIMD topology grid in a right panel,
+  click-to-pin instruction detail with ±5 surrounding instructions and cycle
+  deltas, wave / (cu,simd) filtering, keyboard jumps to next VMEM / next stall /
+  next wave start / ±1 cycle nudge.
 - **Session 3 (planned):** RGP `.rgp` binary ingestion via `extra/sqtt/rgptool.py`,
   PMC per-WGP overlay, HW-vs-Emu diff inline, multi-run switcher within a
   single capture session.
@@ -56,8 +58,23 @@ vopd | trans | branch | wait | other`.
 
 ## Keyboard shortcuts
 
-| Key       | Action                         |
-|-----------|--------------------------------|
-| Space     | Play / pause                   |
-| ← / →     | Step one instruction event ∓   |
-| Home / End| Jump to cycle 0 / time_max     |
+| Key       | Action                              |
+|-----------|-------------------------------------|
+| Space     | Play / pause                        |
+| ← / →     | Step one instruction event ∓        |
+| , / .     | Nudge cursor ±1 cycle               |
+| V         | Jump to next VMEM instruction       |
+| S         | Jump to next wait/stall instruction |
+| N         | Jump to next wave start             |
+| Home / End| Jump to cycle 0 / time_max          |
+| Esc       | Clear pinned instruction            |
+| F         | Clear wave / SIMD filter            |
+
+## Interactions
+
+- Click an instruction span → **pin** it (full detail in right panel with ±5
+  context, `Δprev` / `Δnext`, category chips). Cursor snaps to that cycle.
+- Click a wave's row label → **filter** the timeline to just that wave.
+- Click a topology cell (when `--raw` was supplied) → **filter** to all waves
+  on that `(cu, simd)` pair.
+- Click the filter badge in the stats bar (or press `F`) → clear the filter.
