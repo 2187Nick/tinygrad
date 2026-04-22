@@ -1,0 +1,427 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>SQTT Cycle Viewer</title>
+<style>
+  :root {
+    --bg:#08090e; --bg2:#111320; --bg3:#1a1d2e; --line:#2d3148;
+    --fg:#e8e8f0; --fg2:#8a90a8; --fg3:#555b72;
+    --blue:#58a6ff; --green:#2ea043; --red:#f85149; --yellow:#d29922;
+    --cat-valu:#58a6ff; --cat-salu:#39c5cf; --cat-vmem:#f0883e; --cat-smem:#bc8cff;
+    --cat-lds:#d2a8ff;  --cat-branch:#f778ba; --cat-wait:#6b7080; --cat-trans:#ffb454;
+    --cat-vopd:#84e0ff; --cat-other:#555b72;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  html,body{height:100%;overflow:hidden;background:var(--bg);color:var(--fg);
+    font-family:'SF Mono','Cascadia Code','Fira Code',ui-monospace,monospace;font-size:13px}
+  button,select,input{font-family:inherit;font-size:inherit}
+  #app{display:grid;grid-template-columns:280px 1fr;height:100%}
+
+  /* Sidebar */
+  #sidebar{background:var(--bg2);border-right:1px solid var(--line);display:flex;flex-direction:column;min-height:0}
+  #sidebar h1{padding:14px 16px;font-size:14px;color:var(--blue);border-bottom:1px solid var(--line);font-weight:600}
+  #sidebar h1 .sub{color:var(--fg3);font-size:11px;font-weight:400;margin-left:8px}
+  #search{padding:8px 12px;border-bottom:1px solid var(--line)}
+  #search input{width:100%;background:var(--bg3);color:var(--fg);border:1px solid var(--line);
+    padding:6px 8px;border-radius:4px;outline:none}
+  #search input:focus{border-color:var(--blue)}
+  #kernel-list{flex:1;overflow-y:auto;scrollbar-width:thin;scrollbar-color:#484f58 var(--bg2)}
+  .kernel{padding:8px 14px;cursor:pointer;border-bottom:1px solid #1e2132;display:flex;justify-content:space-between;gap:8px}
+  .kernel:hover{background:var(--bg3)}
+  .kernel.active{background:#1c2541;border-left:3px solid var(--blue);padding-left:11px}
+  .kernel .n{font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1}
+  .kernel .m{color:var(--fg3);font-size:11px;white-space:nowrap}
+
+  /* Main */
+  #main{display:flex;flex-direction:column;min-height:0;min-width:0}
+  #toolbar{padding:8px 14px;background:var(--bg2);border-bottom:1px solid var(--line);
+    display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+  #toolbar .group{display:flex;gap:4px;align-items:center}
+  #toolbar label{color:var(--fg2);font-size:11px;letter-spacing:.03em;text-transform:uppercase}
+  #toolbar button{background:var(--bg3);color:var(--fg);border:1px solid var(--line);
+    padding:5px 10px;border-radius:4px;cursor:pointer;font-weight:500}
+  #toolbar button:hover:not(:disabled){background:#262a3d;border-color:#3a3f55}
+  #toolbar button:disabled{opacity:.4;cursor:not-allowed}
+  #toolbar button.play{background:#133b1f;color:var(--green);border-color:#1f5a30}
+  #toolbar button.play.playing{background:#3d1117;color:var(--red);border-color:#5a1f2a}
+  #toolbar input[type=range]{width:120px}
+  #toolbar .divider{width:1px;height:22px;background:var(--line)}
+
+  #stats{padding:8px 14px;background:var(--bg2);border-bottom:1px solid var(--line);
+    display:flex;gap:18px;font-size:12px;color:var(--fg2)}
+  #stats .stat{display:flex;gap:6px;align-items:baseline}
+  #stats .stat b{color:var(--fg);font-weight:600}
+
+  /* Timeline */
+  #timeline-wrap{flex:1;overflow:auto;position:relative}
+  #timeline{display:block}
+  .row-label{fill:var(--fg2);font-size:11px}
+  .row-label.meta{fill:var(--fg3);font-size:10px}
+  .grid-line{stroke:#1e2132;stroke-width:1}
+  .grid-line.major{stroke:#2d3148}
+  .cursor-line{stroke:var(--yellow);stroke-width:1.5;pointer-events:none}
+  .inst{rx:1;ry:1}
+  .inst.active{stroke:var(--yellow);stroke-width:1.5}
+  .ruler-bg{fill:var(--bg2)}
+  .ruler-tick{stroke:var(--fg3);stroke-width:1}
+  .ruler-label{fill:var(--fg2);font-size:10px;text-anchor:middle}
+
+  /* Tooltip */
+  #tooltip{position:absolute;background:#0d0f16;border:1px solid var(--line);
+    padding:8px 10px;border-radius:6px;font-size:11px;pointer-events:none;
+    box-shadow:0 4px 16px rgba(0,0,0,.6);display:none;z-index:10;max-width:320px}
+  #tooltip .t-inst{color:var(--fg);font-weight:600;margin-bottom:4px;word-break:break-all}
+  #tooltip .t-meta{color:var(--fg2)}
+  #tooltip .t-meta span{color:var(--fg);margin-right:10px}
+
+  /* Legend */
+  #legend{padding:6px 14px;background:var(--bg2);border-top:1px solid var(--line);
+    display:flex;gap:12px;flex-wrap:wrap;font-size:11px;color:var(--fg2)}
+  #legend .item{display:flex;gap:5px;align-items:center}
+  #legend .swatch{width:12px;height:10px;border-radius:2px}
+
+  /* Empty */
+  #empty{display:flex;align-items:center;justify-content:center;flex:1;color:var(--fg3);text-align:center;padding:40px}
+  #empty .big{font-size:18px;color:var(--fg2);margin-bottom:8px}
+  code{background:var(--bg3);padding:1px 5px;border-radius:3px;color:var(--yellow)}
+</style>
+</head>
+<body>
+<div id="app">
+  <aside id="sidebar">
+    <h1>SQTT Viewer <span class="sub" id="hdr-sub">—</span></h1>
+    <div id="search"><input id="kq" type="search" placeholder="filter kernels…" spellcheck="false"/></div>
+    <div id="kernel-list"></div>
+  </aside>
+
+  <section id="main">
+    <div id="toolbar">
+      <div class="group">
+        <button id="step-back" title="Step back (←)">◀︎</button>
+        <button id="play" class="play" title="Play/Pause (space)">▶</button>
+        <button id="step-fwd" title="Step forward (→)">▶︎</button>
+      </div>
+      <div class="divider"></div>
+      <div class="group">
+        <label>cycle</label>
+        <input id="cursor" type="range" min="0" max="0" value="0" step="1" style="width:260px"/>
+        <span id="cyc" style="color:var(--fg);min-width:80px">0 / 0</span>
+      </div>
+      <div class="divider"></div>
+      <div class="group">
+        <label>speed</label>
+        <input id="speed" type="range" min="1" max="500" value="60" step="1"/>
+        <span id="speed-v" style="color:var(--fg);min-width:60px">60 cyc/s</span>
+      </div>
+      <div class="divider"></div>
+      <div class="group">
+        <label>zoom</label>
+        <input id="zoom" type="range" min="0.05" max="10" value="0.5" step="0.05"/>
+        <span id="zoom-v" style="color:var(--fg);min-width:50px">0.5 px/c</span>
+      </div>
+    </div>
+
+    <div id="stats">
+      <div class="stat"><label>waves</label><b id="s-waves">—</b></div>
+      <div class="stat"><label>insts</label><b id="s-insts">—</b></div>
+      <div class="stat"><label>span</label><b id="s-span">—</b></div>
+      <div class="stat"><label>active now</label><b id="s-active">0</b></div>
+    </div>
+
+    <div id="timeline-wrap">
+      <div id="empty"><div>
+        <div class="big">No kernel loaded</div>
+        <div>Pick a kernel from the sidebar ← to begin.</div>
+        <div style="margin-top:16px">Data file: <code id="src-path">viewer_data.json</code></div>
+      </div></div>
+      <svg id="timeline" style="display:none"></svg>
+      <div id="tooltip"></div>
+    </div>
+
+    <div id="legend">
+      <div class="item"><div class="swatch" style="background:var(--cat-valu)"></div>VALU</div>
+      <div class="item"><div class="swatch" style="background:var(--cat-salu)"></div>SALU</div>
+      <div class="item"><div class="swatch" style="background:var(--cat-vmem)"></div>VMEM</div>
+      <div class="item"><div class="swatch" style="background:var(--cat-smem)"></div>SMEM</div>
+      <div class="item"><div class="swatch" style="background:var(--cat-lds)"></div>LDS</div>
+      <div class="item"><div class="swatch" style="background:var(--cat-trans)"></div>TRANS</div>
+      <div class="item"><div class="swatch" style="background:var(--cat-vopd)"></div>VOPD</div>
+      <div class="item"><div class="swatch" style="background:var(--cat-branch)"></div>BRANCH</div>
+      <div class="item"><div class="swatch" style="background:var(--cat-wait)"></div>WAIT</div>
+      <div class="item"><div class="swatch" style="background:var(--cat-other)"></div>OTHER</div>
+    </div>
+  </section>
+</div>
+
+<script>
+"use strict";
+
+const STATE = {
+  data: null,          // full viewer_data.json
+  kernelName: null,    // currently selected
+  kernel: null,        // kernels[kernelName]
+  cursor: 0,           // current cycle
+  playing: false,
+  lastFrame: 0,
+  speed: 60,           // cycles per real second
+  pxPerCyc: 0.5,       // zoom
+  rowH: 18,
+  rowGap: 2,
+  labelW: 130,
+  rulerH: 22,
+  filter: "",
+};
+
+const $ = (id) => document.getElementById(id);
+const SVGNS = "http://www.w3.org/2000/svg";
+const svgEl = (tag, attrs) => { const e = document.createElementNS(SVGNS, tag);
+  if (attrs) for (const k in attrs) e.setAttribute(k, attrs[k]); return e; };
+
+async function loadData() {
+  const res = await fetch("viewer_data.json");
+  if (!res.ok) throw new Error("Failed to load viewer_data.json: HTTP " + res.status);
+  STATE.data = await res.json();
+  $("hdr-sub").textContent = STATE.data.arch + " · " + STATE.data.kernel_count + " kernels";
+  renderKernelList();
+}
+
+function renderKernelList() {
+  const list = $("kernel-list");
+  list.innerHTML = "";
+  const names = Object.keys(STATE.data.kernels).sort();
+  const q = STATE.filter.toLowerCase();
+  let shown = 0;
+  for (const name of names) {
+    if (q && !name.toLowerCase().includes(q)) continue;
+    const k = STATE.data.kernels[name];
+    const div = document.createElement("div");
+    div.className = "kernel" + (name === STATE.kernelName ? " active" : "");
+    div.innerHTML = `<span class="n">${name}</span><span class="m">w${k.total_waves}·${k.total_instructions}i</span>`;
+    div.onclick = () => selectKernel(name);
+    list.appendChild(div);
+    shown++;
+  }
+  if (shown === 0) list.innerHTML = '<div style="padding:14px;color:var(--fg3)">no matches</div>';
+}
+
+function selectKernel(name) {
+  STATE.kernelName = name;
+  STATE.kernel = STATE.data.kernels[name];
+  STATE.cursor = 0;
+  STATE.playing = false;
+  $("play").classList.remove("playing");
+  $("play").textContent = "▶";
+  document.querySelectorAll(".kernel").forEach(el => el.classList.toggle("active",
+    el.querySelector(".n").textContent === name));
+  $("s-waves").textContent = STATE.kernel.total_waves;
+  $("s-insts").textContent = STATE.kernel.total_instructions;
+  $("s-span").textContent = STATE.kernel.time_max + " cyc";
+  $("cursor").max = STATE.kernel.time_max;
+  $("empty").style.display = "none";
+  $("timeline").style.display = "block";
+  render();
+}
+
+function render() {
+  const svg = $("timeline");
+  while (svg.firstChild) svg.removeChild(svg.firstChild);
+  if (!STATE.kernel) return;
+
+  const k = STATE.kernel;
+  const px = STATE.pxPerCyc;
+  const trackW = Math.max(400, Math.ceil(k.time_max * px) + 40);
+  const width = STATE.labelW + trackW;
+  const height = STATE.rulerH + k.waves.length * (STATE.rowH + STATE.rowGap) + 8;
+  svg.setAttribute("width", width);
+  svg.setAttribute("height", height);
+  svg.setAttribute("viewBox", `0 0 ${width} ${height}`);
+
+  // Ruler
+  const rulerBg = svgEl("rect", {x:0, y:0, width, height:STATE.rulerH, class:"ruler-bg"});
+  svg.appendChild(rulerBg);
+  const tickStep = niceStep(k.time_max, trackW / 80);
+  for (let t = 0; t <= k.time_max; t += tickStep) {
+    const x = STATE.labelW + t * px;
+    svg.appendChild(svgEl("line", {x1:x, y1:STATE.rulerH-6, x2:x, y2:STATE.rulerH, class:"ruler-tick"}));
+    const lbl = svgEl("text", {x, y:STATE.rulerH-8, class:"ruler-label"});
+    lbl.textContent = t;
+    svg.appendChild(lbl);
+    // vertical gridline into tracks
+    svg.appendChild(svgEl("line", {x1:x, y1:STATE.rulerH, x2:x, y2:height,
+      class:"grid-line" + (t % (tickStep*5) === 0 ? " major" : "")}));
+  }
+
+  // Tracks
+  for (let i = 0; i < k.waves.length; i++) {
+    const w = k.waves[i];
+    const y = STATE.rulerH + i * (STATE.rowH + STATE.rowGap);
+    // Row label
+    const lbl = svgEl("text", {x:8, y:y + STATE.rowH * 0.7, class:"row-label"});
+    const placement = (w.cu !== null && w.cu !== undefined) ? ` cu${w.cu}·s${w.simd}` : "";
+    lbl.textContent = `wave ${w.wave_id}${placement}`;
+    svg.appendChild(lbl);
+    const meta = svgEl("text", {x:8, y:y + STATE.rowH * 0.7 + 11, class:"row-label meta"});
+    meta.textContent = `${w.inst_count}i · ${w.time_max - w.time_min}c`;
+    svg.appendChild(meta);
+
+    // Track background
+    svg.appendChild(svgEl("rect", {x:STATE.labelW, y, width:trackW, height:STATE.rowH,
+      fill:"#0f111a", stroke:"#1e2132"}));
+
+    // Instructions
+    for (let j = 0; j < w.instructions.length; j++) {
+      const it = w.instructions[j];
+      const nx = w.instructions[j+1];
+      const dur = nx ? Math.max(1, nx.t - it.t) : 4;
+      const x = STATE.labelW + it.t * px;
+      const barW = Math.max(1, dur * px);
+      const rect = svgEl("rect", {
+        x, y:y+2, width:barW, height:STATE.rowH - 4,
+        class:"inst",
+        fill: `var(--cat-${it.cat})`,
+        "data-w": i, "data-i": j,
+      });
+      rect.addEventListener("mouseenter", onInstHover);
+      rect.addEventListener("mouseleave", onInstLeave);
+      svg.appendChild(rect);
+    }
+  }
+
+  // Cursor
+  const cursorG = svgEl("g", {id:"cursor-g"});
+  cursorG.appendChild(svgEl("line", {id:"cursor-line", x1:STATE.labelW, y1:0,
+    x2:STATE.labelW, y2:height, class:"cursor-line"}));
+  svg.appendChild(cursorG);
+
+  updateCursor();
+}
+
+function niceStep(range, targetTicks) {
+  if (range <= 0) return 100;
+  const raw = range / Math.max(1, targetTicks);
+  const pow = Math.pow(10, Math.floor(Math.log10(raw)));
+  const mult = raw / pow;
+  const nice = mult < 1.5 ? 1 : mult < 3 ? 2 : mult < 7 ? 5 : 10;
+  return nice * pow;
+}
+
+function updateCursor() {
+  if (!STATE.kernel) return;
+  const cx = STATE.labelW + STATE.cursor * STATE.pxPerCyc;
+  const line = $("cursor-line") || document.querySelector("#cursor-g line");
+  if (line) line.setAttribute("transform", `translate(${cx - STATE.labelW}, 0)`);
+  $("cursor").value = STATE.cursor;
+  $("cyc").textContent = `${STATE.cursor} / ${STATE.kernel.time_max}`;
+
+  // Mark active instructions + count active waves
+  let active = 0;
+  const k = STATE.kernel;
+  const allInsts = document.querySelectorAll("rect.inst");
+  allInsts.forEach(el => el.classList.remove("active"));
+  for (let i = 0; i < k.waves.length; i++) {
+    const w = k.waves[i];
+    const idx = findActive(w.instructions, STATE.cursor);
+    if (idx >= 0) {
+      active++;
+      const el = document.querySelector(`rect.inst[data-w="${i}"][data-i="${idx}"]`);
+      if (el) el.classList.add("active");
+    }
+  }
+  $("s-active").textContent = active;
+}
+
+// Binary search: index of the last instruction with t <= cursor (or -1 if none / past end)
+function findActive(insts, t) {
+  if (!insts.length || t < insts[0].t) return -1;
+  let lo = 0, hi = insts.length - 1;
+  while (lo < hi) {
+    const mid = (lo + hi + 1) >> 1;
+    if (insts[mid].t <= t) lo = mid;
+    else hi = mid - 1;
+  }
+  // Still "active" only if next inst not reached yet — for last inst we keep it active
+  // until the wave's time_max (already bounded by cursor at that point).
+  return lo;
+}
+
+// --- Tooltip ---
+function onInstHover(e) {
+  const wi = +e.target.getAttribute("data-w");
+  const ii = +e.target.getAttribute("data-i");
+  const w = STATE.kernel.waves[wi];
+  const it = w.instructions[ii];
+  const tt = $("tooltip");
+  tt.innerHTML = `<div class="t-inst">${escape(it.inst || "(no disasm)")}</div>
+    <div class="t-meta"><span>wave ${w.wave_id}</span><span>pc ${it.pc}</span>
+    <span>cyc ${it.t}</span><span>${it.type}</span><span>cat ${it.cat}</span></div>`;
+  const wrap = $("timeline-wrap").getBoundingClientRect();
+  const x = e.clientX - wrap.left + 12;
+  const y = e.clientY - wrap.top + 12;
+  tt.style.left = x + "px"; tt.style.top = y + "px"; tt.style.display = "block";
+}
+function onInstLeave(){ $("tooltip").style.display = "none"; }
+function escape(s){ return String(s).replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"})[c]); }
+
+// --- Controls ---
+function togglePlay(){
+  if (!STATE.kernel) return;
+  STATE.playing = !STATE.playing;
+  const btn = $("play");
+  btn.classList.toggle("playing", STATE.playing);
+  btn.textContent = STATE.playing ? "❚❚" : "▶";
+  if (STATE.playing) { STATE.lastFrame = performance.now(); requestAnimationFrame(tick); }
+}
+function tick(now) {
+  if (!STATE.playing) return;
+  const dt = (now - STATE.lastFrame) / 1000;
+  STATE.lastFrame = now;
+  STATE.cursor = Math.min(STATE.kernel.time_max, STATE.cursor + STATE.speed * dt);
+  updateCursor();
+  if (STATE.cursor >= STATE.kernel.time_max) { togglePlay(); return; }
+  requestAnimationFrame(tick);
+}
+function stepDelta(sign) {
+  if (!STATE.kernel) return;
+  // Snap to next/prev instruction time across all waves
+  const targets = new Set();
+  for (const w of STATE.kernel.waves) for (const it of w.instructions) targets.add(it.t);
+  const sorted = [...targets].sort((a,b)=>a-b);
+  let idx;
+  if (sign > 0) idx = sorted.findIndex(t => t > STATE.cursor);
+  else idx = (() => { let i = sorted.length - 1; while (i >= 0 && sorted[i] >= STATE.cursor) i--; return i; })();
+  if (idx < 0 || idx >= sorted.length) return;
+  STATE.cursor = sorted[idx];
+  updateCursor();
+}
+
+$("play").onclick = togglePlay;
+$("step-fwd").onclick = () => stepDelta(+1);
+$("step-back").onclick = () => stepDelta(-1);
+$("cursor").oninput = (e) => { STATE.cursor = +e.target.value; updateCursor(); };
+$("speed").oninput = (e) => { STATE.speed = +e.target.value; $("speed-v").textContent = STATE.speed + " cyc/s"; };
+$("zoom").oninput  = (e) => { STATE.pxPerCyc = +e.target.value; $("zoom-v").textContent = STATE.pxPerCyc + " px/c"; render(); };
+$("kq").oninput    = (e) => { STATE.filter = e.target.value; renderKernelList(); };
+
+document.addEventListener("keydown", (e) => {
+  if (e.target.tagName === "INPUT") return;
+  if (e.code === "Space") { e.preventDefault(); togglePlay(); }
+  else if (e.code === "ArrowRight") { e.preventDefault(); stepDelta(+1); }
+  else if (e.code === "ArrowLeft")  { e.preventDefault(); stepDelta(-1); }
+  else if (e.code === "Home") { STATE.cursor = 0; updateCursor(); }
+  else if (e.code === "End" && STATE.kernel) { STATE.cursor = STATE.kernel.time_max; updateCursor(); }
+});
+
+// Boot
+loadData().catch(err => {
+  $("empty").innerHTML = `<div>
+    <div class="big" style="color:var(--red)">Failed to load data</div>
+    <div>${escape(err.message)}</div>
+    <div style="margin-top:16px">Run <code>python -m http.server</code> in this directory, or<br>
+      regenerate with <code>python extra/sqtt/viewer/build_viewer_data.py</code>.</div>
+  </div>`;
+});
+</script>
+</body>
+</html>
