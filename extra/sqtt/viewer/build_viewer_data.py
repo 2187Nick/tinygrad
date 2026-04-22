@@ -73,6 +73,39 @@ def categorise(inst: str) -> str:
   return "other"
 
 
+# --- Optional RGP enrichment -----------------------------------------------
+
+def load_rgp_placements(rgp_dir: pathlib.Path | None) -> dict[str, list[dict]]:
+  """Return {kernel_name: [{se, cu, simd, wave, time}, ...]} from an rgp dir.
+
+  Each kernel matches by stem against <kernel>.rgp / probe_<kernel>.rgp.
+  Silently returns {} if the dir or parse_rgp helper is unavailable.
+  """
+  if rgp_dir is None: return {}
+  if not rgp_dir.is_dir():
+    print(f"warn: rgp dir not found: {rgp_dir}", file=sys.stderr)
+    return {}
+  try:
+    from extra.sqtt.rgp.parse_rgp import parse as parse_rgp
+  except Exception as e:
+    print(f"warn: rgp parser unavailable ({e}) — skipping rgp enrichment", file=sys.stderr)
+    return {}
+  out: dict[str, list[dict]] = {}
+  for rgp in sorted(rgp_dir.glob("*.rgp")):
+    name = rgp.stem
+    if name.startswith("probe_"): name = name[len("probe_"):]
+    try:
+      per_se = parse_rgp(str(rgp))
+      flat = []
+      for entry in per_se:
+        for w in entry["waves"]:
+          flat.append({"se": entry["se"], **w})
+      out[name] = flat
+    except Exception as e:
+      print(f"warn: rgp parse of {rgp.name} failed: {e}", file=sys.stderr)
+  return out
+
+
 # --- Optional raw-blob enrichment ------------------------------------------
 
 def load_placements(raw_dir: pathlib.Path | None) -> dict[str, dict[int, tuple[int, int]]]:
@@ -133,27 +166,47 @@ def load_rigorous_pkl(path: pathlib.Path) -> dict[int, list[tuple]]:
 
 
 def build_kernel_entry(name: str, traces: dict[int, list[tuple]],
-                       placement: dict[int, tuple[int, int]] | None = None) -> dict:
+                       placement: dict[int, tuple[int, int]] | None = None,
+                       emu: dict | None = None) -> dict:
   all_times = [t for trace in traces.values() for _, t, _, _ in trace]
   if not all_times:
     return {"name": name, "total_waves": 0, "total_instructions": 0,
             "time_min": 0, "time_max": 0, "waves": []}
   tmin = min(all_times)
+  # Build positional map of emu-per-wave-per-inst for fast lookup.
+  # timing_data.json uses wave_idx (0-based) matching sorted(trace.keys()).
+  emu_by_pos: dict[int, dict[int, dict]] = {}
+  if emu and isinstance(emu.get("waves"), list):
+    for w in emu["waves"]:
+      if not w.get("pc_match"): continue
+      wi = w.get("wave_idx")
+      if wi is None: continue
+      emu_by_pos[wi] = {i["idx"]: i for i in (w.get("instructions") or []) if "idx" in i}
+  status_counts: dict[str, int] = defaultdict(int)
   waves_out = []
-  for wid in sorted(traces.keys()):
+  for pos, wid in enumerate(sorted(traces.keys())):
     trace = traces[wid]
     if not trace: continue
     cu_simd = (placement or {}).get(wid)
+    emu_insts = emu_by_pos.get(pos, {})
     insts = []
     for idx, (pc, t, typ, inst) in enumerate(trace):
-      insts.append({
+      item = {
         "idx": idx,
         "pc": f"0x{pc:x}" if isinstance(pc, int) else str(pc),
         "t": int(t - tmin),
         "type": typ,
         "inst": inst,
         "cat": categorise(inst),
-      })
+      }
+      emu_i = emu_insts.get(idx)
+      if emu_i is not None:
+        item["hw_delta"] = emu_i.get("hw_delta")
+        item["emu_delta"] = emu_i.get("emu_delta")
+        item["diff"] = emu_i.get("diff")
+        item["status"] = emu_i.get("status")
+        if emu_i.get("status"): status_counts[emu_i["status"]] += 1
+      insts.append(item)
     wt = [i["t"] for i in insts]
     waves_out.append({
       "wave_id": int(wid),
@@ -163,7 +216,7 @@ def build_kernel_entry(name: str, traces: dict[int, list[tuple]],
       "time_min": min(wt), "time_max": max(wt),
       "instructions": insts,
     })
-  return {
+  out = {
     "name": name,
     "total_waves": len(waves_out),
     "total_instructions": sum(w["inst_count"] for w in waves_out),
@@ -171,6 +224,15 @@ def build_kernel_entry(name: str, traces: dict[int, list[tuple]],
     "time_max": max(w["time_max"] for w in waves_out) if waves_out else 0,
     "waves": waves_out,
   }
+  if emu:
+    stats = emu.get("stats") or {}
+    out["emu"] = {
+      "compared": int(stats.get("compared", 0)),
+      "exact": int(stats.get("exact", 0)),
+      "pct": float(stats.get("pct", 0.0)),
+      "status_counts": dict(status_counts),
+    }
+  return out
 
 
 def main():
@@ -179,6 +241,10 @@ def main():
                   help="directory of <kernel>.pkl rigorous-format captures")
   ap.add_argument("--raw", type=pathlib.Path, default=None,
                   help="optional raw SQTT capture dir for (cu, simd) enrichment")
+  ap.add_argument("--rgp", type=pathlib.Path, default=None,
+                  help="optional rgp capture dir (one <kernel>.rgp per kernel) for SE-wide wave placements")
+  ap.add_argument("--emu-timing", type=pathlib.Path, default=None,
+                  help="optional timing_data.json with HW-vs-Emu per-instruction deltas")
   ap.add_argument("--out", type=pathlib.Path,
                   default=pathlib.Path(__file__).resolve().parent / "viewer_data.json")
   ap.add_argument("--arch", default="gfx1100")
@@ -189,6 +255,21 @@ def main():
     print(f"error: captures dir not found: {cap_dir}", file=sys.stderr); sys.exit(1)
 
   placements = load_placements(args.raw)
+  rgp_waves = load_rgp_placements(args.rgp)
+  if rgp_waves:
+    print(f"loaded rgp placements for {len(rgp_waves)} kernels from {args.rgp}")
+
+  emu_doc: dict = {}
+  if args.emu_timing is not None:
+    p = args.emu_timing.resolve()
+    if p.is_file():
+      try:
+        with open(p) as f: emu_doc = (json.load(f) or {}).get("kernels", {}) or {}
+        print(f"loaded emu timing for {len(emu_doc)} kernels from {p}")
+      except Exception as e:
+        print(f"warn: emu timing load failed: {e}", file=sys.stderr)
+    else:
+      print(f"warn: emu timing file not found: {p}", file=sys.stderr)
 
   kernels: dict[str, dict] = {}
   for pkl in sorted(cap_dir.glob("*.pkl")):
@@ -196,15 +277,22 @@ def main():
     try:
       traces = load_rigorous_pkl(pkl)
       if not traces: continue
-      kernels[name] = build_kernel_entry(name, traces, placements.get(name))
+      kernels[name] = build_kernel_entry(name, traces, placements.get(name),
+                                         emu=emu_doc.get(name))
+      if name in rgp_waves:
+        kernels[name]["rgp_waves"] = rgp_waves[name]
       k = kernels[name]
+      emu_tag = ""
+      if "emu" in k and k["emu"]["compared"]:
+        emu_tag = f"  emu={k['emu']['pct']:.1f}%({k['emu']['exact']}/{k['emu']['compared']})"
       print(f"  {name:35s} waves={k['total_waves']:4d} insts={k['total_instructions']:5d} "
-            f"span={k['time_max']} cyc")
+            f"span={k['time_max']} cyc{emu_tag}")
     except Exception as e:
       print(f"  {name}: FAILED {e}", file=sys.stderr)
 
   out_doc = {
     "schema": 1, "arch": args.arch, "source": str(cap_dir),
+    "has_emu": bool(emu_doc),
     "kernel_count": len(kernels), "kernels": kernels,
   }
   args.out.parent.mkdir(parents=True, exist_ok=True)

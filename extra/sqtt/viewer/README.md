@@ -14,9 +14,12 @@ viewer with play/pause/step controls over a wave-per-row timeline.
   click-to-pin instruction detail with ±5 surrounding instructions and cycle
   deltas, wave / (cu,simd) filtering, keyboard jumps to next VMEM / next stall /
   next wave start / ±1 cycle nudge.
-- **Session 3 (planned):** RGP `.rgp` binary ingestion via `extra/sqtt/rgptool.py`,
-  PMC per-WGP overlay, HW-vs-Emu diff inline, multi-run switcher within a
-  single capture session.
+- **Session 3 (landed):** HW-vs-Emu diff colouring with toggle (`D` key) and
+  per-kernel strict-match stat in the header bar (`emu strict  X% (exact/compared)`);
+  tooltip + pinned-instruction detail show `hw Δ / emu Δ / diff / status`;
+  `M` jumps to the next mismatched instruction; build script grows
+  `--emu-timing <timing_data.json>` (per-instruction deltas) and `--rgp
+  <rgp_dir>` (SE-wide WAVESTART placement list attached to each kernel entry).
 
 ## Quick start
 
@@ -25,6 +28,8 @@ viewer with play/pause/step controls over a wave-per-row timeline.
 .venv/bin/python extra/sqtt/viewer/build_viewer_data.py \
     --captures extra/sqtt/captures/rigorous \
     [--raw extra/sqtt/wave_probe/captures/raw_sqtt_<ts>] \
+    [--rgp extra/sqtt/rgp/captures] \
+    [--emu-timing extra/sqtt/timing_data.json] \
     [--out  extra/sqtt/viewer/viewer_data.json]
 
 # 2. serve the viewer
@@ -69,6 +74,8 @@ vopd | trans | branch | wait | other`.
 | Home / End| Jump to cycle 0 / time_max          |
 | Esc       | Clear pinned instruction            |
 | F         | Clear wave / SIMD filter            |
+| D         | Toggle category / diff colouring    |
+| M         | Jump to next emu-mismatch           |
 
 ## Interactions
 

@@ -12,6 +12,8 @@
     --cat-valu:#58a6ff; --cat-salu:#39c5cf; --cat-vmem:#f0883e; --cat-smem:#bc8cff;
     --cat-lds:#d2a8ff;  --cat-branch:#f778ba; --cat-wait:#6b7080; --cat-trans:#ffb454;
     --cat-vopd:#84e0ff; --cat-other:#555b72;
+    --diff-exact:#2ea043; --diff-close:#d29922; --diff-over:#58a6ff; --diff-under:#f85149;
+    --diff-none:#2a2f40;
   }
   *{box-sizing:border-box;margin:0;padding:0}
   html,body{height:100%;overflow:hidden;background:var(--bg);color:var(--fg);
@@ -179,6 +181,11 @@
         <input id="zoom" type="range" min="0.05" max="10" value="0.5" step="0.05"/>
         <span id="zoom-v" class="val">0.5 px/c</span>
       </div>
+      <div class="divider"></div>
+      <div class="group">
+        <label>color</label>
+        <button id="color-mode" title="Toggle category / diff colouring">cat</button>
+      </div>
     </div>
 
     <div id="stats">
@@ -187,6 +194,9 @@
       <div class="stat"><label>span</label><b id="s-span">—</b></div>
       <div class="stat"><label>active now</label><b id="s-active">0</b></div>
       <div class="stat"><label>peak concurrent</label><b id="s-peak">—</b></div>
+      <div class="stat" id="s-emu-wrap" style="display:none">
+        <label>emu strict</label><b id="s-emu">—</b>
+      </div>
       <div class="stat" id="s-filter-wrap" style="display:none">
         <label>filter</label><b id="s-filter" class="filter-badge" title="click to clear">—</b>
       </div>
@@ -206,16 +216,25 @@
     </div>
 
     <div id="legend">
-      <div class="item"><div class="swatch" style="background:var(--cat-valu)"></div>VALU</div>
-      <div class="item"><div class="swatch" style="background:var(--cat-salu)"></div>SALU</div>
-      <div class="item"><div class="swatch" style="background:var(--cat-vmem)"></div>VMEM</div>
-      <div class="item"><div class="swatch" style="background:var(--cat-smem)"></div>SMEM</div>
-      <div class="item"><div class="swatch" style="background:var(--cat-lds)"></div>LDS</div>
-      <div class="item"><div class="swatch" style="background:var(--cat-trans)"></div>TRANS</div>
-      <div class="item"><div class="swatch" style="background:var(--cat-vopd)"></div>VOPD</div>
-      <div class="item"><div class="swatch" style="background:var(--cat-branch)"></div>BRANCH</div>
-      <div class="item"><div class="swatch" style="background:var(--cat-wait)"></div>WAIT</div>
-      <div class="item"><div class="swatch" style="background:var(--cat-other)"></div>OTHER</div>
+      <div id="legend-cat" style="display:flex;gap:10px;flex-wrap:wrap">
+        <div class="item"><div class="swatch" style="background:var(--cat-valu)"></div>VALU</div>
+        <div class="item"><div class="swatch" style="background:var(--cat-salu)"></div>SALU</div>
+        <div class="item"><div class="swatch" style="background:var(--cat-vmem)"></div>VMEM</div>
+        <div class="item"><div class="swatch" style="background:var(--cat-smem)"></div>SMEM</div>
+        <div class="item"><div class="swatch" style="background:var(--cat-lds)"></div>LDS</div>
+        <div class="item"><div class="swatch" style="background:var(--cat-trans)"></div>TRANS</div>
+        <div class="item"><div class="swatch" style="background:var(--cat-vopd)"></div>VOPD</div>
+        <div class="item"><div class="swatch" style="background:var(--cat-branch)"></div>BRANCH</div>
+        <div class="item"><div class="swatch" style="background:var(--cat-wait)"></div>WAIT</div>
+        <div class="item"><div class="swatch" style="background:var(--cat-other)"></div>OTHER</div>
+      </div>
+      <div id="legend-diff" style="display:none;gap:10px;flex-wrap:wrap">
+        <div class="item"><div class="swatch" style="background:var(--diff-exact)"></div>exact (Δ=0)</div>
+        <div class="item"><div class="swatch" style="background:var(--diff-close)"></div>close (|Δ|≤2)</div>
+        <div class="item"><div class="swatch" style="background:var(--diff-over)"></div>emu slow (Δ&gt;0)</div>
+        <div class="item"><div class="swatch" style="background:var(--diff-under)"></div>emu fast (Δ&lt;0)</div>
+        <div class="item"><div class="swatch" style="background:var(--diff-none)"></div>no emu data</div>
+      </div>
     </div>
   </section>
 
@@ -237,7 +256,8 @@
       <b>Click</b> inst → pin · <b>Click</b> row/cell → filter<br>
       <kbd>Esc</kbd> clear pin · <kbd>F</kbd> clear filter<br>
       <kbd>V</kbd> next VMEM · <kbd>S</kbd> next stall<br>
-      <kbd>N</kbd> next wave start · <kbd>,</kbd><kbd>.</kbd> ±1 cyc
+      <kbd>N</kbd> next wave start · <kbd>,</kbd><kbd>.</kbd> ±1 cyc<br>
+      <kbd>D</kbd> toggle cat/diff colour · <kbd>M</kbd> next emu-mismatch
     </div>
   </aside>
 </div>
@@ -269,6 +289,8 @@ const STATE = {
   // Selection
   pinned: null,          // {w:int, i:int}
   filterBy: null,        // {kind:"wave", w:int} or {kind:"simd", cu:int, simd:int}
+  // Rendering mode
+  colorMode: "cat",      // "cat" | "diff"
 };
 
 const $ = (id) => document.getElementById(id);
@@ -278,6 +300,18 @@ const svgEl = (tag, attrs) => { const e = document.createElementNS(SVGNS, tag);
 const escape = (s) => String(s).replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"})[c]);
 
 const CATS = ["valu","salu","vmem","smem","lds","vopd","trans","branch","wait","other"];
+
+// Fill colour for an instruction bar, honouring the current STATE.colorMode.
+function instFill(it) {
+  if (STATE.colorMode === "diff") {
+    if (typeof it.diff !== "number") return "var(--diff-none)";
+    const d = it.diff;
+    if (d === 0) return "var(--diff-exact)";
+    if (Math.abs(d) <= 2) return "var(--diff-close)";
+    return d > 0 ? "var(--diff-over)" : "var(--diff-under)";
+  }
+  return `var(--cat-${it.cat})`;
+}
 
 // ─────────────────────── Data load ───────────────────────
 async function loadData() {
@@ -323,6 +357,14 @@ function selectKernel(name) {
   $("s-insts").textContent = STATE.kernel.total_instructions;
   $("s-span").textContent = STATE.kernel.time_max + " cyc";
   $("s-peak").textContent = STATE.peakConcurrent;
+  const emu = STATE.kernel.emu;
+  const emuWrap = $("s-emu-wrap");
+  if (emu && emu.compared > 0) {
+    emuWrap.style.display = "";
+    $("s-emu").textContent = `${emu.pct.toFixed(1)}% (${emu.exact}/${emu.compared})`;
+  } else {
+    emuWrap.style.display = "none";
+  }
   $("cursor").max = STATE.kernel.time_max;
   $("empty").style.display = "none";
   $("timeline").style.display = "block";
@@ -471,7 +513,7 @@ function renderTimeline() {
       const rect = svgEl("rect", {
         x, y:y+2, width:barW, height:STATE.rowH - 4,
         class:"inst" + (isPin ? " pinned" : ""),
-        fill: `var(--cat-${it.cat})`,
+        fill: instFill(it),
         "data-w": i, "data-i": j,
       });
       rect.addEventListener("mouseenter", onInstHover);
@@ -721,6 +763,13 @@ function renderDetail() {
   const deltaPrev = i > 0 ? (it.t - w.instructions[i-1].t) : 0;
   const deltaNext = i < w.instructions.length-1 ? (w.instructions[i+1].t - it.t) : 0;
 
+  let emuBlock = "";
+  if (typeof it.diff === "number") {
+    const col = it.diff===0?'var(--diff-exact)':Math.abs(it.diff)<=2?'var(--diff-close)':it.diff>0?'var(--diff-over)':'var(--diff-under)';
+    emuBlock = `<div>hw Δ <b>${it.hw_delta}</b> · emu Δ <b>${it.emu_delta}</b>
+      · <b style="color:${col}">diff ${it.diff>0?'+':''}${it.diff}</b>
+      · <span style="color:var(--fg3)">${escape(it.status||'')}</span></div>`;
+  }
   let html = `<div class="pin-head">
     <div class="inst-line">${escape(it.inst || '(no disasm)')}</div>
     <div class="meta">
@@ -728,6 +777,7 @@ function renderDetail() {
       <div>pc <b>${it.pc}</b> · cyc <b>${it.t}</b> · type <b>${it.type}</b>
         · <span class="cat-pill ${it.cat}">${it.cat}</span></div>
       <div>Δprev <b>${deltaPrev}</b> cyc · Δnext <b>${deltaNext}</b> cyc</div>
+      ${emuBlock}
     </div>
   </div>`;
 
@@ -758,10 +808,15 @@ function onInstHover(e) {
   const prev = ii > 0 ? w.instructions[ii-1] : null;
   const dt = prev ? (it.t - prev.t) : 0;
   const tt = $("tooltip");
+  const emuLine = (typeof it.diff === "number")
+    ? `<div class="t-meta"><span>hw Δ ${it.hw_delta}</span><span>emu Δ ${it.emu_delta}</span>`
+      + `<span style="color:${it.diff===0?'var(--diff-exact)':Math.abs(it.diff)<=2?'var(--diff-close)':it.diff>0?'var(--diff-over)':'var(--diff-under)'}">`
+      + `diff ${it.diff>0?'+':''}${it.diff}</span><span>${escape(it.status||'')}</span></div>`
+    : "";
   tt.innerHTML = `<div class="t-inst">${escape(it.inst || "(no disasm)")}</div>
     <div class="t-meta"><span>wave ${w.wave_id}</span><span>pc ${it.pc}</span>
     <span>cyc ${it.t}</span>${prev ? `<span>Δ${dt}</span>` : ''}
-    <span>${it.type}</span><span class="cat-pill ${it.cat}">${it.cat}</span></div>`;
+    <span>${it.type}</span><span class="cat-pill ${it.cat}">${it.cat}</span></div>${emuLine}`;
   const wrap = $("timeline-wrap").getBoundingClientRect();
   tt.style.left = (e.clientX - wrap.left + 12) + "px";
   tt.style.top = (e.clientY - wrap.top + 12) + "px";
@@ -833,6 +888,21 @@ $("speed").oninput = (e) => { STATE.speed = +e.target.value; $("speed-v").textCo
 $("zoom").oninput  = (e) => { STATE.pxPerCyc = +e.target.value; $("zoom-v").textContent = STATE.pxPerCyc.toFixed(2) + " px/c"; renderTimeline(); updateCursor(); };
 $("kq").oninput    = (e) => { STATE.filter = e.target.value; renderKernelList(); };
 $("s-filter").onclick = () => clearFilter();
+$("color-mode").onclick = () => toggleColorMode();
+
+function toggleColorMode() {
+  STATE.colorMode = (STATE.colorMode === "cat") ? "diff" : "cat";
+  $("color-mode").textContent = STATE.colorMode;
+  $("legend-cat").style.display  = STATE.colorMode === "cat"  ? "flex" : "none";
+  $("legend-diff").style.display = STATE.colorMode === "diff" ? "flex" : "none";
+  // Repaint existing rect fills without full rerender
+  if (STATE.kernel) {
+    document.querySelectorAll("rect.inst").forEach(el => {
+      const wi = +el.getAttribute("data-w"), ii = +el.getAttribute("data-i");
+      el.setAttribute("fill", instFill(STATE.kernel.waves[wi].instructions[ii]));
+    });
+  }
+}
 
 document.addEventListener("keydown", (e) => {
   if (e.target.tagName === "INPUT") return;
@@ -847,6 +917,8 @@ document.addEventListener("keydown", (e) => {
   else if (k === "KeyS") { e.preventDefault(); jumpNext(it => it.cat === "wait"); }
   else if (k === "KeyN") { e.preventDefault(); jumpNextWaveStart(); }
   else if (k === "KeyF") { e.preventDefault(); clearFilter(); }
+  else if (k === "KeyD") { e.preventDefault(); toggleColorMode(); }
+  else if (k === "KeyM") { e.preventDefault(); jumpNext(it => typeof it.diff === "number" && it.diff !== 0); }
   else if (k === "Escape") { STATE.pinned = null;
     document.querySelectorAll("rect.inst.pinned").forEach(el => el.classList.remove("pinned"));
     renderDetail(); }
