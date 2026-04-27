@@ -6,7 +6,7 @@
 #   arg=3: lds - local data share
 #   arg=4: scratch - per-lane scratch memory
 from __future__ import annotations
-import ctypes, functools, os, re, platform, subprocess, tempfile
+import ctypes, functools, operator, os, re, platform, subprocess, tempfile
 from typing import Callable
 
 # Set/restore DAZ+FTZ (denormals-are-zero + flush-to-zero) to match RDNA3 default float mode
@@ -1497,26 +1497,47 @@ def _init_sqtt_encoder(entry_pc: int):
   _VALUB_2_RE = re.compile(r'V_(LSHLREV|LSHRREV|ASHRREV)_(B|I)64')
   _VALUB_4_RE = re.compile(r'V_MAD_(U|I)64')
   _VALUB_16_RE = re.compile(r'V_\w+_F64')
+  _B_RE = re.compile(r'_B(\d+)')
+  _DWORDX_RE = re.compile(r'DWORDX(\d)')
 
-  def _valu_op(op_name: str) -> InstOp|None:
-    if 'CMPX' in op_name: return InstOp.VALU1_WR_EXEC
-    if _VALUB_2_RE.search(op_name): return InstOp.VALUB_2
-    if _VALUB_4_RE.search(op_name): return InstOp.VALUB_4
-    if _VALUB_16_RE.search(op_name): return InstOp.VALUB_16
-    if _VALUT_4_RE.search(op_name): return InstOp.VALUT_4
-    return None
+  # PERF: precomputed op_name->op cache for _valu_op (saves 4-5 regex/`in` checks per VALU emit).
+  _valu_op_cache: dict[str, InstOp|None] = {}
+  def _valu_op(op_name: str, _cache=_valu_op_cache) -> InstOp|None:
+    r = _cache.get(op_name, _cache)
+    if r is not _cache: return r
+    if 'CMPX' in op_name: r = InstOp.VALU1_WR_EXEC
+    elif _VALUB_2_RE.search(op_name): r = InstOp.VALUB_2
+    elif _VALUB_4_RE.search(op_name): r = InstOp.VALUB_4
+    elif _VALUB_16_RE.search(op_name): r = InstOp.VALUB_16
+    elif _VALUT_4_RE.search(op_name): r = InstOp.VALUT_4
+    else: r = None
+    _cache[op_name] = r
+    return r
 
-  def _mem_op(t, op_name: str, inst=None) -> InstOp:
+  # PERF: per-op_name cache for the dwords/store/mem-class fields used by _mem_op.
+  # Computed once on first sight of each op_name; small (~hundreds of unique op_names per arch).
+  _mem_op_static: dict[str, tuple[bool, int, bool, bool]] = {}  # op_name -> (is_store, dwords, has_2addr, is_special_lds_wr1)
+  def _mem_op_static_for(op_name: str) -> tuple[bool, int, bool, bool]:
+    r = _mem_op_static.get(op_name)
+    if r is not None: return r
     is_store = "STORE" in op_name or "WRITE" in op_name
-    m = re.search(r'_B(\d+)', op_name)
+    m = _B_RE.search(op_name)
     if m: dwords = max(1, int(m.group(1)) // 32)
-    elif 'DWORDX' in op_name: dwords = int(re.search(r'DWORDX(\d)', op_name).group(1))
+    elif 'DWORDX' in op_name: dwords = int(_DWORDX_RE.search(op_name).group(1))
     elif 'BLOCK' in op_name: dwords = 4
     else: dwords = 1
+    has_2addr = '2ADDR' in op_name
+    is_special_lds_wr1 = ("APPEND" in op_name) or ("CONSUME" in op_name) or ("ADDTID" in op_name)
+    r = (is_store, dwords, has_2addr, is_special_lds_wr1)
+    _mem_op_static[op_name] = r
+    return r
+
+  def _mem_op(t, op_name: str, inst=None) -> InstOp:
+    is_store, dwords, has_2addr, is_special_lds_wr1 = _mem_op_static_for(op_name)
     if issubclass(t, _DS):
       if not is_store: return InstOp.LDS_RD
-      if any(x in op_name for x in ("APPEND", "CONSUME", "ADDTID")): return InstOp.LDS_WR_1
-      return InstOp[f"LDS_WR_{1 + dwords + (1 if '2ADDR' in op_name else 0)}"]
+      if is_special_lds_wr1: return InstOp.LDS_WR_1
+      return InstOp[f"LDS_WR_{1 + dwords + (1 if has_2addr else 0)}"]
     if issubclass(t, _GLOBAL):
       saddr_null = inst is None or not hasattr(inst, 'saddr') or inst.saddr.offset in (124, 125)
       if not is_store: return InstOp.SGMEM_RD_2 if saddr_null else InstOp.SGMEM_RD_1
@@ -1531,208 +1552,308 @@ def _init_sqtt_encoder(entry_pc: int):
   wave_events: dict[int, list] = {}
   started: set[int] = set()
 
-  def emit(wave_id: int, inst, branch_taken: bool|None):
-    """Collect an instruction event for deferred timing simulation."""
-    w = wave_id & 0x1F
-    events = wave_events.setdefault(wave_id, [])
-    if wave_id not in started:
-      # id7 bit 5 = me=1 (MEC compute engine), bits 4:3 = pipe=0 — must match REG(slot=4) which encodes me=1,pipe=0
-      events.append((WAVESTART, {'simd': 0, 'cu_lo': 0, 'wave': w, 'id7': 0x20}, 'wavestart', None))
-      started.add(wave_id)
-    inst_type, inst_op, op_name = type(inst), inst.op.value if hasattr(inst, 'op') else 0, inst.op.name if hasattr(inst, 'op') else ""
+  # PERF: per-`type(inst)` category cache. The type-tree for an instruction is fixed,
+  # so memoize all the issubclass()/category dispatch into a single dict lookup.
+  # CAT codes: 0=other(salu fallback)/no-match, 1=SOPP, 2=SOPK, 3=VALU, 4=SMEM, 5=DS, 6=GLOBAL, 7=FLAT, 8=SCRATCH
+  _CAT_OTHER, _CAT_SOPP, _CAT_SOPK, _CAT_VALU, _CAT_SMEM, _CAT_DS, _CAT_GLOBAL, _CAT_FLAT, _CAT_SCRATCH = 0, 1, 2, 3, 4, 5, 6, 7, 8
+  _type_info: dict[type, tuple[int, bool, bool, bool, bool, bool]] = {}
+  def _classify_type(it: type) -> tuple[int, bool, bool, bool, bool, bool]:
+    """Returns (cat, is_vopc, is_sdst, is_vopd, is_vopd_lit, is_cmp_lit)."""
+    r = _type_info.get(it)
+    if r is not None: return r
+    if issubclass(it, _SOPP): cat = _CAT_SOPP
+    elif issubclass(it, _SOPK): cat = _CAT_SOPK
+    elif issubclass(it, _VALU): cat = _CAT_VALU
+    elif issubclass(it, _SMEM): cat = _CAT_SMEM
+    elif issubclass(it, _DS): cat = _CAT_DS
+    elif issubclass(it, _GLOBAL): cat = _CAT_GLOBAL
+    elif issubclass(it, _FLAT): cat = _CAT_FLAT
+    elif issubclass(it, _SCRATCH): cat = _CAT_SCRATCH
+    else: cat = _CAT_OTHER
+    is_vopc = issubclass(it, _VOPC)
+    is_sdst = issubclass(it, _VOP3_SDST)
+    is_vopd = issubclass(it, _VOPD)
+    is_vopd_lit = issubclass(it, _VOPD_LIT)
+    is_cmp_lit = issubclass(it, _CMP_LIT)
+    r = (cat, is_vopc, is_sdst, is_vopd, is_vopd_lit, is_cmp_lit)
+    _type_info[it] = r
+    return r
 
-    if issubclass(inst_type, _SOPP):
-      if inst_op in _SOPP_SKIP: return
-      if inst_op == SOPPOp3.S_DELAY_ALU.value:
-        events.append((None, {}, 'delay_alu', inst.simm16))
-        return
-      if inst_op in _SOPP_IMMEDIATE:
-        if inst_op == SOPPOp3.S_WAITCNT.value:
-          events.append((IMMEDIATE, {'wave': w}, 'waitcnt', inst.simm16))
-        elif inst_op == SOPPOp3.S_WAITCNT_DEPCTR.value:
-          events.append((IMMEDIATE, {'wave': w}, 'depctr', inst.simm16))
-        elif inst_op == SOPPOp3.S_NOP.value:
-          events.append((IMMEDIATE, {'wave': w}, 'nop', inst.simm16))
-        elif inst_op == SOPPOp3.S_CLAUSE.value:
-          events.append((IMMEDIATE, {'wave': w}, 'clause', None))
-        else:
-          events.append((IMMEDIATE, {'wave': w}, 'immediate', None))
-        return
-      if inst_op in _SOPP_BARRIER:
-        events.append((INST, {'wave': w, 'op': InstOp.BARRIER}, 'barrier', None))
-        return
-      if inst_op in _SOPP_BRANCH:
-        reads_exec = inst_op in _SOPP_BRANCH_EXEC
-        reads_scc = inst_op in _SOPP_BRANCH_SCC
-        events.append((INST, {'wave': w, 'op': InstOp.JUMP if branch_taken else InstOp.JUMP_NO}, 'branch', (reads_exec, reads_scc)))
-        return
-      events.append((INST, {'wave': w, 'op': InstOp.SALU}, 'salu', None))
-      return
+  # PERF: per-op_name flag cache (small set ~hundreds of unique op_names): cheap string searches done once.
+  _op_name_flags: dict[str, tuple[bool, bool, bool]] = {}  # op_name -> (is_cndmask, is_int_mul32, is_fmac_chain)
+  def _op_name_flags_for(name: str) -> tuple[bool, bool, bool]:
+    r = _op_name_flags.get(name)
+    if r is not None: return r
+    is_cndmask = 'CNDMASK' in name
+    is_int_mul32 = (('V_MUL_LO_U32' in name or 'V_MUL_HI_U32' in name or 'V_MUL_LO_I32' in name or 'V_MUL_HI_I32' in name)
+                    and '_U24' not in name)
+    is_fmac_chain = ('FMAC' in name or 'FMAMK' in name or 'FMAAK' in name
+                      or ('_MAC' in name and 'FMAC' not in name))
+    r = (is_cndmask, is_int_mul32, is_fmac_chain)
+    _op_name_flags[name] = r
+    return r
 
-    if issubclass(inst_type, _SOPK):
-      op_val = inst.op.value if hasattr(inst, 'op') else 0
+  # PERF: per-op_name SMEM dest sgpr count from `_B(\d+)`.
+  _smem_n_sgprs: dict[str, int] = {}
+  def _smem_n_sgprs_for(name: str) -> int:
+    r = _smem_n_sgprs.get(name)
+    if r is not None: return r
+    m = _B_RE.search(name)
+    r = int(m.group(1)) // 32 if m else 1
+    _smem_n_sgprs[name] = r
+    return r
+
+  # PERF: per-op_name DS read width and VMEM-store width.
+  _ds_bytes_cache: dict[str, int] = {}
+  def _ds_bytes_for(name: str) -> int:
+    r = _ds_bytes_cache.get(name)
+    if r is not None: return r
+    m = _B_RE.search(name)
+    r = int(m.group(1)) // 8 if m else 4
+    _ds_bytes_cache[name] = r
+    return r
+
+  _vmem_bytes_cache: dict[str, int|None] = {}
+  def _vmem_bytes_for(name: str) -> int|None:
+    if name in _vmem_bytes_cache: return _vmem_bytes_cache[name]
+    m = _B_RE.search(name)
+    r = int(m.group(1)) // 8 if m else None
+    _vmem_bytes_cache[name] = r
+    return r
+
+  # PERF: per-op_name SALU 'is_slow' flag for SALU dep tracking.
+  _salu_slow_cache: dict[str, bool] = {}
+  def _salu_slow_for(name: str) -> bool:
+    r = _salu_slow_cache.get(name)
+    if r is not None: return r
+    r = ('S_MUL_I32' in name or 'S_MUL_HI' in name
+         or 'S_OR_B32' in name or 'S_AND_B32' in name
+         or 'S_BFE_U32' in name or 'S_BFE_I32' in name)
+    _salu_slow_cache[name] = r
+    return r
+
+  # PERF: localize globals & enum values used in the hot emit() path.
+  _SOPP_S_DELAY_ALU = SOPPOp3.S_DELAY_ALU.value
+  _SOPP_S_WAITCNT = SOPPOp3.S_WAITCNT.value
+  _SOPP_S_WAITCNT_DEPCTR = SOPPOp3.S_WAITCNT_DEPCTR.value
+  _SOPP_S_NOP = SOPPOp3.S_NOP.value
+  _SOPP_S_CLAUSE = SOPPOp3.S_CLAUSE.value
+
+  # PERF: per-`inst` recipe cache. Build the entire emit-output recipe (event tuple body, sans `wave` value)
+  # once per unique inst-id (==pc, since pc->inst is 1:1 and inst objects are cached per pc in `program`).
+  # Recipe kinds — match cases handled by emit():
+  #   0 = skip (no append, e.g. SOPP_ENDPGM)
+  #   1 = (None, {}, 'delay_alu', simm16)  — delay_alu is wave-independent
+  #   2 = (IMMEDIATE, {'wave': $w}, cat, extra)
+  #   3 = (INST, {'wave': $w, 'op': InstOp.BARRIER}, 'barrier', None)
+  #   4 = (INST, {'wave': $w, 'op': $JUMP_or_JUMPNO}, 'branch', (reads_exec, reads_scc))  — needs branch_taken
+  #   5 = (INST, {'wave': $w, 'op': InstOp.SALU}, 'salu', None)  — generic SOPP/SOPK/non-mem fallback
+  #   6 = VALU recipe — kw_extras pre-built, reg_info pre-built; only inject 'wave' at emit time
+  #   7 = (INST, {'wave': $w, 'op': InstOp.SMEM_RD}, 'smem', smem_dst)
+  #   8 = (INST, {'wave': $w, 'op': mem_op_val}, cat_str, extra)  — DS/GLOBAL/FLAT/SCRATCH/SALU mem
+  _emit_recipes: dict[int, tuple] = {}
+
+  def _build_emit_recipe(inst, op_name: str, op_val: int, tcat: int, is_vopc: bool, is_sdst: bool,
+                         is_vopd: bool, is_vopd_lit: bool, is_cmp_lit: bool) -> tuple:
+    """Pre-compute everything emit() needs to know about `inst` so the per-dispatch path is just a
+    dict-update + list-append. Wave-id and branch-taken are the only runtime-dependent inputs."""
+    if tcat == _CAT_SOPP:
+      if op_val in _SOPP_SKIP: return (0,)  # skip
+      if op_val == _SOPP_S_DELAY_ALU: return (1, inst.simm16)
+      if op_val in _SOPP_IMMEDIATE:
+        if op_val == _SOPP_S_WAITCNT: return (2, 'waitcnt', inst.simm16)
+        if op_val == _SOPP_S_WAITCNT_DEPCTR: return (2, 'depctr', inst.simm16)
+        if op_val == _SOPP_S_NOP: return (2, 'nop', inst.simm16)
+        if op_val == _SOPP_S_CLAUSE: return (2, 'clause', None)
+        return (2, 'immediate', None)
+      if op_val in _SOPP_BARRIER: return (3,)
+      if op_val in _SOPP_BRANCH:
+        return (4, op_val in _SOPP_BRANCH_EXEC, op_val in _SOPP_BRANCH_SCC)
+      return (5,)
+
+    if tcat == _CAT_SOPK:
       if op_val == _SOPK_WAITCNT_LGKM:
-        # s_waitcnt_lgkmcnt: simm16[5:0]=lgkm threshold; encode for _drain_zero_cost: bits[9:4]=lgkm, bits[15:10]=vm(63=don't wait)
         lgkm_th = inst.simm16 & 0x3f
-        events.append((IMMEDIATE, {'wave': w}, 'waitcnt', (lgkm_th << 4) | (0x3f << 10)))
-        return
+        return (2, 'waitcnt', (lgkm_th << 4) | (0x3f << 10))
       if op_val == _SOPK_WAITCNT_VM:
         vm_th = inst.simm16 & 0x3f
-        events.append((IMMEDIATE, {'wave': w}, 'waitcnt', (0x3f << 4) | (vm_th << 10)))
-        return
-      events.append((INST, {'wave': w, 'op': InstOp.SALU}, 'salu', None))
-      return
+        return (2, 'waitcnt', (0x3f << 4) | (vm_th << 10))
+      return (5,)
 
-    if issubclass(inst_type, _VALU):
-      is_vopc = issubclass(inst_type, _VOPC)
+    if tcat == _CAT_VALU:
       op = _valu_op(op_name)
-      # Extract SGPR reads/writes for dependency stall detection
+      is_cndmask, is_int_mul32, is_fmac_chain = _op_name_flags_for(op_name)
       sgpr_w: list[int] = []
       sgpr_r: list[int] = []
       vgpr_w: list[int] = []
       vgpr_r: list[int] = []
-      # SGPR destinations: vdst is SSrcField(0-106) for VOP3_SDST, VGPRField(256+) for VOP3; sdst is SGPRField(0-106)
-      if hasattr(inst, 'vdst'):
-        o = getattr(inst.vdst, 'offset', -1)
+      vdst_obj = getattr(inst, 'vdst', None)
+      vdst_off = getattr(vdst_obj, 'offset', -1) if vdst_obj is not None else -1
+      if vdst_obj is not None:
+        if 0 <= vdst_off <= 106: sgpr_w.append(vdst_off)
+        elif vdst_off >= 256: vgpr_w.append(vdst_off - 256)
+      sdst_obj = getattr(inst, 'sdst', None)
+      if sdst_obj is not None:
+        o = getattr(sdst_obj, 'offset', -1)
         if 0 <= o <= 106: sgpr_w.append(o)
-        elif o >= 256: vgpr_w.append(o - 256)
-      if hasattr(inst, 'sdst'):
-        o = getattr(inst.sdst, 'offset', -1)
-        if 0 <= o <= 106: sgpr_w.append(o)
-      if is_vopc: sgpr_w.append(106)   # VOPC implicitly writes VCC_LO (offset 106)
-      # VOPD dual destinations: vdstx and vdsty
-      if hasattr(inst, 'vdstx'):
-        o = getattr(inst.vdstx, 'offset', -1)
+      if is_vopc: sgpr_w.append(106)
+      vdstx_obj = getattr(inst, 'vdstx', None)
+      if vdstx_obj is not None:
+        o = getattr(vdstx_obj, 'offset', -1)
         if o >= 256: vgpr_w.append(o - 256)
-      if hasattr(inst, 'vdsty'):
-        o = getattr(inst.vdsty, 'offset', -1)
+      vdsty_obj = getattr(inst, 'vdsty', None)
+      if vdsty_obj is not None:
+        o = getattr(vdsty_obj, 'offset', -1)
         if o >= 256: vgpr_w.append(o - 256)
-      # Sources: SGPR reads (SrcFields encode SGPRs 0-105, VCC 106-107; HW reads all encoded sources)
-      # src2 handling: VOP3_SDST (v_cmp_e64) doesn't read src2; VOP3 v_cndmask reads src2 as condition SGPR
-      is_sdst = issubclass(inst_type, _VOP3_SDST)
-      cond_sgpr = -1  # condition SGPR for v_cndmask (non-VCC src2); -1 = none
+      cond_sgpr = -1
       for fn in ('src0', 'src1', 'srcx0', 'srcy0'):
-        if hasattr(inst, fn):
-          o = getattr(getattr(inst, fn), 'offset', -1)
+        f = getattr(inst, fn, None)
+        if f is not None:
+          o = getattr(f, 'offset', -1)
           if 0 <= o <= 106: sgpr_r.append(o)
           elif o >= 256: vgpr_r.append(o - 256)
-      if hasattr(inst, 'src2'):
-        o = getattr(inst.src2, 'offset', -1)
-        if not is_sdst:  # VOP3_SDST (v_cmp_e64) has src2 in encoding but HW doesn't read it (validated: exp_chain [54])
+      src2_obj = getattr(inst, 'src2', None)
+      if src2_obj is not None:
+        o = getattr(src2_obj, 'offset', -1)
+        if not is_sdst:
           if 0 <= o <= 106:
             sgpr_r.append(o)
-            if o != 106: cond_sgpr = o  # non-VCC condition SGPR (v_cndmask_b32_e64)
+            if o != 106: cond_sgpr = o
           elif o >= 256: vgpr_r.append(o - 256)
-      # VGPR-only sources: vsrc1, vsrcx1, vsrcy1 are always VGPRs
       for fn in ('vsrc1', 'vsrcx1', 'vsrcy1'):
-        if hasattr(inst, fn):
-          o = getattr(getattr(inst, fn), 'offset', -1)
+        f = getattr(inst, fn, None)
+        if f is not None:
+          o = getattr(f, 'offset', -1)
           if o >= 256: vgpr_r.append(o - 256)
-      # Reliable cndmask detector: any op whose name contains "CNDMASK" (V_CNDMASK_B32_E32/E64,
-      # V_DUAL_CNDMASK_B32, V_CNDMASK_B16_E64). Previously we inferred cndmask from
-      # cond_sgpr/VCC reads, but VOP3 2-source ops like v_add_f32_e64 can have src2
-      # populated by the assembler and misfire that heuristic.
-      is_cndmask = 'CNDMASK' in op_name
-      # Integer 32-bit multiply is a 4-cycle pipeline op on RDNA3 (not 1cy like f32
-      # mul). HW mb_e4_vmul_lo_u32_n4 / mb_f6_vmul_hi_chain_n4 show dt=4 unanimous
-      # between consecutive int-muls on the first 6 waves.
-      # 4cy pipeline: v_mul_lo_u32 / v_mul_hi_u32 / i32 variants. HW measured dt=4
-      # on chain continuations. NOT v_mad_u32_u24 (measured dt=1) and NOT *_u24
-      # variants — those pipeline at 1cy like regular ALU.
-      is_int_mul32 = any(p in op_name for p in (
-          'V_MUL_LO_U32', 'V_MUL_HI_U32', 'V_MUL_LO_I32', 'V_MUL_HI_I32'))
-      # Guard against false match on U32_U24 variants (those are 1cy).
-      if is_int_mul32 and '_U24' in op_name: is_int_mul32 = False
-      # FMAC / MAC / FMAAK / FMAMK: vdst is an implicit source (accumulator).
-      # Add it to vgpr_r so RAW dep tracking sees the accumulator chain. HW
-      # mb_f1_valu_fmac_n16 confirms dt=5 stalls kick in on waves 1+ exactly
-      # like v_add_n16, which only works if fmac's chain is detected as RAW.
-      if ('FMAC' in op_name or 'FMAMK' in op_name or 'FMAAK' in op_name or
-          ('_MAC' in op_name and 'FMAC' not in op_name)):
-        if hasattr(inst, 'vdst'):
-          o = getattr(inst.vdst, 'offset', -1)
-          if o >= 256 and (o - 256) not in vgpr_r: vgpr_r.append(o - 256)
-      reg_info = (is_vopc, tuple(sgpr_w), tuple(sgpr_r), tuple(vgpr_w), tuple(vgpr_r), issubclass(inst_type, _VOPD), cond_sgpr,
-                  issubclass(inst_type, _VOPD_LIT), issubclass(inst_type, _CMP_LIT), is_cndmask)
-      # For VOPD: detect "MOV-only" pairs (V_DUAL_MOV_B32 on both lanes). These don't use the vsrc1
-      # lanes even though the decoder reports v[0] there — the encoding slot is filled by the assembler
-      # with a dummy value. HW (Batch C mb_vopd_dualmov_sgpr_*) shows these pipeline at 1cy.
-      _kw_extras = {}
-      if issubclass(inst_type, _VOPD):
-        opx_name = inst.opx.name if hasattr(inst, 'opx') and hasattr(inst.opx, 'name') else ""
-        opy_name = inst.opy.name if hasattr(inst, 'opy') and hasattr(inst.opy, 'name') else ""
-        _kw_extras['vopd_mov_only'] = opx_name == 'V_DUAL_MOV_B32' and opy_name == 'V_DUAL_MOV_B32'
-        _kw_extras['vopd_bank_conflict'] = _vopd_inst_bank_conflict(inst)
-      if is_int_mul32: _kw_extras['int_mul32'] = True
-      if op is None: events.append((VALUINST, {'wave': w, **_kw_extras}, 'valu', reg_info))
+      if is_fmac_chain and vdst_obj is not None and vdst_off >= 256 and (vdst_off - 256) not in vgpr_r:
+        vgpr_r.append(vdst_off - 256)
+      reg_info = (is_vopc, tuple(sgpr_w), tuple(sgpr_r), tuple(vgpr_w), tuple(vgpr_r), is_vopd, cond_sgpr,
+                  is_vopd_lit, is_cmp_lit, is_cndmask)
+      kw_extras = {}
+      if is_vopd:
+        opx = getattr(inst, 'opx', None)
+        opy = getattr(inst, 'opy', None)
+        opx_name = getattr(opx, 'name', "") if opx is not None else ""
+        opy_name = getattr(opy, 'name', "") if opy is not None else ""
+        kw_extras['vopd_mov_only'] = opx_name == 'V_DUAL_MOV_B32' and opy_name == 'V_DUAL_MOV_B32'
+        kw_extras['vopd_bank_conflict'] = _vopd_inst_bank_conflict(inst)
+      if is_int_mul32: kw_extras['int_mul32'] = True
+      # Pre-build base kwargs (without 'wave'); emit() will copy and inject 'wave'.
+      if op is None:
+        base_kw = dict(kw_extras)  # only kw_extras
+        return (6, VALUINST, base_kw, reg_info)
       else:
-        kw = {'wave': w, 'op': op, **_kw_extras}
-        if op == InstOp.VALUT_4: kw['trans_name'] = op_name
-        events.append((INST, kw, 'valu', reg_info))
-      return
+        base_kw = {'op': op}
+        base_kw.update(kw_extras)
+        if op is InstOp.VALUT_4: base_kw['trans_name'] = op_name
+        return (6, INST, base_kw, reg_info)
 
-    if issubclass(inst_type, _SMEM):
-      smem_dst = ()
-      if hasattr(inst, 'sdata'):
-        o = getattr(inst.sdata, 'offset', -1)
+    if tcat == _CAT_SMEM:
+      smem_dst = None
+      sdata_obj = getattr(inst, 'sdata', None)
+      if sdata_obj is not None:
+        o = getattr(sdata_obj, 'offset', -1)
         if 0 <= o <= 106:
-          m = re.search(r'_B(\d+)', op_name)
-          n_sgprs = int(m.group(1)) // 32 if m else 1
+          n_sgprs = _smem_n_sgprs_for(op_name)
           smem_dst = tuple(range(o, o + n_sgprs))
-      events.append((INST, {'wave': w, 'op': InstOp.SMEM_RD}, 'smem', smem_dst or None))
-      return
+      return (7, smem_dst)
 
     # DS / GLOBAL / FLAT / SCRATCH memory operations
-    mem_op_val = _mem_op(inst_type, op_name, inst)
+    mem_op_val = _mem_op(type(inst), op_name, inst)
     is_store = "STORE" in op_name
-    if issubclass(inst_type, _DS): cat = 'ds_wr' if is_store else 'ds_rd'
-    elif issubclass(inst_type, (*_GLOBAL, *_FLAT, *_SCRATCH)): cat = 'vmem_wr' if is_store else 'vmem_rd'
+    if tcat == _CAT_DS: cat = 'ds_wr' if is_store else 'ds_rd'
+    elif tcat == _CAT_GLOBAL or tcat == _CAT_FLAT or tcat == _CAT_SCRATCH: cat = 'vmem_wr' if is_store else 'vmem_rd'
     else: cat = 'salu'
-    # For DS loads, extract width and dest VGPR for b128-specific latency/stagger
-    ds_extra = None
+    extra = None
     if cat == 'ds_rd':
-      m = re.search(r'_B(\d+)', op_name)
-      ds_bytes = int(m.group(1)) // 8 if m else 4
-      # Extract dest VGPR base index for per-VGPR stagger tracking
+      ds_bytes = _ds_bytes_for(op_name)
       ds_dest_base = None
       vdst_field = getattr(inst, 'vdst', None)
-      if vdst_field is not None and hasattr(vdst_field, 'offset') and vdst_field.offset >= 256:
-        ds_dest_base = vdst_field.offset - 256
-      ds_extra = (ds_bytes, ds_dest_base)
-    # For VMEM stores, extract data width and address VGPR for per-operand forwarding
-    vmem_extra = None
-    if cat == 'vmem_wr':
-      vmem_bytes = None
-      m = re.search(r'_B(\d+)', op_name)
-      if m: vmem_bytes = int(m.group(1)) // 8
-      # Extract address VGPR index for per-operand forwarding (Reg.offset = 256 + vgpr_idx)
+      if vdst_field is not None:
+        vd_off = getattr(vdst_field, 'offset', -1)
+        if vd_off >= 256: ds_dest_base = vd_off - 256
+      extra = (ds_bytes, ds_dest_base)
+    elif cat == 'vmem_wr':
+      vmem_bytes_v = _vmem_bytes_for(op_name)
       addr_vgpr = None
       addr_field = getattr(inst, 'addr', None)
-      if addr_field is not None and hasattr(addr_field, 'offset') and addr_field.offset >= 256:
-        addr_vgpr = addr_field.offset - 256
-      vmem_extra = (vmem_bytes, addr_vgpr)
-    # For SALU (SOP1/SOP2/SOPC), extract SGPR reads/writes for RAW-chain detection
-    # (HW mb_g4_s_add_u32_n8 wave 1+ unanimous dt=2 on chain continuations vs EMU dt=1).
-    # SOP1/SOP2/SOPC use ssrc0/ssrc1 fields (distinct from VALU src0/src1/src2).
-    salu_extra = None
-    if cat == 'salu':
+      if addr_field is not None:
+        ao = getattr(addr_field, 'offset', -1)
+        if ao >= 256: addr_vgpr = ao - 256
+      extra = (vmem_bytes_v, addr_vgpr)
+    elif cat == 'salu':
       salu_sgpr_w: list[int] = []
       salu_sgpr_r: list[int] = []
-      if hasattr(inst, 'sdst'):
-        o = getattr(inst.sdst, 'offset', -1)
+      sd_obj = getattr(inst, 'sdst', None)
+      if sd_obj is not None:
+        o = getattr(sd_obj, 'offset', -1)
         if 0 <= o <= 106: salu_sgpr_w.append(o)
       for fn in ('ssrc0', 'ssrc1', 'src0', 'src1'):
-        if hasattr(inst, fn):
-          o = getattr(getattr(inst, fn), 'offset', -1)
+        f = getattr(inst, fn, None)
+        if f is not None:
+          o = getattr(f, 'offset', -1)
           if 0 <= o <= 106: salu_sgpr_r.append(o)
-      # is_slow flag: S_MUL_{I32,HI}, S_OR/AND/BFE_B32 have deeper execution
-      # pipeline, extending the SALU→VMEM store drain from 7cy to 15cy.
-      salu_is_slow = ('S_MUL_I32' in op_name or 'S_MUL_HI' in op_name
-                      or 'S_OR_B32' in op_name or 'S_AND_B32' in op_name
-                      or 'S_BFE_U32' in op_name or 'S_BFE_I32' in op_name)
-      salu_extra = (tuple(salu_sgpr_w), tuple(salu_sgpr_r), salu_is_slow)
-    extra = ds_extra if cat == 'ds_rd' else (salu_extra if cat == 'salu' else vmem_extra)
-    events.append((INST, {'wave': w, 'op': mem_op_val}, cat, extra))
+      extra = (tuple(salu_sgpr_w), tuple(salu_sgpr_r), _salu_slow_for(op_name))
+    return (8, mem_op_val, cat, extra)
+
+  def emit(wave_id: int, inst, branch_taken: bool|None,
+           # Hoist closure/global lookups into default args for fastest local-scope access.
+           _wave_events=wave_events, _started=started, _recipes=_emit_recipes,
+           _classify=_classify_type, _build_recipe=_build_emit_recipe,
+           _WAVESTART=WAVESTART, _IMMEDIATE=IMMEDIATE, _INST=INST, _VALUINST=VALUINST, _InstOp=InstOp):
+    """Collect an instruction event for deferred timing simulation.
+
+    PERF: emit is on the per-instruction hot path. We precompute a per-`inst` recipe (cached by
+    `id(inst)`, which is stable since the program[] cache pins each inst object for the run) so
+    the per-call work is reduced to: dict-update with current wave + list-append.
+    """
+    w = wave_id & 0x1F
+    events = _wave_events.get(wave_id)
+    if events is None:
+      events = []
+      _wave_events[wave_id] = events
+    if wave_id not in _started:
+      events.append((_WAVESTART, {'simd': 0, 'cu_lo': 0, 'wave': w, 'id7': 0x20}, 'wavestart', None))
+      _started.add(wave_id)
+
+    iid = id(inst)
+    recipe = _recipes.get(iid)
+    if recipe is None:
+      inst_op_obj = getattr(inst, 'op', None)
+      if inst_op_obj is not None: op_val, op_name = inst_op_obj.value, inst_op_obj.name
+      else: op_val, op_name = 0, ""
+      tcat, is_vopc, is_sdst, is_vopd, is_vopd_lit, is_cmp_lit = _classify(type(inst))
+      recipe = _build_recipe(inst, op_name, op_val, tcat, is_vopc, is_sdst, is_vopd, is_vopd_lit, is_cmp_lit)
+      _recipes[iid] = recipe
+    kind = recipe[0]
+    if kind == 0: return  # SOPP skip
+    if kind == 6:  # VALU
+      _, pkt_cls, base_kw, reg_info = recipe
+      kw = {'wave': w}
+      kw.update(base_kw)
+      events.append((pkt_cls, kw, 'valu', reg_info))
+      return
+    if kind == 2:  # IMMEDIATE
+      events.append((_IMMEDIATE, {'wave': w}, recipe[1], recipe[2]))
+      return
+    if kind == 5:  # generic SALU fallback
+      events.append((_INST, {'wave': w, 'op': _InstOp.SALU}, 'salu', None))
+      return
+    if kind == 8:  # mem op DS/GLOBAL/FLAT/SCRATCH/SALU-mem
+      events.append((_INST, {'wave': w, 'op': recipe[1]}, recipe[2], recipe[3]))
+      return
+    if kind == 4:  # SOPP branch — branch_taken is dynamic
+      events.append((_INST, {'wave': w, 'op': _InstOp.JUMP if branch_taken else _InstOp.JUMP_NO}, 'branch', (recipe[1], recipe[2])))
+      return
+    if kind == 3:  # SOPP barrier
+      events.append((_INST, {'wave': w, 'op': _InstOp.BARRIER}, 'barrier', None))
+      return
+    if kind == 1:  # delay_alu
+      events.append((None, {}, 'delay_alu', recipe[1]))
+      return
+    if kind == 7:  # SMEM
+      events.append((_INST, {'wave': w, 'op': _InstOp.SMEM_RD}, 'smem', recipe[1]))
+      return
 
   def finish(wave_id: int):
     """Record wave completion for deferred encoding."""
@@ -1740,9 +1861,11 @@ def _init_sqtt_encoder(entry_pc: int):
       wave_events.setdefault(wave_id, []).append((WAVEEND, {'simd': 0, 'cu_lo': 0, 'wave': wave_id & 0x1F}, 'waveend', None))
 
   def finalize() -> tuple[bytes, int]:
-    """Run timing simulation, encode interleaved SQTT stream with cycle-accurate deltas. Returns (blob, total_cycles)."""
+    """Run timing simulation, encode interleaved SQTT stream with cycle-accurate deltas. Returns (blob, total_cycles).
+    Under BEAM_EMU=1, skip the blob-encoding tail entirely — beam search only consumes total_cycles."""
     timed = _simulate_sq_timing(wave_events)
     total_cycles = max((ts for ts, _, _, _ in timed), default=0)
+    if os.environ.get("BEAM_EMU") == "1": return b"", total_cycles
     # Sort: all WAVESTARTs first as a preamble (matching real hardware where all wave allocations
     # appear consecutively before any instructions), then remaining packets ordered by timestamp.
     timed.sort(key=lambda x: (0 if x[2] is WAVESTART else 1, x[0]))
@@ -3698,23 +3821,52 @@ def run_asm(lib: int, lib_sz: int, gx: int, gy: int, gz: int, lx: int, ly: int, 
   if PROFILE:
     sqtt_emit, sqtt_finish, sqtt_finalize = _init_sqtt_encoder(lib)
 
-  def _ensure_compiled(pc: int) -> tuple[Callable, list[int], bool, Inst]:
-    if pc not in program:
-      prev_len = len(_canonical_runner_cache)
-      runner, inst = _decode_at(pc, arch)
-      is_barrier = (isinstance(inst, (ir3.SOPP, ir4.SOPP, irc.SOPP)) and inst.op in _BARRIER_OPS) or \
-                   (isinstance(inst, (ir4.SOP1,)) and inst.op in _BARRIER_SOP1_OPS)
-      program[pc] = (runner._prg.fxn, runner.p.globals, is_barrier, inst)
-      if DEBUG >= 3:
-        msg = f"[emu] PC={pc - lib}: {inst!r}"
-        print(colored(msg, 'green') if len(_canonical_runner_cache) > prev_len else msg)
-    return program[pc]
+  # `program` is the per-`run_asm`-call cache (dict[int, tuple]) keyed by pc → (fxn, globals, is_barrier, inst, inst_op_value, next_pc, is_branch).
+  # Because pc is an absolute ELF address and the ELF mapping is stable for the duration of run_asm, a per-call
+  # cache (vs global) is correct: kernels swap between candidates so a global keyed by pc would be unsafe.
+  # PERF: cache inst.op.value, next_pc (= pc + inst.size()) and is_branch flag in the program[] tuple — these are
+  # constants per pc but were previously recomputed every dispatch via hasattr/getattr/method-call.
+  def _ensure_compiled(pc: int, _program=program) -> tuple:
+    try: return _program[pc]
+    except KeyError: pass
+    prev_len = len(_canonical_runner_cache)
+    runner, inst = _decode_at(pc, arch)
+    is_barrier = (isinstance(inst, (ir3.SOPP, ir4.SOPP, irc.SOPP)) and inst.op in _BARRIER_OPS) or \
+                 (isinstance(inst, (ir4.SOP1,)) and inst.op in _BARRIER_SOP1_OPS)
+    op_obj = getattr(inst, 'op', None)
+    inst_op_val = op_obj.value if op_obj is not None else 0
+    next_pc = pc + inst.size()
+    is_branch = inst_op_val in _BRANCH_OPS
+    globals_tuple = tuple(runner.p.globals)
+    # PERF: pre-compute an itemgetter so the hot loop can do `c_bufs.__getitem__`-style indexing
+    # without rebuilding a listcomp each instruction. Store the count separately because
+    # itemgetter(idx) returns a scalar while itemgetter(i,j,...) returns a tuple — so the call
+    # site needs to know how to splat.
+    n_globals = len(globals_tuple)
+    if n_globals == 0: arg_getter = None
+    elif n_globals == 1:
+      # itemgetter(i) returns a scalar — wrap so callsite always gets a tuple.
+      _g0 = globals_tuple[0]
+      arg_getter = lambda c, _g0=_g0: (c[_g0],)
+    else: arg_getter = operator.itemgetter(*globals_tuple)
+    entry = (runner._prg.fxn, globals_tuple, is_barrier, inst, inst_op_val, next_pc, is_branch, arg_getter, n_globals)
+    _program[pc] = entry
+    if DEBUG >= 3:
+      msg = f"[emu] PC={pc - lib}: {inst!r}"
+      print(colored(msg, 'green') if len(_canonical_runner_cache) > prev_len else msg)
+    return entry
 
   # Set DAZ+FTZ during emulator execution, restore afterward to avoid breaking hypothesis tests
   # Only trace the first workgroup (like real HW traces one CU/SIMD), subsequent workgroups run but don't add to trace
   tracing = bool(PROFILE)
 
   with _MXCSRContext():
+    # PERF: hoist closure/global/attribute lookups used by the per-instruction dispatch loop.
+    _program = program
+    _ENDPGM_PC = ENDPGM_PC
+    _DEBUG = DEBUG
+    _sqtt_emit = sqtt_emit if PROFILE else None
+    _sqtt_finish = sqtt_finish if PROFILE else None
     for gidz in range(gz):
       for gidy in range(gy):
         for gidx in range(gx):
@@ -3739,16 +3891,27 @@ def run_asm(lib: int, lib_sz: int, gx: int, gy: int, gz: int, lx: int, ly: int, 
               # Run this wave until barrier or endpgm
               for _ in range(1_000_000):
                 pc = st.pc
-                if pc == ENDPGM_PC:
+                if pc == _ENDPGM_PC:
                   done[wi] = True
-                  if tracing: sqtt_finish(wi)
+                  if tracing: _sqtt_finish(wi)
                   break
-                fxn, globals_list, is_barrier, inst = _ensure_compiled(pc)
-                if DEBUG >= 5: print(f"  exec gid=({gidx},{gidy},{gidz}) w={wi} PC={pc - lib}: {inst!r}", flush=True)
-                fxn(*[c_bufs[g] for g in globals_list])
+                # Inlined _ensure_compiled fast path — saves a Python frame per dispatched instruction.
+                entry = _program.get(pc)
+                if entry is None:
+                  entry = _ensure_compiled(pc)
+                fxn, _globals_tuple, is_barrier, inst, inst_op_val, next_pc, is_branch, arg_getter, n_globals = entry
+                if _DEBUG >= 5: print(f"  exec gid=({gidx},{gidy},{gidz}) w={wi} PC={pc - lib}: {inst!r}", flush=True)
+                # PERF: use precomputed itemgetter (or skip entirely for 0-arg fxns) instead of rebuilding
+                # `[c_bufs[g] for g in globals_list]` each instruction.
+                if arg_getter is None: fxn()
+                else: fxn(*arg_getter(c_bufs))
                 if tracing:
-                  inst_op = inst.op.value if hasattr(inst, 'op') else 0
-                  sqtt_emit(wi, inst, (st.pc != ENDPGM_PC and st.pc != pc + inst.size()) if inst_op in _BRANCH_OPS else None)
+                  if is_branch:
+                    new_pc = st.pc
+                    branch_taken = new_pc != _ENDPGM_PC and new_pc != next_pc
+                  else:
+                    branch_taken = None
+                  _sqtt_emit(wi, inst, branch_taken)
                 if is_barrier: break  # s_barrier hit: PC already advanced past it, pause this wave
               else: raise RuntimeError("exceeded 1M instructions in single wave, likely infinite loop")
             # All waves have either hit barrier or endpgm — release barrier waves for next round
