@@ -328,10 +328,11 @@ class CLikeArgsState(HCQArgsState[ProgramType]):
     self.bind_sints_to_buf(*cast(tuple[sint, ...], vals), buf=self.buf, fmt='I', offset=len(prefix or []) * 4 + len(bufs) * 8)
 
 class HCQProgram(Generic[HCQDeviceType]):
-  def __init__(self, args_state_t:Type[HCQArgsState], dev:HCQDeviceType, name:str, kernargs_alloc_size:int, lib:bytes|None=None, base:int|None=None):
+  def __init__(self, args_state_t:Type[HCQArgsState], dev:HCQDeviceType, name:str, kernargs_alloc_size:int, lib:bytes|None=None, base:int|None=None,
+               full_hsaco:bytes|None=None):
     self.args_state_t, self.dev, self.name, self.kernargs_alloc_size = args_state_t, dev, name, kernargs_alloc_size
     self.prof_prg_counter = next(self.dev.prof_prg_counter)
-    if PROFILE: Compiled.profile_events += [ProfileProgramEvent(dev.device, name, lib, base, self.prof_prg_counter)]
+    if PROFILE: Compiled.profile_events += [ProfileProgramEvent(dev.device, name, lib, base, self.prof_prg_counter, full_hsaco)]
 
   @staticmethod
   def _fini(dev, buf, spec): dev.allocator.free(buf, buf.size, spec)

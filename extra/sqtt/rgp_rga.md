@@ -79,6 +79,26 @@ the PERF token *measures* it.
 
 ### 2.2 The one-line change
 
+> **STOP-PRESS (2026-04-27, hw_team):** clearing the PERF exclude bit is
+> necessary but NOT sufficient on gfx11. Two issues found while running this:
+>
+> 1. The `token_exclude` field in `regSQ_THREAD_TRACE_TOKEN_MASK` is only
+>    **11 bits wide** (bits 0..10). `SQ_TT_TOKEN_EXCLUDE_PERF_SHIFT = 11`
+>    sits *outside* the field — the existing mask at `ops_amd.py:291`
+>    already clips bit 11, so PERF was effectively never excluded by this
+>    register. Setting `SQTT_TOKEN_EXCLUDE=0` therefore changes nothing.
+> 2. After confirming the above with a debug print, captured blobs
+>    contained **0** PERF packets. Per Mesa `ac_sqtt.c`, PERF tokens on
+>    gfx11 stream into the SQTT buffer only when the SQ perfcounter
+>    machinery is armed (`regSQ_PERFCOUNTER_CTRL` + at least one
+>    `SQ_PERFCOUNTER*_SELECT`) **before** `sqtt_start()` runs.
+>    `pmc_start()` exists but isn't called on the SQTT-only capture path.
+>
+> Net: this is closer to proposal (c) than "one-line". Tracking as a
+> follow-up; a `SQTT_INCLUDE_PERF` ContextVar is in place at
+> `ops_amd.py:24-26` but currently a no-op until the perfcounter-arming
+> path is added.
+
 `tinygrad/runtime/ops_amd.py:278`:
 
 ```python

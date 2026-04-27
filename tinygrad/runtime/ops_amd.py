@@ -21,9 +21,9 @@ from tinygrad.runtime.support.memory import AddrSpace
 if getenv("IOCTL"): import extra.hip_gpu_driver.hip_ioctl  # noqa: F401 # pylint: disable=unused-import
 
 SQTT = ContextVar("SQTT", abs(VIZ.value)>=2)
-SQTT_ITRACE_SE_MASK, SQTT_LIMIT_SE, SQTT_SIMD_SEL, SQTT_WGP_SEL, SQTT_SA_SEL, SQTT_TOKEN_EXCLUDE = \
+SQTT_ITRACE_SE_MASK, SQTT_LIMIT_SE, SQTT_SIMD_SEL, SQTT_WGP_SEL, SQTT_SA_SEL, SQTT_TOKEN_EXCLUDE, SQTT_INCLUDE_PERF = \
   ContextVar("SQTT_ITRACE_SE_MASK", 0x3f), ContextVar("SQTT_LIMIT_SE", 0), ContextVar("SQTT_SIMD_SEL", 0), ContextVar("SQTT_WGP_SEL", -1), \
-  ContextVar("SQTT_SA_SEL", 0), ContextVar("SQTT_TOKEN_EXCLUDE", 0)
+  ContextVar("SQTT_SA_SEL", 0), ContextVar("SQTT_TOKEN_EXCLUDE", 0), ContextVar("SQTT_INCLUDE_PERF", 0)
 PMC = ContextVar("PMC", abs(VIZ.value)>=2)
 EVENT_INDEX_PARTIAL_FLUSH = 4 # based on a comment in nvd.h
 WAIT_REG_MEM_FUNCTION_EQ  = 3 # ==
@@ -275,7 +275,10 @@ class AMDComputeQueue(HWQueue):
         self.wreg(self.gc.regSQ_THREAD_TRACE_MASK, wtype_include=cs_wtype, simd_sel=SQTT_SIMD_SEL.value, wgp_sel=wgp_sel, sa_sel=SQTT_SA_SEL.value)
         reg_include = self.soc.SQ_TT_TOKEN_MASK_SQDEC_BIT | self.soc.SQ_TT_TOKEN_MASK_SHDEC_BIT | self.soc.SQ_TT_TOKEN_MASK_GFXUDEC_BIT | \
                       self.soc.SQ_TT_TOKEN_MASK_COMP_BIT | self.soc.SQ_TT_TOKEN_MASK_CONTEXT_BIT
-        token_exclude = SQTT_TOKEN_EXCLUDE.value | ((1 << self.soc.SQ_TT_TOKEN_EXCLUDE_PERF_SHIFT) if self.dev.target < (12,0,0) else 0)
+        # SQTT_INCLUDE_PERF=1 keeps the SQ_TT_TOKEN_PERF packets in the trace (gfx11 default
+        # is to exclude them; rgp_rga.md §2 — measured per-instruction latency for emu rules).
+        perf_default_exclude = (1 << self.soc.SQ_TT_TOKEN_EXCLUDE_PERF_SHIFT) if self.dev.target < (12,0,0) and not SQTT_INCLUDE_PERF.value else 0
+        token_exclude = SQTT_TOKEN_EXCLUDE.value | perf_default_exclude
 
         # disable instr tracing
         if not (SQTT_ITRACE_SE_MASK.value >> se) & 0b1:
@@ -285,6 +288,9 @@ class AMDComputeQueue(HWQueue):
                             1 << self.soc.SQ_TT_TOKEN_EXCLUDE_INST_SHIFT) if self.dev.target < (12,0,0) else 0x927
 
         # Mask token_exclude to field width (11 bits) to prevent overflow into the adjacent ttrace_exec bit.
+        # NOTE on PERF tokens: SQ_TT_TOKEN_EXCLUDE_PERF_SHIFT=11 sits OUTSIDE this 11-bit field — clearing
+        # the bit here is necessary but NOT sufficient. Real PERF emission on gfx11 also requires the SQ
+        # perfcounter machinery to be armed before sqtt_start() (see rgp_rga.md §2 stop-press note).
         token_exclude &= (1 << (self.gc.regSQ_THREAD_TRACE_TOKEN_MASK.fields['token_exclude'][1] + 1)) - 1
 
         self.wreg(self.gc.regSQ_THREAD_TRACE_TOKEN_MASK, reg_include=reg_include, token_exclude=token_exclude, bop_events_token_include=1,
@@ -616,8 +622,13 @@ class AMDProgram(HCQProgram):
 
     if dev.sqtt_enabled: self.libhash: tuple[int, int] = struct.unpack('<Q', hashlib.md5(self.lib).digest()[:8])*2
 
+    # KEEP_FULL_HSACO opt-in: pull the unstripped HSACO that compiler_amd stashed for this lib, so it
+    # can travel with the ProfileProgramEvent and be handed to RGA / llvm-objdump after the fact.
+    from tinygrad.runtime.support.compiler_amd import get_full_hsaco
+    self.full_hsaco: bytes|None = get_full_hsaco(self.lib)
+
     super().__init__(CLikeArgsState, self.dev, self.name, kernargs_alloc_size=self.kernargs_segment_size+additional_alloc_sz, lib=self.lib,
-                     base=self.lib_gpu.va_addr)
+                     base=self.lib_gpu.va_addr, full_hsaco=self.full_hsaco)
     weakref.finalize(self, self._fini, self.dev, self.lib_gpu, buf_spec)
 
   def __call__(self, *bufs, global_size:tuple[int,int,int]=(1,1,1), local_size:tuple[int,int,int]=(1,1,1), vals:tuple[int|None, ...]=(),

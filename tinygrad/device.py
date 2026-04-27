@@ -64,7 +64,7 @@ def canonicalize_device(device:str|tuple|list|None) -> str|tuple[str, ...]:
 class ProfileDeviceEvent(ProfileEvent): device:str; tdiff:decimal.Decimal=decimal.Decimal(0); props:dict[str,Any]|None=None # noqa: E702
 
 @dataclass(frozen=True)
-class ProfileProgramEvent(ProfileEvent): device:str; name:str; lib:bytes|None; base:int|None; tag:int|None=None # noqa: E702
+class ProfileProgramEvent(ProfileEvent): device:str; name:str; lib:bytes|None; base:int|None; tag:int|None=None; full_hsaco:bytes|None=None # noqa: E702
 
 @dataclass(frozen=True)
 class ProfileGraphEntry: device:str; name:str|TracingKey; st_id:int; en_id:int # noqa: E702

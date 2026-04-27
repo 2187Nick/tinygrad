@@ -69,8 +69,13 @@ def capture_raw(name: str, run_fn, max_attempts: int = 10):
     if best is None or len(best[0].blob) < 64:
       continue
     ev, kev = best
-    return {"blob": bytes(ev.blob), "lib": bytes(kev.lib), "target": "gfx1100",
-            "kernel": name, "attempt": attempt, "sqtt_event_count": len(sqtt_events)}
+    out = {"blob": bytes(ev.blob), "lib": bytes(kev.lib), "target": "gfx1100",
+           "kernel": name, "attempt": attempt, "sqtt_event_count": len(sqtt_events)}
+    # KEEP_FULL_HSACO=1 path: include the unstripped HSACO so RGA --livereg/--isa works.
+    # Backward-compatible: omitted when None, older readers ignore unknown keys.
+    full = getattr(kev, "full_hsaco", None)
+    if full is not None: out["full_hsaco"] = bytes(full)
+    return out
   return None
 
 
