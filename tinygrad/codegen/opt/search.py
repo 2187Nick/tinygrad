@@ -35,8 +35,34 @@ def get_test_global_size(global_size, max_global_size, var_vals):
         break
   return test_global_size, input_size / prod(test_global_size)
 
+BEAM_EMU = getenv("BEAM_EMU", 0)
+# Convert cycles → seconds for AMD gfx1100 (7900 XTX base clock ~2.3 GHz). Only matters for
+# log-formatting in BEAM_DEBUG; ordering is preserved by the cycle count itself.
+_AMD_GFX11_HZ = 2.3e9
+
+def _emulate_program_cycles(p:ProgramSpec, lib:bytes, var_vals:dict[str, int], rawbufs:list[Buffer]) -> float:
+  """Dispatch the candidate through the MOCKGPU AMD cycle emulator and return predicted seconds.
+
+  Requires MOCKGPU=1 + PYTHON_REMU=1 in env (the SQTT cycle accumulator only populates under
+  those modes). Returns math.inf on any compile/dispatch failure so BEAM filters the variant out.
+  """
+  try:
+    from test.mockgpu.amd.emu import sqtt_cycle_counts
+  except ImportError:
+    return math.inf
+  before = len(sqtt_cycle_counts)
+  try: car = CompiledRunner(replace(p, lib=lib))
+  except AssertionError: return math.inf
+  input_bufs = [rawbufs[i] for i in car.p.globals]
+  try: car(input_bufs, var_vals, wait=True)
+  except Exception: return math.inf
+  if len(sqtt_cycle_counts) <= before: return math.inf
+  return sqtt_cycle_counts[-1] / _AMD_GFX11_HZ
+
 def _time_program(p:ProgramSpec, lib:bytes, var_vals:dict[str, int], rawbufs:list[Buffer], early_stop:float|None=None,
                   allow_test_size:int=True, max_global_size:int|None=65536, clear_l2=False, cnt=3, name="test", dev_timeout=False) -> list[float]:
+  if BEAM_EMU and p.device.startswith("AMD"):
+    return [_emulate_program_cycles(p, lib, var_vals, rawbufs)] * cnt
   timeout = int(early_stop * 1e3) if dev_timeout and early_stop is not None and early_stop < math.inf else None
   factor = 1
   if allow_test_size and max_global_size is not None:
