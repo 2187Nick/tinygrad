@@ -141,6 +141,16 @@ _simd_arb_shadow_log: list[dict] = []
 # preserves current strict scorecard; A/B test against 50x100 captures before
 # flipping the default.
 _EMU_WGP_PEER_GATE = int(os.environ.get("EMU_WGP_PEER_GATE", "0"))
+# EMU_UNIFORM_VOPD_BANK: when 1, fall back to the previous uniform VOPD bank
+# behavior (no per-instruction +1cy bump on intra-VOPD bank conflict). Default
+# 0 = use the per-instruction VGPR-bank-conflict table (rgp_rga.md §3 Phase 2).
+_UNIFORM_VOPD_BANK = int(os.environ.get("EMU_UNIFORM_VOPD_BANK", "0"))
+# EMU_VOPD_BANK_PENALTY: per-instruction bank-conflict cycle cost. Default 0 because
+# Batch B HW microbenches (mb_vopd_bank_conflict_{src,dst}, mb_vopd_mul_fmac_bank_same)
+# measured 1cy with NO bank penalty, falsifying the rgp_rga.md §3 +1cy hypothesis on
+# the RDNA3 7900 XTX. The table is still built so future HW (RDNA4) or alternative
+# costing experiments can flip this knob without touching emu.py.
+_VOPD_BANK_PENALTY = int(os.environ.get("EMU_VOPD_BANK_PENALTY", "0"))
 _simd_arb_shadow_events: list[dict] = []
 
 # Latency constants (in SQ clock cycles) — tuned against GFX1100 SQTT traces.
@@ -156,6 +166,7 @@ from test.mockgpu.amd.sq_timing.sgpr import SgprScoreboard
 from test.mockgpu.amd.sq_timing.simd_arbiter import SimdArbiter
 from test.mockgpu.amd.sq_timing.trans import TransPipe
 from test.mockgpu.amd.sq_timing.valu import VAluPipe
+from test.mockgpu.amd.sq_timing.vgpr_banks import inst_has_bank_conflict as _vopd_inst_bank_conflict
 from test.mockgpu.amd.sq_timing.vmem import VmemPipe
 _LDS_RD_LATENCY = CONST.LDS_RD_LATENCY
 _LDS_WR_LATENCY = CONST.LDS_WR_LATENCY
@@ -246,10 +257,12 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
   # used by the slot-0 exemption in the wave-credit rule.
   long_raw_chain: list[list[bool]] = []
   raw_chain_L: list[list[int]] = []
+  raw_chain_pos: list[list[int]] = []  # 0-indexed position within the containing chain segment (0 for non-chain)
   wave_valu_count: list[int] = []
   for wid in wave_ids:
     events = wave_events[wid]
     seg_len = [0] * len(events)
+    seg_pos = [0] * len(events)
     p = 0
     while p < len(events):
       _, _, cat_p, ex_p = events[p]
@@ -267,10 +280,13 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
         prev_w = set(vw_e or ())
         end += 1
       L = end - p
-      for q in range(p, end): seg_len[q] = L
+      for q in range(p, end):
+        seg_len[q] = L
+        seg_pos[q] = q - p
       p = end if end > p else p + 1
     long_raw_chain.append([L >= 6 for L in seg_len])
     raw_chain_L.append(list(seg_len))
+    raw_chain_pos.append(list(seg_pos))
     wave_valu_count.append(sum(1 for e in events if e[2] == 'valu'))
 
   # Per-wave state
@@ -900,7 +916,19 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
       _in_chain = (i < len(long_raw_chain) and pc[i] < len(long_raw_chain[i])
                    and long_raw_chain[i][pc[i]])
       _long_fire = _in_chain and i >= 4                         # length ≥ 6 AND wave ≥ 4
-      _short_fire = (_trans_chain_L == 4 and i >= 9)           # length exactly 4 AND wave ≥ 9 (Option D)
+      # Chain-position-gated short-chain stagger:
+      # - Wave ≥ 9 on any trans position in a chain-of-4 (original "Option D")
+      # - Wave ≥ 6 on MIDDLE trans positions (chain_pos 1..L-2) only — the LAST
+      #   trans in a 4-chain is dt=4 unanimous (HW mb_trans_exp_n4 [8]=4 across
+      #   all waves, expansion capture 2026-04-21); applying the +10 there
+      #   regresses MIDDLE-position matches. Split fires at [6] and [7] per
+      #   fingerprint W[0:6]=4 W[6:]=14.
+      _trans_chain_pos = raw_chain_pos[i][pc[i]] if (i < len(raw_chain_pos) and pc[i] < len(raw_chain_pos[i])) else 0
+      _is_last_in_chain = (_trans_chain_L >= 2 and _trans_chain_pos == _trans_chain_L - 1)
+      _is_mid_in_chain  = (_trans_chain_L >= 3 and 1 <= _trans_chain_pos <= _trans_chain_L - 2)
+      _short_fire_full = (_trans_chain_L == 4 and i >= 9 and not _is_last_in_chain)
+      _short_fire_mid  = (_trans_chain_L == 4 and i >= 6 and _is_mid_in_chain)
+      _short_fire = _short_fire_full or _short_fire_mid
       if (trans[i].pipe_avail > 0 and _pre_trans_issue < trans[i].pipe_avail
           and (_long_fire or _short_fire)):
         issue_cycle += 10
@@ -938,6 +966,13 @@ def _simulate_sq_timing(wave_events: dict[int, list]) -> list[tuple[int, int, ty
       # mb_vopd_chain_n4_raw both measure 1cy between VOPDs regardless of whether
       # the second reads a bank the first wrote. The SQ's VGPR forwarding lane
       # handles same-bank read-after-write without an extra cycle.
+      # ─── Per-instruction VGPR-bank conflict (Phase 2 of rgp_rga.md §3) ───
+      # X-side / Y-side intra-VOPD reads are flagged by `vgpr_banks.py`. HW Batch B
+      # measured 0cy penalty on 7900 XTX (BATCH_B_FINDINGS.md), so default
+      # _VOPD_BANK_PENALTY=0 — the table is still built and applied for A/B testing.
+      # Set EMU_UNIFORM_VOPD_BANK=1 to skip the per-instruction lookup entirely.
+      if not _UNIFORM_VOPD_BANK and _VOPD_BANK_PENALTY and kwargs.get('vopd_bank_conflict', False):
+        issue_cycle += _VOPD_BANK_PENALTY
 
     # LIT v_cmp SGPR completion buffer (answer.md): depth-2 writer stall.
     # N-th LIT v_cmp in a chain must wait until (n-2)th has propagated (W[n-2] = I[n-2]+5).
@@ -1627,6 +1662,7 @@ def _init_sqtt_encoder(entry_pc: int):
         opx_name = inst.opx.name if hasattr(inst, 'opx') and hasattr(inst.opx, 'name') else ""
         opy_name = inst.opy.name if hasattr(inst, 'opy') and hasattr(inst.opy, 'name') else ""
         _kw_extras['vopd_mov_only'] = opx_name == 'V_DUAL_MOV_B32' and opy_name == 'V_DUAL_MOV_B32'
+        _kw_extras['vopd_bank_conflict'] = _vopd_inst_bank_conflict(inst)
       if is_int_mul32: _kw_extras['int_mul32'] = True
       if op is None: events.append((VALUINST, {'wave': w, **_kw_extras}, 'valu', reg_info))
       else:
@@ -1724,7 +1760,7 @@ def _init_sqtt_encoder(entry_pc: int):
     prev_time = 0
     for ts, _, pkt_cls, kwargs in timed:
       delta = max(ts - prev_time, 0)
-      enc_kwargs = {k: v for k, v in kwargs.items() if k not in ('trans_name', 'vopd_mov_only', 'int_mul32')}
+      enc_kwargs = {k: v for k, v in kwargs.items() if k not in ('trans_name', 'vopd_mov_only', 'int_mul32', 'vopd_bank_conflict')}
       _emit_with_delta(nibbles, pkt_cls, delta=delta, **enc_kwargs)
       prev_time = max(ts, prev_time)  # actual encoded time; clamped deltas (delta=0) don't advance time
     # Pad to 32-byte alignment

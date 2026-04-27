@@ -6,6 +6,14 @@ the existing per-wave heuristics. Wiring happens in a later step once
 shadow-mode comparison confirms the arbiter reproduces the heuristics'
 outputs on the calibrated microbenches.
 
+VGPR-bank conflict (rgp_rga.md §3 Phase 2)
+-----------------------------------------
+The previous "uniform 1cy VOPD" assumption (file:86 below) is replaced by a
+per-instruction VGPR-bank conflict table built from `vgpr_banks.py`. The
+actual `+1cy` issue-cycle bump fires in `emu.py::_simulate_sq_timing` at the
+VOPD issue site (search for `vopd_bank_conflict`). Set `EMU_UNIFORM_VOPD_BANK=1`
+to fall back to the previous uniform behavior for A/B testing.
+
 Architecture recap
 ------------------
 RDNA3 CU has 4 SIMDs × 32 lanes. A wave64 wave runs on a single SIMD across
@@ -113,6 +121,10 @@ cluster within 2cy, indicating genuine queue pressure).
 from __future__ import annotations
 
 from test.mockgpu.amd.sq_timing.constants import CONST, TimingConstants
+from test.mockgpu.amd.sq_timing.vgpr_banks import (  # re-export for convenience
+  bank_of, inst_has_bank_conflict, vgpr_bank_conflicts,
+)
+__all__ = ('SimdArbiter', 'NO_OWNER', 'N_SIMDS', 'bank_of', 'inst_has_bank_conflict', 'vgpr_bank_conflicts')
 
 
 N_SIMDS = 2   # Compute waves use 2 WGPs (even/odd wave split) — each exposes its SIMD 0 as a port

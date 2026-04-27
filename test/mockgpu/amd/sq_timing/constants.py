@@ -55,6 +55,10 @@ class TimingConstants:
   # ── Barrier / wave launch ────────────────────────────────────────────────
   BARRIER_FROM_LAST: int = 6         # cycles from last wave's barrier issue to release
   WAVESTART_GAP: int = 1             # per-wave stagger at launch
+  # NOTE: HW measurement (expansion capture, 29 kernels, stdev≈0) says 2cy/wave —
+  # i.e. 30cy span across 16 waves. Bumping to 2 was tested and had neutral score
+  # impact (Ref strict -1, MB strict +1) because the gap shifts only the WAVESTART
+  # event, not the [5]-token LINEAR slope which needs a queue-propagation model.
   FIRST_INST_GAP: int = 2            # first instruction gap after wavestart
 
   # ── Exec write ───────────────────────────────────────────────────────────
